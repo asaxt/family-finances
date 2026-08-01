@@ -13,8 +13,12 @@ fi
 export FAMILY_FINANCES_DATA_DIR="${FAMILY_FINANCES_DATA_DIR:-$project_dir}"
 
 if ! /usr/bin/curl -fsS "$app_url/health" >/dev/null 2>&1; then
-  cd "$project_dir" || exit 1
-  /usr/bin/nohup "$project_dir/.venv/bin/python" app.py >> "$log_file" 2>&1 &
+  /bin/launchctl remove local.family-finances >/dev/null 2>&1 || true
+  /bin/launchctl submit \
+    -l local.family-finances \
+    -o "$log_file" \
+    -e "$log_file" \
+    -- "$project_dir/scripts/run_server.sh"
 
   for _ in {1..40}; do
     if /usr/bin/curl -fsS "$app_url/health" >/dev/null 2>&1; then
