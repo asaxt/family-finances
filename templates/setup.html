@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Secure {{ app_name }}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="auth-body">
+  <main class="auth-card">
+    <div class="auth-brand"><span class="brand-mark">{{ app_name[0]|upper }}</span><span>{{ app_name }}</span></div>
+    <p class="eyebrow">One-time setup</p>
+    <h1>Protect your financial dashboard</h1>
+    <p class="auth-copy">Create a password that will be required on this computer. Only a secure hash is stored.</p>
+    {% if error %}<p class="form-message error">{{ error }}</p>{% endif %}
+    <form class="auth-form" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>
+        <span>New password</span>
+        <input type="password" name="password" minlength="12" autocomplete="new-password" autofocus required>
+      </label>
+      <label>
+        <span>Confirm password</span>
+        <input type="password" name="confirmation" minlength="12" autocomplete="new-password" required>
+      </label>
+      <button class="button primary" type="submit">Set password</button>
+    </form>
+    <p class="auth-note">Use at least 12 characters. Setup is available only through localhost on the host computer.</p>
+  </main>
+</body>
+</html>

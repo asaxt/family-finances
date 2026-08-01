@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Settings · {{ app_name }}{% endblock %}
+{% block eyebrow %}Private configuration{% endblock %}
+{% block heading %}Settings{% endblock %}
+
+{% block content %}
+<section class="settings-grid">
+  <article class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>App name</h2>
+        <p>Make this personal finance tool your own.</p>
+      </div>
+    </div>
+    {% if settings_error == "app_name" %}<p class="form-message error">Enter an app name.</p>{% endif %}
+    <form class="settings-form" method="post" action="/api/app-name">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>
+        <span>Display name</span>
+        <input name="app_name" value="{{ app_name }}" maxlength="40" required>
+      </label>
+      <p class="security-note">This name appears in the sidebar, sign-in screen, browser title, and Plaid Link.</p>
+      <button class="button primary" type="submit">Save app name</button>
+    </form>
+  </article>
+
+  <article class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Plaid developer account</h2>
+        <p>These credentials are encrypted inside your local vault.</p>
+      </div>
+      <span class="pill {{ 'configured' if plaid_configured }}">{{ "Configured" if plaid_configured else "Needs setup" }}</span>
+    </div>
+    {% if settings_error == "plaid" %}<p class="form-message error">Enter a Client ID and Production secret.</p>{% endif %}
+    <form class="settings-form" method="post" action="/api/plaid-settings">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>
+        <span>Plaid Client ID</span>
+        <input name="client_id" value="{{ plaid_client_id }}" autocomplete="off" required>
+      </label>
+      <label>
+        <span>Production secret</span>
+        <input type="password" name="secret" autocomplete="new-password" placeholder="{{ 'Leave blank to keep the saved secret' if plaid_configured else 'Enter Production secret' }}">
+      </label>
+      <p class="security-note">The saved secret is never displayed again. Each installation must use credentials from its own Plaid developer account.</p>
+      <button class="button primary" type="submit">Save Plaid settings</button>
+    </form>
+  </article>
+
+  <article class="panel">
+    <div class="panel-header"><div><h2>Local data protection</h2><p>How this installation protects financial information</p></div></div>
+    <div class="insight-list">
+      <div class="insight"><span class="insight-icon">✓</span><span><strong>Encrypted at rest</strong><br>The database, Plaid secret, access tokens, transactions, and savings data are stored in one authenticated encrypted vault.</span></div>
+      <div class="insight"><span class="insight-icon">⌁</span><span><strong>Unlocked by your app password</strong><br>The password decrypts a key that exists in memory only while the app is unlocked.</span></div>
+      <div class="insight"><span class="insight-icon">⌂</span><span><strong>Localhost only</strong><br>The app remains limited to this computer at 127.0.0.1.</span></div>
+    </div>
+    <p class="security-note">Keep full-disk encryption and encrypted backups enabled. Encryption cannot protect data from malicious software already running as your signed-in computer account while the app is unlocked.</p>
+  </article>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{% if settings_saved == "plaid" %}<script>showNotice("Plaid settings saved securely.");</script>{% endif %}
+{% if settings_saved == "app_name" %}<script>showNotice("App name updated.");</script>{% endif %}
+{% endblock %}

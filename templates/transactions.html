@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Transactions · {{ app_name }}{% endblock %}
+{% block eyebrow %}The complete record{% endblock %}
+{% block heading %}Transactions{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="panel-header transaction-header">
+    <div>
+      <h2>{{ transactions|length }} result{{ "" if transactions|length == 1 else "s" }}</h2>
+      <p>
+        {% if date_from or date_to %}Showing {{ date_from or "the beginning" }} through {{ date_to or "today" }}
+        {% else %}Showing your complete available transaction history{% endif %}
+      </p>
+    </div>
+    <span class="pill">{{ profiles|length }} household member{{ "" if profiles|length == 1 else "s" }}</span>
+  </div>
+  <form class="transaction-tools transaction-filterbar" method="get">
+    <input type="hidden" name="account" value="{{ account_id or '' }}">
+    <input type="hidden" name="person" value="{{ connection_id or '' }}">
+    <label>From<input type="date" name="date_from" value="{{ date_from }}"></label>
+    <label>To<input type="date" name="date_to" value="{{ date_to }}"></label>
+    <label>Search<input class="search-input" type="search" name="q" value="{{ search_query }}" placeholder="Merchant or description"></label>
+    <label>Category
+      <select name="category">
+        <option value="">All categories</option>
+        {% for category in category_options %}<option value="{{ category }}" {{ "selected" if category == selected_category }}>{{ category }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>View
+      <select name="view">
+        <option value="active" {{ "selected" if transaction_view == "active" }}>Active transactions</option>
+        <option value="excluded" {{ "selected" if transaction_view == "excluded" }}>Excluded only</option>
+        <option value="all" {{ "selected" if transaction_view == "all" }}>Active and excluded</option>
+      </select>
+    </label>
+    <button class="button compact" type="submit">Apply filters</button>
+    {% if date_from or date_to or search_query or selected_category or transaction_view != "active" %}<a class="text-link clear-link" href="/transactions?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">Clear table filters</a>{% endif %}
+  </form>
+
+  <form id="bulk-transaction-form" class="bulk-action-bar" method="post" action="/api/transactions/bulk">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="account" value="{{ account_id or '' }}">
+    <input type="hidden" name="person" value="{{ connection_id or '' }}">
+    <input type="hidden" name="date_from" value="{{ date_from }}">
+    <input type="hidden" name="date_to" value="{{ date_to }}">
+    <input type="hidden" name="return_q" value="{{ search_query }}">
+    <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
+    <input type="hidden" name="return_view" value="{{ transaction_view }}">
+    <span><strong id="selected-count">0</strong> selected</span>
+    <div>
+      {% if transaction_view in ["excluded", "all"] %}<button class="button secondary bulk-button" type="submit" name="action" value="restore" disabled>Restore selected</button>{% endif %}
+      {% if transaction_view in ["active", "all"] %}<button class="button primary bulk-button" type="submit" name="action" value="exclude" disabled>Exclude selected</button>{% endif %}
+    </div>
+  </form>
+
+  <div class="table-wrap transaction-table-wrap">
+    <table>
+      <thead><tr><th class="select-column"><input id="select-all-transactions" type="checkbox" aria-label="Select every visible transaction"></th><th>Date</th><th>Merchant</th><th>Category</th><th>Card</th><th>Status</th><th class="currency">Amount</th><th>Review</th></tr></thead>
+      <tbody>
+        {% for transaction in transactions %}
+          <tr class="{{ 'muted-row' if transaction.excluded and transaction_view != 'excluded' }}">
+            <td class="select-column"><input class="transaction-select" type="checkbox" name="transaction_ids" value="{{ transaction.id }}" form="bulk-transaction-form" aria-label="Select {{ transaction.merchant or transaction.description }}"></td>
+            <td>{{ transaction.transacted_at }}</td>
+            <td>
+              <div class="transaction-name">{{ transaction.merchant or transaction.description }}</div>
+              {% if transaction.merchant and transaction.description != transaction.merchant %}<div class="transaction-sub">{{ transaction.description }}</div>{% endif %}
+            </td>
+            <td><span class="pill">{{ transaction.effective_category }}</span></td>
+            <td>{{ transaction.owner_name }} · {{ transaction.account_name }}<div class="transaction-sub">····{{ transaction.mask }}</div></td>
+            <td>
+              {% if transaction.excluded %}<span class="pill excluded">Excluded</span>
+              {% elif transaction.pending %}<span class="pill pending">Pending</span>
+              {% else %}<span class="transaction-sub">Posted</span>{% endif %}
+            </td>
+            <td class="currency {{ 'credit' if transaction.amount < 0 }}">{% if transaction.amount < 0 %}+{{ (-transaction.amount)|money }}{% else %}{{ transaction.amount|money }}{% endif %}</td>
+            <td>
+              <button
+                class="text-button review-button"
+                type="button"
+                data-id="{{ transaction.id }}"
+                data-name="{{ transaction.merchant or transaction.description }}"
+                data-category="{{ transaction.category }}"
+                data-override="{{ transaction.category_override or '' }}"
+                data-excluded="{{ transaction.excluded }}"
+              >Review</button>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8" class="empty">No transactions match these filters.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<dialog id="transaction-review-dialog" class="connection-dialog transaction-review-dialog">
+  <div class="dialog-header">
+    <div><p class="eyebrow">Review transaction</p><h2 id="review-transaction-name">Transaction</h2></div>
+    <button class="dialog-close review-dialog-close" type="button" aria-label="Close">×</button>
+  </div>
+  <form id="transaction-review-form" class="review-form" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="account" value="{{ account_id or '' }}">
+    <input type="hidden" name="person" value="{{ connection_id or '' }}">
+    <input type="hidden" name="date_from" value="{{ date_from }}">
+    <input type="hidden" name="date_to" value="{{ date_to }}">
+    <input type="hidden" name="return_q" value="{{ search_query }}">
+    <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
+    <input type="hidden" name="return_view" value="{{ transaction_view }}">
+    <label>Category<input id="review-category" type="text" name="category"></label>
+    <label class="check-label"><input id="review-excluded" type="checkbox" name="excluded"> Exclude from spending totals</label>
+    <button class="button primary" type="submit">Save changes</button>
+  </form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const reviewDialog = document.querySelector("#transaction-review-dialog");
+  const reviewForm = document.querySelector("#transaction-review-form");
+  const reviewCategory = document.querySelector("#review-category");
+  const reviewExcluded = document.querySelector("#review-excluded");
+  const transactionCheckboxes = [...document.querySelectorAll(".transaction-select")];
+  const selectAll = document.querySelector("#select-all-transactions");
+  const bulkButtons = document.querySelectorAll(".bulk-button");
+  const selectedCount = document.querySelector("#selected-count");
+
+  function updateBulkSelection() {
+    const count = transactionCheckboxes.filter(checkbox => checkbox.checked).length;
+    selectedCount.textContent = count;
+    bulkButtons.forEach(button => button.disabled = count === 0);
+    selectAll.checked = count > 0 && count === transactionCheckboxes.length;
+    selectAll.indeterminate = count > 0 && count < transactionCheckboxes.length;
+    transactionCheckboxes.forEach(checkbox => checkbox.closest("tr").classList.toggle("selected-row", checkbox.checked));
+  }
+  selectAll.addEventListener("change", () => {
+    transactionCheckboxes.forEach(checkbox => checkbox.checked = selectAll.checked);
+    updateBulkSelection();
+  });
+  transactionCheckboxes.forEach(checkbox => checkbox.addEventListener("change", updateBulkSelection));
+
+  document.querySelectorAll(".review-button").forEach(button => {
+    button.addEventListener("click", () => {
+      document.querySelector("#review-transaction-name").textContent = button.dataset.name;
+      reviewForm.action = `/api/transaction/${encodeURIComponent(button.dataset.id)}`;
+      reviewCategory.value = button.dataset.override;
+      reviewCategory.placeholder = button.dataset.category;
+      reviewExcluded.checked = button.dataset.excluded === "1";
+      reviewDialog.showModal();
+    });
+  });
+  document.querySelector(".review-dialog-close").addEventListener("click", () => reviewDialog.close());
+  reviewDialog.addEventListener("click", event => {
+    if (event.target === reviewDialog) reviewDialog.close();
+  });
+</script>
+{% endblock %}

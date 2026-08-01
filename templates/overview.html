@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Overview · {{ app_name }}{% endblock %}
+{% block eyebrow %}{{ month_label }}{% endblock %}
+{% block heading %}Spending overview{% endblock %}
+
+{% block content %}
+<section class="metric-grid">
+  <article class="metric-card hero">
+    <span class="metric-label">Total spending</span>
+    <div class="metric-value">{{ summary.total|money }}</div>
+    <span class="metric-note">Posted purchases across {{ summary.card_totals|length }} card{{ "" if summary.card_totals|length == 1 else "s" }}</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Compared with last month</span>
+    <div class="metric-value {{ 'up' if summary.change and summary.change > 0 else 'down' }}">
+      {% if summary.change is not none %}{{ "%+.0f"|format(summary.change) }}%{% else %}—{% endif %}
+    </div>
+    <span class="metric-note">{{ summary.prior_total|money }} · {{ summary.comparison_label }}</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Daily average</span>
+    <div class="metric-value">{{ summary.daily_average|money }}</div>
+    <span class="metric-note">Across {{ summary.elapsed_days }} day{{ "" if summary.elapsed_days == 1 else "s" }}</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Projected month</span>
+    <div class="metric-value">{{ summary.projected_total|money }}</div>
+    <span class="metric-note">
+      {% if summary.budget_total and not account_id and not connection_id %}{{ summary.budget_total|money }} total budget{% else %}Based on your pace so far{% endif %}
+    </span>
+  </article>
+</section>
+
+<section class="panel balance-panel">
+  <div class="panel-header balance-header">
+    <div>
+      <h2>Current card balances</h2>
+      <p>Plaid’s latest cached posted balances; pending purchases or payments may differ</p>
+    </div>
+    {% if credit_balances %}
+      <div class="balance-total">
+        <span>Total owed</span>
+        <strong>{{ credit_balance_total|money }}</strong>
+      </div>
+    {% endif %}
+  </div>
+  {% if credit_balances %}
+    <div class="balance-card-grid">
+      {% for card in credit_balances %}
+        <div class="balance-card">
+          <span>{{ card.owner_name }} · {{ card.name }} ····{{ card.mask }}</span>
+          <strong>{{ card.current_balance|money }}</strong>
+        </div>
+      {% endfor %}
+    </div>
+    <p class="balance-timestamp">Checked {{ credit_balance_updated_at[:16]|replace("T", " ") }} during the latest sync.</p>
+  {% else %}
+    <div class="empty compact-empty">Use Sync once to retrieve the latest cached card balances.</div>
+  {% endif %}
+</section>
+
+<section class="panel overview-insights">
+  <div class="panel-header">
+    <div>
+      <h2>What stands out</h2>
+      <p>A quick read on this month</p>
+    </div>
+    <a class="text-link" href="/trends?month={{ month }}{{ person_query }}{{ account_query }}">Explore long-term trends →</a>
+  </div>
+  <div class="insight-list">
+    {% for insight in summary.insights %}
+      <div class="insight"><span class="insight-icon">{{ ["◒", "↗", "◇"][loop.index0 % 3] }}</span><span>{{ insight }}</span></div>
+    {% else %}
+      <div class="empty">Sync transactions to see spending insights.</div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="content-grid">
+  <article class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Top categories</h2>
+        <p>Where the largest share of your money went</p>
+      </div>
+      <a class="text-link" href="/categories?month={{ month }}{{ person_query }}{{ account_query }}">View all →</a>
+    </div>
+    <div class="rank-list">
+      {% for category in summary.categories[:6] %}
+        <a class="rank-row" href="/transactions?month={{ month }}&category={{ category.name|urlencode }}{{ person_query }}{{ account_query }}">
+          <span class="rank-number">{{ "%02d"|format(loop.index) }}</span>
+          <span>
+            <span class="rank-name">{{ category.name }}</span>
+            <span class="rank-meta">{{ category.transaction_count }} transaction{{ "" if category.transaction_count == 1 else "s" }} · {{ "%.0f"|format(category.amount / summary.total * 100 if summary.total else 0) }}%</span>
+            <span class="progress"><span style="width: {{ category.amount / summary.categories[0].amount * 100 if summary.categories else 0 }}%"></span></span>
+          </span>
+          <span class="rank-amount">{{ category.amount|money }}</span>
+        </a>
+      {% else %}
+        <div class="empty">No spending found for this month.</div>
+      {% endfor %}
+    </div>
+  </article>
+
+  <article class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Top merchants</h2>
+        <p>Your most significant destinations</p>
+      </div>
+    </div>
+    <div class="rank-list">
+      {% for merchant in summary.merchants[:6] %}
+        <div class="rank-row">
+          <span class="rank-number">{{ "%02d"|format(loop.index) }}</span>
+          <span><span class="rank-name">{{ merchant.name }}</span><span class="rank-meta">{{ merchant.transaction_count }} visit{{ "" if merchant.transaction_count == 1 else "s" }}</span></span>
+          <span class="rank-amount">{{ merchant.amount|money }}</span>
+        </div>
+      {% else %}
+        <div class="empty">No merchant data yet.</div>
+      {% endfor %}
+    </div>
+  </article>
+</section>
+
+<section class="panel recent-panel">
+  <div class="panel-header">
+    <div>
+      <h2>Recent activity</h2>
+      <p>The latest purchases in this view</p>
+    </div>
+    <a class="text-link" href="/transactions?month={{ month }}{{ person_query }}{{ account_query }}">See every transaction →</a>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th>Card</th><th class="currency">Amount</th></tr></thead>
+      <tbody>
+        {% for transaction in recent %}
+          <tr>
+            <td>{{ transaction.transacted_at }}</td>
+            <td><span class="transaction-name">{{ transaction.merchant or transaction.description }}</span>{% if transaction.pending %}<span class="pill pending">Pending</span>{% endif %}</td>
+            <td><span class="pill">{{ transaction.effective_category }}</span></td>
+            <td>{{ transaction.owner_name }} · {{ transaction.account_name }} ····{{ transaction.mask }}</td>
+            <td class="currency {{ 'credit' if transaction.amount < 0 }}">{% if transaction.amount < 0 %}+{{ (-transaction.amount)|money }}{% else %}{{ transaction.amount|money }}{% endif %}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="empty">No transactions found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}Savings · {{ app_name }}{% endblock %}
+{% block eyebrow %}The other side of the equation{% endblock %}
+{% block heading %}Savings & investments{% endblock %}
+
+{% block content %}
+<section class="metric-grid savings-metrics">
+  <article class="metric-card hero">
+    <span class="metric-label">Goal-eligible savings</span>
+    <div class="metric-value">{{ goal_eligible_total|money }}</div>
+    <span class="metric-note">From the accounts you chose</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Remaining to goal</span>
+    <div class="metric-value">{{ savings_goal_remaining|money }}</div>
+    <span class="metric-note">{{ "%.1f"|format(savings_goal_percent) }}% of {{ savings_goal|money }}</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">All tracked savings</span>
+    <div class="metric-value">{{ all_savings_total|money }}</div>
+    <span class="metric-note">Latest balance from {{ savings_accounts|length }} active account{{ "" if savings_accounts|length == 1 else "s" }}</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Taxable</span>
+    <div class="metric-value">{{ classification_totals.taxable|money }}</div>
+    <span class="metric-note">Pre-tax {{ classification_totals.pre_tax|money }} · Post-tax {{ classification_totals.post_tax|money }}</span>
+  </article>
+</section>
+
+{% if savings_error %}
+  <p class="form-message error savings-page-message">
+    {% if savings_error == "future" %}The balance date cannot be in the future.
+    {% elif savings_error == "amount" %}Enter balances as positive dollar amounts.
+    {% elif savings_error == "empty" %}Enter at least one balance.
+    {% elif savings_error == "goal" %}Enter a goal greater than zero.
+    {% elif savings_error == "account" %}Enter an institution, account name, and classification.
+    {% else %}Choose a valid balance date.{% endif %}
+  </p>
+{% endif %}
+
+<section class="panel savings-goal-panel">
+  <div class="goal-heading">
+    <div>
+      <p class="eyebrow">Your savings goal</p>
+      <h2>{{ goal_eligible_total|money }} of {{ savings_goal|money }}</h2>
+    </div>
+    <strong>{{ "%.1f"|format(savings_goal_percent) }}%</strong>
+  </div>
+  <div class="progress savings-goal-progress">
+    <span style="width: {{ [savings_goal_percent, 100]|min }}%"></span>
+  </div>
+  <div class="goal-footer">
+    <p class="goal-note">
+      {% if savings_goal_remaining %}{{ savings_goal_remaining|money }} remains.
+      {% else %}Goal reached.{% endif %}
+      Only accounts marked goal-eligible are included.
+    </p>
+    <form class="goal-form" method="post" action="/api/savings-goal">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label><span>Change goal</span><span class="currency-input"><span>$</span><input type="number" name="goal" min="1" step="1" value="{{ '%.0f'|format(savings_goal / 100) }}" required></span></label>
+      <button class="button secondary" type="submit">Update goal</button>
+    </form>
+  </div>
+</section>
+
+<section class="content-grid savings-entry-grid">
+  <article class="panel" id="record-balances">
+    <div class="panel-header">
+      <div><h2>Record current balances</h2><p>Enter any balances you know and leave the others blank</p></div>
+    </div>
+    {% if savings_accounts %}
+      <form class="savings-form" method="post" action="/api/savings">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label class="balance-date"><span>Balances as of</span><input type="date" name="recorded_on" value="{{ today }}" max="{{ today }}" required></label>
+        <div class="savings-input-grid">
+          {% for account in savings_accounts %}
+            <label>
+              <span>{{ account.institution }} · {{ account.owner_name }}</span>
+              <strong>{{ account.name }}</strong>
+              <span class="currency-input"><span>$</span><input type="number" name="account_{{ account.id }}" min="0" max="9999999999" step="0.01" inputmode="decimal" placeholder="{{ '%.2f'|format(account.amount / 100) if account.recorded_on else '0.00' }}"></span>
+              <small>{% if account.recorded_on %}Latest: {{ account.amount|money }} on {{ account.recorded_on }}{% else %}No balance recorded yet{% endif %}</small>
+            </label>
+          {% endfor %}
+        </div>
+        <div class="form-footer"><p>Submitting the same account and date updates that entry.</p><button class="button primary" type="submit">Save balances</button></div>
+      </form>
+    {% else %}
+      <div class="empty">Add a manual account below to start tracking savings.</div>
+    {% endif %}
+  </article>
+
+  <article class="panel">
+    <div class="panel-header"><div><h2>Latest balances</h2><p>Each account keeps its own update date</p></div></div>
+    <div class="savings-account-list">
+      {% for account in savings_accounts %}
+        <div class="savings-account-row">
+          <span><strong>{{ account.institution }}</strong><small>{{ account.name }} · {{ account.classification_label }}{% if account.goal_eligible %} · Goal-eligible{% endif %}</small></span>
+          <span class="savings-account-value"><strong>{{ account.amount|money if account.recorded_on else "—" }}</strong><small>{{ account.recorded_on or "Needs an entry" }}</small></span>
+        </div>
+      {% else %}
+        <div class="empty compact-empty">No accounts yet.</div>
+      {% endfor %}
+    </div>
+  </article>
+</section>
+
+<section class="panel savings-history-panel">
+  <div class="panel-header"><div><h2>Savings over time</h2><p>Totals use the latest available balance for each active account</p></div></div>
+  {% if savings_timeline %}<div class="chart-large"><canvas id="savings-chart"></canvas></div>{% else %}<div class="empty">Record your first balance to begin the savings timeline.</div>{% endif %}
+</section>
+
+{% if savings_history %}
+<section class="panel savings-history-panel">
+  <div class="panel-header"><div><h2>Balance history</h2><p>Your most recent manual entries</p></div></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Date</th><th>Institution</th><th>Account</th><th>Classification</th><th class="currency">Balance</th></tr></thead>
+    <tbody>{% for entry in savings_history[:24] %}<tr><td>{{ entry.recorded_on }}</td><td class="transaction-name">{{ entry.institution }}</td><td>{{ entry.name }}</td><td><span class="pill">{{ entry.classification_label }}</span></td><td class="currency">{{ entry.amount|money }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endif %}
+
+<section class="panel savings-history-panel" id="manage-accounts">
+  <div class="panel-header"><div><h2>Manage manual accounts</h2><p>Add accounts from any institution. No bank connection is created.</p></div></div>
+  <form class="manual-account-form add-account-form" method="post" action="/api/manual-accounts">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Institution<input name="institution" maxlength="80" placeholder="Institution" required></label>
+    <label>Account name<input name="name" maxlength="80" placeholder="Account name" required></label>
+    <label>Owner<input name="owner_name" maxlength="40" placeholder="Household"></label>
+    <label>Classification<select name="classification" required>{% for value, label in classification_labels.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label>
+    <label class="check-label"><input type="checkbox" name="goal_eligible"> Count toward goal</label>
+    <label class="check-label"><input type="checkbox" name="reminder_enabled" checked> Monthly reminder</label>
+    <button class="button primary" type="submit">Add account</button>
+  </form>
+
+  <div class="managed-account-list">
+    {% for account in savings_accounts + archived_savings_accounts %}
+      <details class="managed-account" {% if account.archived %}data-archived="true"{% endif %}>
+        <summary><span><strong>{{ account.institution }} · {{ account.name }}</strong><small>{{ account.owner_name }} · {{ account.classification_label }}{% if account.archived %} · Archived{% endif %}</small></span><span>Edit</span></summary>
+        <form class="manual-account-form" method="post" action="/api/manual-accounts/{{ account.id }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <label>Institution<input name="institution" maxlength="80" value="{{ account.institution }}" required></label>
+          <label>Account name<input name="name" maxlength="80" value="{{ account.name }}" required></label>
+          <label>Owner<input name="owner_name" maxlength="40" value="{{ account.owner_name }}"></label>
+          <label>Classification<select name="classification">{% for value, label in classification_labels.items() %}<option value="{{ value }}" {{ "selected" if value == account.classification }}>{{ label }}</option>{% endfor %}</select></label>
+          <label class="check-label"><input type="checkbox" name="goal_eligible" {{ "checked" if account.goal_eligible }}> Count toward goal</label>
+          <label class="check-label"><input type="checkbox" name="reminder_enabled" {{ "checked" if account.reminder_enabled }}> Monthly reminder</label>
+          <label class="check-label"><input type="checkbox" name="archived" {{ "checked" if account.archived }}> Archived</label>
+          <button class="button secondary" type="submit">Save account</button>
+        </form>
+      </details>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  {% if saved_count == "goal" %}showNotice("Savings goal updated.");
+  {% elif saved_count == "account" %}showNotice("Account settings saved.");
+  {% elif saved_count %}showNotice("Saved {{ saved_count }} balance {{ 'entry' if saved_count == '1' else 'entries' }}.");{% endif %}
+  const savingsTimeline = {{ savings_timeline|tojson }};
+  if (savingsTimeline.length) {
+    new Chart(document.querySelector("#savings-chart"), {
+      type: "line",
+      data: {
+        labels: savingsTimeline.map(point => point.date),
+        datasets: [
+          { label: "Total saved", data: savingsTimeline.map(point => point.total / 100), borderColor: "#163f32", backgroundColor: "rgba(22, 63, 50, .08)", borderWidth: 3, pointRadius: 3, tension: .22, fill: true },
+          { label: "Taxable", data: savingsTimeline.map(point => point.taxable / 100), borderColor: "#e7a944", borderWidth: 2, pointRadius: 2, tension: .22 },
+          { label: "Pre-tax", data: savingsTimeline.map(point => point.pre_tax / 100), borderColor: "#6686c4", borderWidth: 2, pointRadius: 2, tension: .22 },
+          { label: "Post-tax", data: savingsTimeline.map(point => point.post_tax / 100), borderColor: "#b76a79", borderWidth: 2, pointRadius: 2, tension: .22 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+        scales: { y: { beginAtZero: true, ticks: { callback: value => `$${Number(value).toLocaleString()}` }, grid: { color: "#edf0ed" } }, x: { grid: { display: false } } },
+        plugins: { legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 8 } }, tooltip: { callbacks: { label: item => `${item.dataset.label}: $${item.raw.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}` } } }
+      }
+    });
+  }
+</script>
+{% endblock %}

@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Categories · {{ app_name }}{% endblock %}
+{% block eyebrow %}{{ month_label }}{% endblock %}
+{% block heading %}Where your money went{% endblock %}
+
+{% block content %}
+<section class="content-grid category-summary">
+  <article class="panel">
+    <div class="panel-header"><div><h2>Spending mix</h2><p>Each category's share of {{ summary.total|money }}</p></div></div>
+    <div class="donut-layout">
+      <div class="chart-medium"><canvas id="category-chart"></canvas></div>
+      <div class="rank-list">
+        {% for category in summary.categories[:6] %}
+          <a class="rank-row" href="/transactions?month={{ month }}&category={{ category.name|urlencode }}{{ person_query }}{{ account_query }}">
+            <span class="card-swatch" style="background: {{ ['#24634e', '#e7a944', '#6686c4', '#b76a79', '#70a58b', '#c19462'][loop.index0 % 6] }}"></span>
+            <span class="rank-name">{{ category.name }}</span>
+            <span class="rank-amount">{{ category.amount|money }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+  </article>
+  <article class="panel">
+    <div class="panel-header"><div><h2>Budget snapshot</h2><p>Optional guardrails for the month</p></div></div>
+    {% if account_id or connection_id %}
+      <div class="empty compact-empty">Category budgets apply across all cards. Choose “All cards” above to view or edit them.</div>
+    {% elif summary.budget_total %}
+      {% set budget_percent = summary.budget_spent / summary.budget_total * 100 %}
+      <div class="budget-total">{{ summary.budget_spent|money }} <span>of {{ summary.budget_total|money }}</span></div>
+      <div class="progress large {{ 'over' if budget_percent > 100 }}"><span style="width: {{ [budget_percent, 100]|min }}%"></span></div>
+      <p class="budget-message">
+        {% if summary.budget_spent <= summary.budget_total %}{{ (summary.budget_total - summary.budget_spent)|money }} remains in your category budgets.
+        {% else %}Budgeted-category spending is {{ (summary.budget_spent - summary.budget_total)|money }} above target.{% endif %}
+      </p>
+    {% else %}
+      <div class="empty compact-empty">Add a monthly target to any category below to start tracking a budget.</div>
+    {% endif %}
+  </article>
+</section>
+
+<section class="section-heading">
+  <div><h2>Category details</h2><p>See the merchants behind each total and add optional monthly targets.</p></div>
+</section>
+<section class="category-grid">
+  {% for category in category_details %}
+    {% set percent = category.amount / summary.total * 100 if summary.total else 0 %}
+    {% set budget_percent = category.amount / category.budget * 100 if category.budget else 0 %}
+    <article class="category-card">
+      <div class="category-top">
+        <div>
+          <h3>{{ category.name }}</h3>
+          <span class="rank-meta">{{ category.transaction_count }} transaction{{ "" if category.transaction_count == 1 else "s" }} · {{ "%.0f"|format(percent) }}% of total</span>
+        </div>
+        <span class="category-amount">{{ category.amount|money }}</span>
+      </div>
+      {% if category.budget %}
+        <div class="budget-caption"><span>{{ "%.0f"|format(budget_percent) }}% of budget</span><span>{{ category.budget|money }}</span></div>
+        <div class="progress {{ 'over' if budget_percent > 100 }}"><span style="width: {{ [budget_percent, 100]|min }}%"></span></div>
+      {% endif %}
+      <div class="category-merchants">
+        {% for merchant in category.merchants[:3] %}
+          <div class="merchant-line"><span>{{ merchant.name }}</span><strong>{{ merchant.amount|money }}</strong></div>
+        {% endfor %}
+      </div>
+      <div class="category-actions">
+        {% if not account_id and not connection_id %}
+          <form class="budget-form" method="post" action="/api/budget">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="month" value="{{ month }}">
+            <input type="hidden" name="account" value="">
+            <input type="hidden" name="person" value="">
+            <input type="hidden" name="category" value="{{ category.name }}">
+            <label class="sr-only" for="budget-{{ loop.index }}">Monthly budget for {{ category.name }}</label>
+            <span class="currency-input"><span>$</span><input id="budget-{{ loop.index }}" type="number" name="amount" min="0" step="1" value="{{ '%.0f'|format(category.budget / 100) if category.budget else '' }}" placeholder="Budget"></span>
+            <button class="icon-button" type="submit">Save</button>
+          </form>
+        {% endif %}
+        <a class="text-link" href="/transactions?month={{ month }}&category={{ category.name|urlencode }}{{ person_query }}{{ account_query }}">Details →</a>
+      </div>
+    </article>
+  {% else %}
+    <div class="panel empty">No spending categories found for this month.</div>
+  {% endfor %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const categories = {{ summary.categories|tojson }};
+  new Chart(document.querySelector("#category-chart"), {
+    type: "doughnut",
+    data: {
+      labels: categories.map(item => item.name),
+      datasets: [{ data: categories.map(item => item.amount / 100), backgroundColor: ["#24634e", "#e7a944", "#6686c4", "#b76a79", "#70a58b", "#c19462", "#8b6fac", "#d68555", "#6b999f", "#9b9c59", "#bf788f", "#50789a"], borderWidth: 3, borderColor: "#fff" }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, cutout: "68%", plugins: { legend: { display: false }, tooltip: { callbacks: { label: item => `${item.label}: $${item.raw.toLocaleString(undefined, {minimumFractionDigits: 2})}` } } } }
+  });
+</script>
+{% endblock %}

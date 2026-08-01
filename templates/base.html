@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  {% if active in ["trends", "categories", "savings"] %}<script src="/static/vendor/chart.umd.min.js"></script>{% endif %}
+</head>
+<body>
+  {% set person_query = '&person=' ~ connection_id if connection_id else '' %}
+  {% set account_query = '&account=' ~ account_id if account_id else '' %}
+  <aside class="sidebar">
+    <a class="brand" href="/">
+      <span class="brand-mark">{{ app_name[0]|upper }}</span>
+      <span>{{ app_name }}</span>
+    </a>
+    <nav class="nav">
+      <a class="{{ 'active' if active == 'overview' }}" href="/?month={{ month }}{{ person_query }}{{ account_query }}">
+        <span>⌂</span> Overview
+      </a>
+      <a class="{{ 'active' if active == 'trends' }}" href="/trends?month={{ month }}{{ person_query }}{{ account_query }}">
+        <span>⌁</span> Trends
+      </a>
+      <a class="{{ 'active' if active == 'categories' }}" href="/categories?month={{ month }}{{ person_query }}{{ account_query }}">
+        <span>◫</span> Categories
+      </a>
+      <a class="{{ 'active' if active == 'transactions' }}" href="/transactions?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">
+        <span>≡</span> Transactions
+      </a>
+      <a class="{{ 'active' if active == 'savings' }}" href="/savings">
+        <span>◇</span> Savings
+      </a>
+      <a class="{{ 'active' if active == 'settings' }}" href="/settings">
+        <span>⚙</span> Settings
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="sidebar-privacy">
+        <div class="privacy-dot"></div>
+        <div><strong>Private & local</strong><small>Your financial data stays on this computer.</small></div>
+      </div>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="logout-button" type="submit">Lock app</button>
+      </form>
+    </div>
+  </aside>
+
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">{% block eyebrow %}Your money{% endblock %}</p>
+        <h1>{% block heading %}Overview{% endblock %}</h1>
+      </div>
+      <div class="top-actions">
+        {% if active == "savings" %}
+          <a class="button primary" href="#record-balances">Record balances</a>
+        {% elif active != "settings" %}
+          <button class="button secondary" id="sync-button"><span>↻</span> Sync</button>
+          <button class="button primary" id="connect-button">{{ "Add bank connection" if connected else "Connect a bank" }}</button>
+        {% endif %}
+      </div>
+    </header>
+
+    {% if active not in ["savings", "settings"] %}
+    <section class="filterbar">
+      <form method="get" class="filter-form">
+        {% if active == "trends" %}
+          <input type="hidden" name="month" value="{{ month }}">
+        {% elif active != "transactions" %}
+          <label>
+            <span>Month</span>
+            <input type="month" name="month" value="{{ month }}">
+          </label>
+        {% endif %}
+        <label>
+          <span>Household</span>
+          <select name="person">
+            <option value="">Everyone combined</option>
+            {% for profile in profiles %}
+              <option value="{{ profile.id }}" {{ "selected" if profile.id == connection_id }}>
+                {{ profile.owner_name }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Card</span>
+          <select name="account">
+            <option value="">All cards</option>
+            {% for account in accounts %}
+              {% if not connection_id or account.connection_id == connection_id %}
+                <option value="{{ account.id }}" {{ "selected" if account.id == account_id }}>
+                  {{ account.owner_name }} · {{ account.name }} ····{{ account.mask }}
+                </option>
+              {% endif %}
+            {% endfor %}
+          </select>
+        </label>
+        <button class="button compact" type="submit">Apply</button>
+      </form>
+      <p class="data-status">
+        <span class="{{ 'loading-dot' if history_loading }}"></span>
+        {% if history_loading %}Historical data is still loading
+        {% elif last_synced_at %}Last synced {{ last_synced_at[:10] }}
+        {% else %}Ready to sync with Plaid{% endif %}
+      </p>
+    </section>
+    {% endif %}
+
+    {% if stale_savings_accounts %}
+      <section class="savings-reminder">
+        <span class="reminder-icon">!</span>
+        <div>
+          <strong>Savings balances need an update</strong>
+          <p>
+            {{ stale_savings_accounts|length }} balance{{ "" if stale_savings_accounts|length == 1 else "s" }}
+            {{ "has" if stale_savings_accounts|length == 1 else "have" }} never been recorded or {{ "is" if stale_savings_accounts|length == 1 else "are" }} more than one month old.
+          </p>
+        </div>
+        <a class="text-link" href="/savings#record-balances">Update balances →</a>
+      </section>
+    {% endif %}
+
+    <div id="notice" class="notice" hidden></div>
+    {% block content %}{% endblock %}
+  </main>
+
+  <dialog id="connection-dialog" class="connection-dialog">
+    <div class="dialog-header">
+      <div><p class="eyebrow">Household connections</p><h2>Add a bank connection</h2></div>
+      <button class="dialog-close" type="button" aria-label="Close">×</button>
+    </div>
+    <p class="dialog-copy">Use Plaid to connect the appropriate financial institution and select only accounts that are not already connected.</p>
+    <form id="new-connection-form" class="connection-form">
+      <label>
+        <span>Whose spending is this?</span>
+        <input id="owner-name" name="owner_name" required maxlength="40" placeholder="Name">
+      </label>
+      <button class="button primary" type="submit">Continue to Plaid</button>
+    </form>
+    {% if profiles %}
+      <div class="connected-list">
+        <span class="connected-label">Already connected</span>
+        {% for profile in profiles %}
+          <div class="connected-person">
+            <span><strong>{{ profile.owner_name }}</strong><small>{{ profile.institution }}</small></span>
+            <button class="text-button reconnect-button" type="button" data-connection="{{ profile.id }}" data-owner="{{ profile.owner_name }}">Reconnect</button>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </dialog>
+
+  <script>
+    const csrfToken = {{ csrf_token()|tojson }};
+    const notice = document.querySelector("#notice");
+    function showNotice(message, kind = "success") {
+      notice.textContent = message;
+      notice.className = `notice ${kind}`;
+      notice.hidden = false;
+      setTimeout(() => notice.hidden = true, 6000);
+    }
+
+    const syncButton = document.querySelector("#sync-button");
+    if (syncButton) {
+      syncButton.addEventListener("click", async event => {
+        const button = event.currentTarget;
+        const original = button.innerHTML;
+        button.disabled = true;
+        button.innerHTML = "<span>↻</span> Syncing…";
+        const response = await fetch("/api/sync", {
+          method: "POST",
+          headers: { "X-CSRF-Token": csrfToken }
+        });
+        const result = await response.json();
+        if (response.ok && result.ok) {
+          const loading = ["NOT_READY", "INITIAL_UPDATE_COMPLETE"].includes(result.history_status);
+          showNotice(loading
+            ? `Imported ${result.imported || 0} updates. Plaid is still preparing older history.`
+            : `Sync complete${result.imported ? ` · ${result.imported} updates` : ""}.`);
+          setTimeout(() => location.reload(), 700);
+        } else {
+          showNotice(result.error || result.errors?.[0]?.error || "Sync could not be completed.", "error");
+          button.disabled = false;
+          button.innerHTML = original;
+        }
+      });
+    }
+
+    const connectionDialog = document.querySelector("#connection-dialog");
+    const connectButton = document.querySelector("#connect-button");
+    if (connectButton) {
+      connectButton.addEventListener("click", () => connectionDialog.showModal());
+    }
+    connectionDialog.querySelector(".dialog-close").addEventListener("click", () => connectionDialog.close());
+    connectionDialog.addEventListener("click", event => {
+      if (event.target === connectionDialog) connectionDialog.close();
+    });
+
+    let plaidLinkPromise;
+    function loadPlaidLink() {
+      if (window.Plaid) return Promise.resolve();
+      if (plaidLinkPromise) return plaidLinkPromise;
+      plaidLinkPromise = new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
+        script.onload = resolve;
+        script.onerror = () => {
+          plaidLinkPromise = null;
+          reject(new Error("Plaid Link could not be loaded."));
+        };
+        document.head.appendChild(script);
+      });
+      return plaidLinkPromise;
+    }
+
+    async function launchPlaid(ownerName, connectionId = null) {
+      try {
+        await loadPlaidLink();
+      } catch (error) {
+        return showNotice(error.message, "error");
+      }
+      const response = await fetch("/api/link-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ connection_id: connectionId })
+      });
+      const result = await response.json();
+      if (!response.ok) return showNotice(result.error, "error");
+      connectionDialog.close();
+      Plaid.create({
+        token: result.link_token,
+        onExit: async (error, metadata) => {
+          if (!error) return;
+          await fetch("/api/link-exit", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+            body: JSON.stringify({
+              error_code: error.error_code,
+              error_type: error.error_type,
+              request_id: metadata.request_id,
+              exit_status: metadata.status,
+              institution: metadata.institution?.name
+            })
+          });
+          showNotice(error.display_message || error.error_message || error.error_code, "error");
+        },
+        onSuccess: async (publicToken, metadata) => {
+          if (publicToken) {
+            const exchange = await fetch("/api/exchange-token", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+              body: JSON.stringify({
+                public_token: publicToken,
+                owner_name: ownerName,
+                institution_name: metadata.institution?.name || "Financial institution"
+              })
+            });
+            const exchangeResult = await exchange.json();
+            if (!exchange.ok) return showNotice(exchangeResult.error || "The account could not be saved.", "error");
+          }
+          showNotice(publicToken ? "Account connected. Importing up to two years of history…" : "Connection restored. Syncing transactions…");
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            const syncResponse = await fetch("/api/sync", {
+              method: "POST",
+              headers: { "X-CSRF-Token": csrfToken }
+            });
+            const syncResult = await syncResponse.json();
+            if (syncResult.history_status === "HISTORICAL_UPDATE_COMPLETE") break;
+            if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 5000));
+          }
+          location.reload();
+        }
+      }).open();
+    }
+
+    document.querySelector("#new-connection-form").addEventListener("submit", event => {
+      event.preventDefault();
+      const ownerName = document.querySelector("#owner-name").value.trim();
+      if (ownerName) launchPlaid(ownerName);
+    });
+    document.querySelectorAll(".reconnect-button").forEach(button => {
+      button.addEventListener("click", () => launchPlaid(button.dataset.owner, Number(button.dataset.connection)));
+    });
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

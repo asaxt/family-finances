@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}Trends · {{ app_name }}{% endblock %}
+{% block eyebrow %}{{ long_term.coverage_label }}{% endblock %}
+{% block heading %}Long-term spending trends{% endblock %}
+
+{% block content %}
+{% set metrics = long_term.metrics %}
+{% if long_term.months %}
+<section class="metric-grid">
+  <article class="metric-card hero">
+    <span class="metric-label">{{ metrics.latest_label }}</span>
+    <div class="metric-value">{{ metrics.latest_amount|money }}</div>
+    <span class="metric-note">{{ "Projected month-end spending" if metrics.latest_projected else "Total monthly spending" }}</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Year over year</span>
+    <div class="metric-value {{ 'up' if metrics.yoy_pct and metrics.yoy_pct > 0 else 'down' }}">
+      {% if metrics.yoy_pct is not none %}{{ "%+.0f"|format(metrics.yoy_pct) }}%{% else %}—{% endif %}
+    </div>
+    <span class="metric-note">
+      {% if metrics.yoy_amount is not none %}{{ metrics.yoy_amount|abs|money }} {{ "more" if metrics.yoy_amount > 0 else "less" }} than the same month last year{% else %}Waiting for a comparable prior year{% endif %}
+    </span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">3-month average</span>
+    <div class="metric-value">{{ metrics.three_month_average|money }}</div>
+    <span class="metric-note">
+      {% if metrics.three_month_momentum is not none %}{{ "%+.0f"|format(metrics.three_month_momentum) }}% versus the preceding three months{% else %}Recent monthly baseline{% endif %}
+    </span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">12-month average</span>
+    <div class="metric-value">{{ metrics.twelve_month_average|money }}</div>
+    <span class="metric-note">{% if metrics.twenty_four_month_average %}24-month baseline: {{ metrics.twenty_four_month_average|money }}{% else %}Long-run monthly baseline{% endif %}</span>
+  </article>
+</section>
+
+<section class="panel trend-panel">
+  <div class="panel-header trend-chart-header">
+    <div>
+      <h2>Monthly spending and moving averages</h2>
+      <p>Current month is projected; the oldest partial month is excluded from averages · click any point to see categories</p>
+    </div>
+    <div class="series-controls" aria-label="Moving average lines">
+      <label><input id="absolute-spend-toggle" type="checkbox" checked><span class="series-swatch monthly-total"></span>Monthly total</label>
+      {% for window, checked in [(3, true), (6, false), (12, true), (24, false)] %}
+        <label><input class="series-toggle" type="checkbox" data-window="{{ window }}" {{ "checked" if checked }}><span class="series-swatch ma-{{ window }}"></span>{{ window }} mo avg</label>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="chart-tall"><canvas id="monthly-trend-chart"></canvas></div>
+</section>
+
+<section class="content-grid trend-secondary-grid">
+  <article class="panel">
+    <div class="panel-header">
+      <div><h2>Year-over-year change</h2><p>How each month compares with the same month one year earlier</p></div>
+    </div>
+    <div class="chart-medium"><canvas id="yoy-chart"></canvas></div>
+  </article>
+  <article class="panel trend-guide">
+    <div class="panel-header"><div><h2>How to read this</h2><p>Signals that smooth out one-off purchases</p></div></div>
+    <div class="insight-list">
+      <div class="insight"><span class="insight-icon">3</span><span><strong>3 months</strong> reacts quickly and shows whether spending has recently accelerated.</span></div>
+      <div class="insight"><span class="insight-icon">12</span><span><strong>12 months</strong> smooths seasonality and is the clearest household baseline.</span></div>
+      <div class="insight"><span class="insight-icon">24</span><span><strong>24 months</strong> is the longest available baseline; more points will appear as history grows.</span></div>
+      <div class="insight"><span class="insight-icon">↘</span><span>For spending, a negative year-over-year change usually means costs came down.</span></div>
+    </div>
+  </article>
+</section>
+
+<section class="content-grid category-trend-grid">
+  <article class="panel">
+    <div class="panel-header">
+      <div><h2>Category trend</h2><p>Follow one spending category over time, then open its transactions</p></div>
+      <label class="select-label">Category
+        <select id="category-trend-select">
+          {% for category in long_term.category_series %}
+            <option value="{{ category.name }}">{{ category.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <div class="chart-large"><canvas id="category-trend-chart"></canvas></div>
+  </article>
+  <article class="panel">
+    <div class="panel-header"><div><h2>Largest category drivers</h2><p>Trailing 12-month spending</p></div></div>
+    <div class="rank-list category-driver-list">
+      {% for category in long_term.category_series[:7] %}
+        <button class="rank-row category-picker" type="button" data-category="{{ category.name }}">
+          <span class="rank-number">{{ "%02d"|format(loop.index) }}</span>
+          <span>
+            <span class="rank-name">{{ category.name }}</span>
+            <span class="rank-meta">
+              3-mo avg {{ category.three_month_average|money }}
+              {% if category.yoy_pct is not none %} · {{ "%+.0f"|format(category.yoy_pct) }}% YoY{% endif %}
+            </span>
+          </span>
+          <span class="rank-amount">{{ category.trailing_12|money }}</span>
+        </button>
+      {% endfor %}
+    </div>
+  </article>
+</section>
+{% else %}
+<section class="panel empty">Connect and sync transactions to build long-term trends.</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if long_term.months %}
+<script>
+  const monthPoints = {{ long_term.months|tojson }};
+  const categorySeries = {{ long_term.category_series|tojson }};
+  const monthKeys = monthPoints.map(point => point.month);
+  const labels = monthPoints.map(point => new Date(`${point.month}-02T12:00:00`).toLocaleDateString(undefined, {month: "short", year: "2-digit"}));
+  const scopeQuery = {{ (person_query ~ account_query)|tojson }};
+  const money = value => `$${value.toLocaleString(undefined, {minimumFractionDigits: 0, maximumFractionDigits: 0})}`;
+  const colors = {3: "#e7a944", 6: "#6686c4", 12: "#b76a79", 24: "#6f7e75"};
+
+  function openCategories(index) {
+    window.location.href = `/categories?month=${monthKeys[index]}${scopeQuery}`;
+  }
+  function openTransactions(index, category) {
+    window.location.href = `/transactions?month=${monthKeys[index]}&category=${encodeURIComponent(category)}${scopeQuery}`;
+  }
+
+  const monthlyDatasets = [{
+    label: "Monthly spending",
+    data: monthPoints.map(point => point.display_amount / 100),
+    borderColor: "#9aaca2",
+    backgroundColor: "transparent",
+    borderWidth: 1.5,
+    borderDash: [4, 4],
+    fill: false,
+    tension: .18,
+    order: 10,
+    pointRadius: monthPoints.map(point => point.projected ? 5 : point.partial_start ? 4 : 2.5),
+    pointStyle: monthPoints.map(point => point.projected ? "rectRot" : point.partial_start ? "triangle" : "circle"),
+    pointBackgroundColor: monthPoints.map(point => point.projected || point.partial_start ? "#e7a944" : "#ffffff"),
+    pointBorderColor: monthPoints.map(point => point.projected || point.partial_start ? "#e7a944" : "#82978c"),
+    pointBorderWidth: 1.5,
+    pointHitRadius: 8
+  }];
+  [3, 6, 12, 24].forEach(window => monthlyDatasets.push({
+    label: `${window}-month average`,
+    data: monthPoints.map(point => point[`ma_${window}`] === null ? null : point[`ma_${window}`] / 100),
+    borderColor: colors[window],
+    backgroundColor: colors[window],
+    borderWidth: 3,
+    borderDash: window === 24 ? [6, 5] : [],
+    tension: .3,
+    pointRadius: window === 24 ? 4 : 0,
+    order: 1,
+    spanGaps: false,
+    hidden: ![3, 12].includes(window)
+  }));
+
+  const monthlyChart = new Chart(document.querySelector("#monthly-trend-chart"), {
+    type: "line",
+    data: {labels, datasets: monthlyDatasets},
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {mode: "index", intersect: false},
+      onClick: (_, elements) => { if (elements.length) openCategories(elements[0].index); },
+      onHover: (event, elements) => event.native.target.style.cursor = elements.length ? "pointer" : "default",
+      plugins: {
+        legend: {display: false},
+        tooltip: {callbacks: {
+          title: items => {
+            const point = monthPoints[items[0].dataIndex];
+            return `${point.label}${point.projected ? " · projected" : point.partial_start ? " · partial history" : ""}`;
+          },
+          label: item => `${item.dataset.label}: ${money(item.raw)}`
+        }}
+      },
+      scales: {
+        x: {grid: {display: false}, ticks: {maxTicksLimit: 13}},
+        y: {beginAtZero: true, border: {display: false}, grid: {color: "#edf0ed"}, ticks: {callback: money}}
+      }
+    }
+  });
+
+  document.querySelectorAll(".series-toggle").forEach(toggle => {
+    toggle.addEventListener("change", () => {
+      const datasetIndex = [3, 6, 12, 24].indexOf(Number(toggle.dataset.window)) + 1;
+      monthlyChart.setDatasetVisibility(datasetIndex, toggle.checked);
+      monthlyChart.update();
+    });
+  });
+  document.querySelector("#absolute-spend-toggle").addEventListener("change", event => {
+    monthlyChart.setDatasetVisibility(0, event.target.checked);
+    monthlyChart.update();
+  });
+
+  const yoyValues = monthPoints.map(point => point.yoy_pct);
+  new Chart(document.querySelector("#yoy-chart"), {
+    type: "line",
+    data: {labels, datasets: [{
+      label: "Year-over-year change",
+      data: yoyValues,
+      borderColor: context => (context.raw ?? 0) > 0 ? "#d86d73" : "#3b9870",
+      backgroundColor: "#24634e12",
+      borderWidth: 2.5,
+      tension: .25,
+      fill: {target: "origin", above: "#d86d7315", below: "#3b987015"},
+      pointRadius: 4,
+      pointBackgroundColor: yoyValues.map(value => value > 0 ? "#d86d73" : "#3b9870"),
+      spanGaps: false
+    }]},
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      onClick: (_, elements) => { if (elements.length) openCategories(elements[0].index); },
+      onHover: (event, elements) => event.native.target.style.cursor = elements.length ? "pointer" : "default",
+      plugins: {legend: {display: false}, tooltip: {callbacks: {label: item => `${item.raw > 0 ? "+" : ""}${item.raw.toFixed(1)}% vs last year`}}},
+      scales: {
+        x: {grid: {display: false}, ticks: {maxTicksLimit: 7}},
+        y: {border: {display: false}, grid: {color: context => context.tick.value === 0 ? "#9aa49f" : "#edf0ed"}, ticks: {callback: value => `${value > 0 ? "+" : ""}${value}%`}}
+      }
+    }
+  });
+
+  const categorySelect = document.querySelector("#category-trend-select");
+  const categoryChart = new Chart(document.querySelector("#category-trend-chart"), {
+    type: "line",
+    data: {labels, datasets: [{label: "", data: [], borderColor: "#24634e", backgroundColor: "#24634e18", fill: true, borderWidth: 3, tension: .25, pointRadius: 3}]},
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {mode: "index", intersect: false},
+      onClick: (_, elements) => { if (elements.length) openTransactions(elements[0].index, categorySelect.value); },
+      onHover: (event, elements) => event.native.target.style.cursor = elements.length ? "pointer" : "default",
+      plugins: {legend: {display: false}, tooltip: {callbacks: {label: item => `${categorySelect.value}: ${money(item.raw)}`}}},
+      scales: {
+        x: {grid: {display: false}, ticks: {maxTicksLimit: 12}},
+        y: {beginAtZero: true, border: {display: false}, grid: {color: "#edf0ed"}, ticks: {callback: money}}
+      }
+    }
+  });
+
+  function showCategory(name) {
+    const category = categorySeries.find(item => item.name === name);
+    if (!category) return;
+    categorySelect.value = name;
+    categoryChart.data.datasets[0].label = name;
+    categoryChart.data.datasets[0].data = category.values.map(value => value / 100);
+    categoryChart.update();
+    document.querySelectorAll(".category-picker").forEach(button => button.classList.toggle("selected", button.dataset.category === name));
+  }
+  categorySelect.addEventListener("change", event => showCategory(event.target.value));
+  document.querySelectorAll(".category-picker").forEach(button => button.addEventListener("click", () => showCategory(button.dataset.category)));
+  if (categorySeries.length) showCategory(categorySeries[0].name);
+</script>
+{% endif %}
+{% endblock %}
