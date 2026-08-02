@@ -13,7 +13,7 @@
   <aside class="sidebar">
     <a class="brand" href="/">
       <span class="brand-mark">{{ app_name[0]|upper }}</span>
-      <span>{{ app_name }}</span>
+      <span>{{ app_name }}{% if development_mode %}<small class="environment-badge">Development</small>{% endif %}</span>
     </a>
     <nav class="nav">
       <a class="{{ 'active' if active == 'overview' }}" href="/?month={{ month }}{{ person_query }}{{ account_query }}">
@@ -56,7 +56,7 @@
       <div class="top-actions">
         {% if active == "savings" %}
           <a class="button primary" href="#record-balances">Record balances</a>
-        {% elif active != "settings" %}
+        {% elif active != "settings" and not plaid_disabled %}
           <button class="button secondary" id="sync-button"><span>↻</span> Sync</button>
           <button class="button primary" id="connect-button">{{ "Add bank connection" if connected else "Connect a bank" }}</button>
         {% endif %}
@@ -102,7 +102,8 @@
       </form>
       <p class="data-status">
         <span class="{{ 'loading-dot' if history_loading }}"></span>
-        {% if history_loading %}Historical data is still loading
+        {% if plaid_disabled %}Plaid is disabled in this environment
+        {% elif history_loading %}Historical data is still loading
         {% elif last_synced_at %}Last synced {{ last_synced_at[:10] }}
         {% else %}Ready to sync with Plaid{% endif %}
       </p>

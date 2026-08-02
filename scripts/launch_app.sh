@@ -4,18 +4,21 @@ set -u
 umask 077
 
 project_dir="$(cd "$(dirname "$0")/.." && pwd)"
-app_url="http://127.0.0.1:4242"
-log_file="$HOME/Library/Logs/Family Finances.log"
 
 if [[ -f "$project_dir/.local.env" ]]; then
   source "$project_dir/.local.env"
 fi
 export FAMILY_FINANCES_DATA_DIR="${FAMILY_FINANCES_DATA_DIR:-$project_dir}"
+export FAMILY_FINANCES_PORT="${FAMILY_FINANCES_PORT:-4242}"
+launch_label="${FAMILY_FINANCES_LAUNCH_LABEL:-local.family-finances}"
+log_name="${FAMILY_FINANCES_LOG_NAME:-Family Finances}"
+app_url="http://127.0.0.1:$FAMILY_FINANCES_PORT"
+log_file="$HOME/Library/Logs/$log_name.log"
 
 if ! /usr/bin/curl -fsS "$app_url/health" >/dev/null 2>&1; then
-  /bin/launchctl remove local.family-finances >/dev/null 2>&1 || true
+  /bin/launchctl remove "$launch_label" >/dev/null 2>&1 || true
   /bin/launchctl submit \
-    -l local.family-finances \
+    -l "$launch_label" \
     -o "$log_file" \
     -e "$log_file" \
     -- "$project_dir/scripts/run_server.sh"

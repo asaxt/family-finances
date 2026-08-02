@@ -30,21 +30,22 @@
         <h2>Plaid developer account</h2>
         <p>These credentials are encrypted inside your local vault.</p>
       </div>
-      <span class="pill {{ 'configured' if plaid_configured }}">{{ "Configured" if plaid_configured else "Needs setup" }}</span>
+      <span class="pill {{ 'configured' if plaid_configured and not plaid_disabled }}">{{ "Disabled" if plaid_disabled else ("Configured" if plaid_configured else "Needs setup") }}</span>
     </div>
+    {% if plaid_disabled %}<p class="form-message development">Plaid connections and synchronization are disabled in this development environment.</p>{% endif %}
     {% if settings_error == "plaid" %}<p class="form-message error">Enter a Client ID and Production secret.</p>{% endif %}
     <form class="settings-form" method="post" action="/api/plaid-settings">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <label>
         <span>Plaid Client ID</span>
-        <input name="client_id" value="{{ plaid_client_id }}" autocomplete="off" required>
+        <input name="client_id" value="{{ '' if plaid_disabled else plaid_client_id }}" autocomplete="off" {{ "disabled" if plaid_disabled }} required>
       </label>
       <label>
         <span>Production secret</span>
-        <input type="password" name="secret" autocomplete="new-password" placeholder="{{ 'Leave blank to keep the saved secret' if plaid_configured else 'Enter Production secret' }}">
+        <input type="password" name="secret" autocomplete="new-password" placeholder="{{ 'Unavailable in development' if plaid_disabled else ('Leave blank to keep the saved secret' if plaid_configured else 'Enter Production secret') }}" {{ "disabled" if plaid_disabled }}>
       </label>
       <p class="security-note">The saved secret is never displayed again. Each installation must use credentials from its own Plaid developer account.</p>
-      <button class="button primary" type="submit">Save Plaid settings</button>
+      <button class="button primary" type="submit" {{ "disabled" if plaid_disabled }}>Save Plaid settings</button>
     </form>
   </article>
 
