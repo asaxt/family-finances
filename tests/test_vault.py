@@ -43,6 +43,19 @@ class VaultTests(unittest.TestCase):
         self.assertNotIn(b"private data", database.path.read_bytes())
         database.lock()
 
+    def test_blank_database_can_be_created(self):
+        record, key = create_key_record("a blank database password")
+        database = EncryptedDatabase(self.root / "blank.vault")
+        database.create(key)
+        database.unlock(unlock_key("a blank database password", record))
+
+        with database.connection() as connection:
+            tables = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        self.assertEqual(tables, [])
+        database.lock()
+
     def test_wrong_password_does_not_unwrap_key(self):
         record, _ = create_key_record("correct password")
         with self.assertRaises(VaultError):

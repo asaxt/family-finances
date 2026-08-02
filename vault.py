@@ -110,8 +110,13 @@ class EncryptedDatabase:
             self._validate_database(raw_database)
         else:
             connection = sqlite3.connect(":memory:")
-            raw_database = connection.serialize()
-            connection.close()
+            try:
+                connection.execute("CREATE TABLE __vault_initialization (value INTEGER)")
+                connection.execute("DROP TABLE __vault_initialization")
+                connection.commit()
+                raw_database = connection.serialize()
+            finally:
+                connection.close()
         self._write_encrypted(key, raw_database)
         self._verify_encrypted(key)
 
