@@ -11,12 +11,9 @@ class DevelopmentModeTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.environment_names = (
             "FAMILY_FINANCES_DATA_DIR",
-            "SONDER_DATA_DIR",
             "FAMILY_FINANCES_MODE",
             "FAMILY_FINANCES_PORT",
             "FAMILY_FINANCES_DISABLE_PLAID",
-            "PLAID_CLIENT_ID",
-            "PLAID_SECRET",
         )
         self.previous_environment = {
             name: os.environ.get(name) for name in self.environment_names
@@ -34,6 +31,10 @@ class DevelopmentModeTests(unittest.TestCase):
         self.application = importlib.import_module("app")
         self.application.app.config["TESTING"] = True
         self.client = self.application.app.test_client()
+        self.assertEqual(
+            self.application.app.config["SESSION_COOKIE_NAME"],
+            "family_finances_development",
+        )
 
     def tearDown(self):
         if self.application.vault.unlocked:
