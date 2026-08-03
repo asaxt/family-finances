@@ -12,6 +12,7 @@
 *.vault
 *.vault-*
 backups/
+.migration-backup-*/
 
 # Python and editor files
 .venv

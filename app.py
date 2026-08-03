@@ -8,7 +8,6 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
-from dotenv import dotenv_values
 from flask import Flask, abort, jsonify, redirect, render_template, request, session, url_for
 from plaid.api import plaid_api
 from plaid.api_client import ApiClient
@@ -25,6 +24,7 @@ from plaid.model.products import Products
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from schema import SchemaError, prepare_encrypted_database
 from vault import EncryptedDatabase, VaultError, create_key_record, unlock_key
 
 from analytics import (
@@ -59,19 +59,11 @@ PLAID_DISABLED = DEVELOPMENT_MODE or environment_flag("FAMILY_FINANCES_DISABLE_P
 APP_PORT = local_port()
 DATA_ROOT = Path(
     os.environ.get("FAMILY_FINANCES_DATA_DIR")
-    or os.environ.get("SONDER_DATA_DIR")
     or ROOT
 )
-LEGACY_DB_PATH = DATA_ROOT / "plaid_budget.db"
-LEGACY_VAULT_PATH = DATA_ROOT / "sonder.vault"
-VAULT_PATH = (
-    LEGACY_VAULT_PATH
-    if LEGACY_VAULT_PATH.exists()
-    else DATA_ROOT / "family-finances.vault"
-)
+VAULT_PATH = DATA_ROOT / "family-finances.vault"
 AUTH_PATH = DATA_ROOT / ".auth.json"
 DEFAULT_APP_NAME = "Family Finances"
-DEFAULT_SAVINGS_GOAL = 1_000_000
 VAULT_IDLE_SECONDS = 12 * 60 * 60
 SAVINGS_CLASSIFICATIONS = {
     "pre_tax": "Pre-tax",
@@ -112,6 +104,7 @@ def display_name():
 auth_config = load_auth_config()
 app.config.update(
     SECRET_KEY=auth_config.get("secret_key") or secrets.token_hex(32),
+    SESSION_COOKIE_NAME="family_finances_development" if DEVELOPMENT_MODE else "session",
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
@@ -152,24 +145,13 @@ def unlock_data(password):
     global vault_last_activity
     config = load_auth_config()
     key_record = config.get("vault_key")
-    if key_record:
-        if not vault.exists:
-            raise VaultError("The encrypted data file is missing.")
-        data_key = unlock_key(password, key_record)
-    else:
-        if vault.exists:
-            raise VaultError("The encrypted data key is missing.")
-        key_record, data_key = create_key_record(password)
-        vault.create(
-            data_key,
-            LEGACY_DB_PATH if LEGACY_DB_PATH.exists() else None,
-        )
-        config["vault_key"] = key_record
-        save_auth_config(config)
+    if not key_record:
+        raise VaultError("The encrypted data key is missing.")
+    if not vault.exists:
+        raise VaultError("The encrypted data file is missing.")
+    data_key = unlock_key(password, key_record)
     vault.unlock(data_key)
-    init_db()
-    migrate_plaid_credentials()
-    vault.persist()
+    prepare_encrypted_database(vault, data_key, AUTH_PATH)
     vault_last_activity = time.monotonic()
 
 
@@ -187,7 +169,7 @@ def require_login():
         expected = session.get("csrf_token")
         if not expected or not submitted or not secrets.compare_digest(expected, submitted):
             abort(400, "The form expired. Reload the page and try again.")
-    if request.endpoint in {"static", "health", "login", "setup"}:
+    if request.endpoint in {"static", "favicon", "health", "login", "setup"}:
         return None
     if not load_auth_config().get("password_hash"):
         if local_setup_request():
@@ -223,6 +205,11 @@ def health():
     )
 
 
+@app.get("/favicon.ico")
+def favicon():
+    return "", 204
+
+
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
     global vault_last_activity
@@ -249,16 +236,11 @@ def setup():
                 "vault_key": key_record,
                 "app_name": display_name(),
             }
-            vault.create(
-                data_key,
-                LEGACY_DB_PATH if LEGACY_DB_PATH.exists() else None,
-            )
+            vault.create(data_key)
             save_auth_config(config)
             app.secret_key = config["secret_key"]
             vault.unlock(data_key)
-            init_db()
-            migrate_plaid_credentials()
-            vault.persist()
+            prepare_encrypted_database(vault, data_key, AUTH_PATH)
             vault_last_activity = time.monotonic()
             session.clear()
             session["authenticated"] = True
@@ -286,7 +268,7 @@ def login():
         elif check_password_hash(config["password_hash"], request.form.get("password", "")):
             try:
                 unlock_data(request.form.get("password", ""))
-            except (VaultError, OSError, sqlite3.DatabaseError) as vault_error:
+            except (VaultError, SchemaError, OSError, sqlite3.DatabaseError) as vault_error:
                 app.logger.error("Encrypted data could not be opened: %s", vault_error)
                 error = "Your encrypted data could not be opened. No data was changed."
             else:
@@ -332,209 +314,6 @@ def db():
     return vault.connection()
 
 
-def migrate_savings_schema(connection):
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS manual_accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            legacy_key TEXT UNIQUE,
-            institution TEXT NOT NULL,
-            name TEXT NOT NULL,
-            owner_name TEXT NOT NULL DEFAULT 'Household',
-            classification TEXT NOT NULL CHECK (
-                classification IN ('pre_tax', 'post_tax', 'taxable')
-            ),
-            goal_eligible INTEGER NOT NULL DEFAULT 0,
-            reminder_enabled INTEGER NOT NULL DEFAULT 1,
-            archived INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    snapshot_table = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'savings_snapshots'"
-    ).fetchone()
-    if not snapshot_table:
-        connection.execute(
-            """
-            CREATE TABLE savings_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                manual_account_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                recorded_on TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (manual_account_id, recorded_on),
-                FOREIGN KEY (manual_account_id) REFERENCES manual_accounts(id)
-            )
-            """
-        )
-        return
-
-    snapshot_columns = {
-        row["name"]
-        for row in connection.execute("PRAGMA table_info(savings_snapshots)")
-    }
-    if "manual_account_id" in snapshot_columns:
-        return
-
-    raise RuntimeError("This database uses an unsupported legacy savings format.")
-
-
-def init_db():
-    with db() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS connections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                plaid_item_id TEXT UNIQUE,
-                owner_name TEXT NOT NULL,
-                institution TEXT NOT NULL,
-                access_token TEXT NOT NULL,
-                cursor TEXT NOT NULL DEFAULT '',
-                transactions_update_status TEXT,
-                last_synced_at TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS accounts (
-                id TEXT PRIMARY KEY,
-                connection_id INTEGER,
-                institution TEXT NOT NULL,
-                name TEXT NOT NULL,
-                mask TEXT,
-                type TEXT NOT NULL,
-                current_balance INTEGER,
-                balance_updated_at TEXT,
-                FOREIGN KEY (connection_id) REFERENCES connections(id)
-            );
-            CREATE TABLE IF NOT EXISTS transactions (
-                id TEXT PRIMARY KEY,
-                account_id TEXT NOT NULL,
-                amount INTEGER NOT NULL,
-                currency TEXT NOT NULL,
-                description TEXT NOT NULL,
-                merchant TEXT,
-                pending INTEGER NOT NULL,
-                transacted_at TEXT NOT NULL,
-                category TEXT NOT NULL,
-                category_override TEXT,
-                excluded INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS budgets (
-                month TEXT NOT NULL,
-                category TEXT NOT NULL,
-                amount INTEGER NOT NULL,
-                PRIMARY KEY (month, category)
-            );
-            """
-        )
-        migrate_savings_schema(connection)
-        connection.execute(
-            "INSERT OR IGNORE INTO settings (key, value) VALUES ('savings_goal_cents', ?)",
-            (str(DEFAULT_SAVINGS_GOAL),),
-        )
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(transactions)")
-        }
-        account_columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(accounts)")
-        }
-        if "connection_id" not in account_columns:
-            connection.execute(
-                "ALTER TABLE accounts ADD COLUMN connection_id INTEGER"
-            )
-        if "current_balance" not in account_columns:
-            connection.execute(
-                "ALTER TABLE accounts ADD COLUMN current_balance INTEGER"
-            )
-        if "balance_updated_at" not in account_columns:
-            connection.execute(
-                "ALTER TABLE accounts ADD COLUMN balance_updated_at TEXT"
-            )
-        if "category_override" not in columns:
-            connection.execute(
-                "ALTER TABLE transactions ADD COLUMN category_override TEXT"
-            )
-        if "excluded" not in columns:
-            connection.execute(
-                "ALTER TABLE transactions ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0"
-            )
-        migration = connection.execute(
-            "SELECT 1 FROM settings WHERE key = 'excluded_non_spending_v1'"
-        ).fetchone()
-        if not migration:
-            connection.execute(
-                """
-                UPDATE transactions SET excluded = 1
-                WHERE category LIKE 'Transfer%'
-                   OR category IN ('Loan Payments', 'Loan Disbursements')
-                """
-            )
-            connection.execute(
-                "INSERT INTO settings (key, value) VALUES ('excluded_non_spending_v1', '1')"
-            )
-
-        legacy_token = connection.execute(
-            "SELECT value FROM settings WHERE key = 'plaid_access_token'"
-        ).fetchone()
-        if legacy_token:
-            existing = connection.execute(
-                "SELECT id FROM connections ORDER BY id LIMIT 1"
-            ).fetchone()
-            if existing:
-                connection_id = existing["id"]
-            else:
-                legacy_values = dict(
-                    connection.execute(
-                        """
-                        SELECT key, value FROM settings
-                        WHERE key IN (
-                            'plaid_cursor', 'transactions_update_status',
-                            'last_synced_at'
-                        )
-                        """
-                    ).fetchall()
-                )
-                cursor = connection.execute(
-                    """
-                    INSERT INTO connections (
-                        owner_name, institution, access_token, cursor,
-                        transactions_update_status, last_synced_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        "Primary user",
-                        "Financial institution",
-                        legacy_token["value"],
-                        legacy_values.get("plaid_cursor", ""),
-                        legacy_values.get("transactions_update_status"),
-                        legacy_values.get("last_synced_at"),
-                    ),
-                )
-                connection_id = cursor.lastrowid
-            connection.execute(
-                """
-                UPDATE accounts SET connection_id = ?
-                WHERE connection_id IS NULL
-                """,
-                (connection_id,),
-            )
-            connection.execute(
-                """
-                DELETE FROM settings
-                WHERE key IN (
-                    'plaid_access_token', 'plaid_cursor',
-                    'transactions_update_status', 'last_synced_at'
-                )
-                """
-            )
-
-
 def setting(key):
     with db() as connection:
         row = connection.execute(
@@ -562,32 +341,6 @@ def plaid_credentials():
             ).fetchall()
         )
     return values.get("plaid_client_id", ""), values.get("plaid_secret", "")
-
-
-def migrate_plaid_credentials():
-    legacy_values = dotenv_values(DATA_ROOT / ".env")
-    client_id = (os.environ.get("PLAID_CLIENT_ID") or legacy_values.get("PLAID_CLIENT_ID") or "").strip()
-    plaid_secret = (os.environ.get("PLAID_SECRET") or legacy_values.get("PLAID_SECRET") or "").strip()
-    if not client_id and not plaid_secret:
-        return
-    with db() as connection:
-        existing = dict(
-            connection.execute(
-                "SELECT key, value FROM settings WHERE key IN ('plaid_client_id', 'plaid_secret')"
-            ).fetchall()
-        )
-        if client_id and not existing.get("plaid_client_id"):
-            connection.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES ('plaid_client_id', ?)",
-                (client_id,),
-            )
-        if plaid_secret and not existing.get("plaid_secret"):
-            connection.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES ('plaid_secret', ?)",
-                (plaid_secret,),
-            )
-    os.environ.pop("PLAID_CLIENT_ID", None)
-    os.environ.pop("PLAID_SECRET", None)
 
 
 def month_after(value):
