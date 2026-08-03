@@ -39,6 +39,9 @@ class AppMigrationTests(unittest.TestCase):
                 for name in (
                     "FAMILY_FINANCES_DATA_DIR",
                     "SONDER_DATA_DIR",
+                    "FAMILY_FINANCES_MODE",
+                    "FAMILY_FINANCES_PORT",
+                    "FAMILY_FINANCES_DISABLE_PLAID",
                     "PLAID_CLIENT_ID",
                     "PLAID_SECRET",
                 )
@@ -50,6 +53,9 @@ class AppMigrationTests(unittest.TestCase):
                     "PLAID_SECRET": "test-production-secret",
                 }
             )
+            os.environ.pop("FAMILY_FINANCES_MODE", None)
+            os.environ.pop("FAMILY_FINANCES_PORT", None)
+            os.environ.pop("FAMILY_FINANCES_DISABLE_PLAID", None)
             sys.modules.pop("app", None)
             application = importlib.import_module("app")
             try:

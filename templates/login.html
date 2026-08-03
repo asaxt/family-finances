@@ -8,7 +8,7 @@
 </head>
 <body class="auth-body">
   <main class="auth-card">
-    <div class="auth-brand"><span class="brand-mark">{{ app_name[0]|upper }}</span><span>{{ app_name }}</span></div>
+    <div class="auth-brand"><span class="brand-mark">{{ app_name[0]|upper }}</span><span>{{ app_name }}{% if development_mode %}<small class="environment-badge">Development</small>{% endif %}</span></div>
     <p class="eyebrow">Private household finances</p>
     <h1>Welcome back</h1>
     <p class="auth-copy">Enter your app password to open the budget and savings dashboard.</p>

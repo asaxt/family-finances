@@ -37,6 +37,26 @@ from analytics import (
 
 
 ROOT = Path(__file__).parent
+
+
+def environment_flag(name):
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def local_port():
+    try:
+        port = int(os.environ.get("FAMILY_FINANCES_PORT", "4242"))
+    except ValueError as error:
+        raise RuntimeError("FAMILY_FINANCES_PORT must be a number.") from error
+    if not 1 <= port <= 65535:
+        raise RuntimeError("FAMILY_FINANCES_PORT must be between 1 and 65535.")
+    return port
+
+
+APP_MODE = os.environ.get("FAMILY_FINANCES_MODE", "stable").strip().lower()
+DEVELOPMENT_MODE = APP_MODE == "development"
+PLAID_DISABLED = DEVELOPMENT_MODE or environment_flag("FAMILY_FINANCES_DISABLE_PLAID")
+APP_PORT = local_port()
 DATA_ROOT = Path(
     os.environ.get("FAMILY_FINANCES_DATA_DIR")
     or os.environ.get("SONDER_DATA_DIR")
@@ -121,7 +141,11 @@ app.jinja_env.globals["csrf_token"] = csrf_token
 
 @app.context_processor
 def template_branding():
-    return {"app_name": display_name()}
+    return {
+        "app_name": display_name(),
+        "development_mode": DEVELOPMENT_MODE,
+        "plaid_disabled": PLAID_DISABLED,
+    }
 
 
 def unlock_data(password):
@@ -192,7 +216,11 @@ def protect_responses(response):
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True)
+    return jsonify(
+        ok=True,
+        mode="development" if DEVELOPMENT_MODE else "stable",
+        plaid_enabled=not PLAID_DISABLED,
+    )
 
 
 @app.route("/setup", methods=["GET", "POST"])
@@ -287,6 +315,8 @@ def money(value):
 
 
 def plaid_client():
+    if PLAID_DISABLED:
+        raise RuntimeError("Plaid is disabled in this local environment.")
     client_id, plaid_secret = plaid_credentials()
     configuration = Configuration(
         host="https://production.plaid.com",
@@ -1236,6 +1266,8 @@ def update_manual_account(account_id):
 
 @app.post("/api/plaid-settings")
 def update_plaid_settings():
+    if PLAID_DISABLED:
+        return jsonify(error="Plaid is disabled in this local environment."), 403
     client_id = request.form.get("client_id", "").strip()
     new_secret = request.form.get("secret", "").strip()
     _, current_secret = plaid_credentials()
@@ -1267,6 +1299,8 @@ def update_app_name():
 
 @app.post("/api/link-token")
 def create_link_token():
+    if PLAID_DISABLED:
+        return jsonify(error="Plaid is disabled in this local environment."), 403
     client_id, plaid_secret = plaid_credentials()
     if not client_id or not plaid_secret:
         return jsonify(
@@ -1299,6 +1333,8 @@ def create_link_token():
 
 @app.post("/api/exchange-token")
 def exchange_token():
+    if PLAID_DISABLED:
+        return jsonify(error="Plaid is disabled in this local environment."), 403
     payload = request.get_json(force=True)
     public_token = payload["public_token"]
     owner_name = (payload.get("owner_name") or "Household member").strip()[:40]
@@ -1342,6 +1378,8 @@ def exchange_token():
 
 @app.post("/api/sync")
 def sync():
+    if PLAID_DISABLED:
+        return jsonify(error="Plaid is disabled in this local environment."), 403
     try:
         imported, errors = sync_all_connections()
         with db() as connection:
@@ -1469,6 +1507,6 @@ def transaction_cleanup_redirect():
 if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
-        port=4242,
+        port=APP_PORT,
         debug=os.environ.get("FLASK_DEBUG") == "1",
     )
