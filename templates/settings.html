@@ -27,6 +27,37 @@
   <article class="panel">
     <div class="panel-header">
       <div>
+        <h2>App password</h2>
+        <p>Change the password that unlocks your encrypted data.</p>
+      </div>
+    </div>
+    {% if settings_error == "current_password" %}<p class="form-message error">The current password is not correct.</p>{% endif %}
+    {% if settings_error == "password_length" %}<p class="form-message error">Use at least 12 characters. A memorable passphrase works well.</p>{% endif %}
+    {% if settings_error == "password_match" %}<p class="form-message error">The new passwords do not match.</p>{% endif %}
+    {% if settings_error == "password_same" %}<p class="form-message error">Choose a password different from the current password.</p>{% endif %}
+    {% if settings_error == "password_change" %}<p class="form-message error">The password change did not complete. Try the original password; an encrypted recovery copy was retained if needed.</p>{% endif %}
+    <form class="settings-form" method="post" action="/api/password">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>
+        <span>Current password</span>
+        <input type="password" name="current_password" autocomplete="current-password" required>
+      </label>
+      <label>
+        <span>New password</span>
+        <input type="password" name="new_password" minlength="12" autocomplete="new-password" required>
+      </label>
+      <label>
+        <span>Confirm new password</span>
+        <input type="password" name="confirmation" minlength="12" autocomplete="new-password" required>
+      </label>
+      <p class="security-note">Changing the password rotates the vault encryption key and signs out every session. Existing backups continue to use the password that protected them when they were created.</p>
+      <button class="button primary" type="submit">Change password</button>
+    </form>
+  </article>
+
+  <article class="panel">
+    <div class="panel-header">
+      <div>
         <h2>Plaid developer account</h2>
         <p>These credentials are encrypted inside your local vault.</p>
       </div>

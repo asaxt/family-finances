@@ -25,7 +25,15 @@ from plaid.model.transactions_sync_request import TransactionsSyncRequest
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from schema import SchemaError, prepare_encrypted_database
-from vault import EncryptedDatabase, VaultError, create_key_record, unlock_key
+from vault import (
+    EncryptedDatabase,
+    VaultError,
+    create_encrypted_backup,
+    create_key_record,
+    delete_encrypted_backup,
+    restore_encrypted_backup,
+    unlock_key,
+)
 
 from analytics import (
     category_details,
@@ -87,8 +95,11 @@ def save_auth_config(config):
     AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = AUTH_PATH.with_name(f".{AUTH_PATH.name}.{os.getpid()}.tmp")
     try:
-        temporary.write_text(json.dumps(config))
-        os.chmod(temporary, 0o600)
+        with temporary.open("w") as handle:
+            os.chmod(temporary, 0o600)
+            json.dump(config, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, AUTH_PATH)
         os.chmod(AUTH_PATH, 0o600)
     finally:
@@ -159,6 +170,50 @@ def lock_data():
     global vault_last_activity
     vault.lock()
     vault_last_activity = 0.0
+
+
+def rotate_password(current_password, new_password):
+    config = load_auth_config()
+    key_record = config.get("vault_key")
+    if not key_record:
+        raise VaultError("The encrypted data key is missing.")
+
+    unlock_key(current_password, key_record)
+    new_key_record, new_data_key = create_key_record(new_password)
+    new_config = dict(config)
+    new_config.update(
+        password_hash=generate_password_hash(new_password),
+        secret_key=secrets.token_hex(32),
+        vault_key=new_key_record,
+    )
+
+    backup_dir = create_encrypted_backup(
+        VAULT_PATH,
+        AUTH_PATH,
+        prefix=".password-change-backup-",
+    )
+    try:
+        vault.rotate_key(new_data_key)
+        save_auth_config(new_config)
+        vault.lock()
+        unlock_data(new_password)
+    except Exception:
+        vault.lock()
+        restore_encrypted_backup(backup_dir, VAULT_PATH, AUTH_PATH)
+        unlock_data(current_password)
+        raise
+    else:
+        try:
+            delete_encrypted_backup(backup_dir)
+        except OSError as error:
+            app.logger.error(
+                "Password changed, but its encrypted recovery copy remains: %s",
+                error,
+            )
+            backup_retained = True
+        else:
+            backup_retained = False
+        return new_config["secret_key"], backup_retained
 
 
 @app.before_request
@@ -281,7 +336,13 @@ def login():
             attempts.append(now)
             LOGIN_ATTEMPTS[client] = attempts
             error = "That password is not correct."
-    return render_template("login.html", error=error, next_url=next_url)
+    return render_template(
+        "login.html",
+        error=error,
+        next_url=next_url,
+        password_changed=request.args.get("changed") == "1",
+        password_backup_retained=request.args.get("backup") == "1",
+    )
 
 
 @app.post("/logout")
@@ -1048,6 +1109,41 @@ def update_app_name():
     config["app_name"] = name
     save_auth_config(config)
     return redirect(url_for("settings_page", saved="app_name"))
+
+
+@app.post("/api/password")
+def update_password():
+    current_password = request.form.get("current_password", "")
+    new_password = request.form.get("new_password", "")
+    confirmation = request.form.get("confirmation", "")
+    config = load_auth_config()
+
+    if not check_password_hash(config.get("password_hash", ""), current_password):
+        return redirect(url_for("settings_page", error="current_password"))
+    if len(new_password) < 12:
+        return redirect(url_for("settings_page", error="password_length"))
+    if new_password != confirmation:
+        return redirect(url_for("settings_page", error="password_match"))
+    if new_password == current_password:
+        return redirect(url_for("settings_page", error="password_same"))
+
+    try:
+        new_secret_key, backup_retained = rotate_password(
+            current_password,
+            new_password,
+        )
+    except (VaultError, SchemaError, OSError, sqlite3.DatabaseError) as error:
+        app.logger.error("Password change failed: %s", error)
+        return redirect(url_for("settings_page", error="password_change"))
+
+    lock_data()
+    app.secret_key = new_secret_key
+    LOGIN_ATTEMPTS.clear()
+    session.clear()
+    login_arguments = {"changed": "1"}
+    if backup_retained:
+        login_arguments["backup"] = "1"
+    return redirect(url_for("login", **login_arguments))
 
 
 @app.post("/api/link-token")

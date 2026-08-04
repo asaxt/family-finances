@@ -1,7 +1,8 @@
-import os
-import shutil
-import tempfile
-from pathlib import Path
+from vault import (
+    create_encrypted_backup,
+    delete_encrypted_backup,
+    restore_encrypted_backup,
+)
 
 
 CURRENT_SCHEMA_VERSION = 0
@@ -257,42 +258,6 @@ def migrate_schema(connection):
     return True
 
 
-def _atomic_copy(source, destination):
-    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
-    try:
-        shutil.copyfile(source, temporary)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, destination)
-        os.chmod(destination, 0o600)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def create_migration_backup(vault_path, auth_path):
-    vault_path = Path(vault_path)
-    auth_path = Path(auth_path)
-    backup_dir = Path(
-        tempfile.mkdtemp(prefix=".migration-backup-", dir=vault_path.parent)
-    )
-    os.chmod(backup_dir, 0o700)
-    try:
-        _atomic_copy(vault_path, backup_dir / vault_path.name)
-        _atomic_copy(auth_path, backup_dir / auth_path.name)
-    except Exception:
-        shutil.rmtree(backup_dir, ignore_errors=True)
-        raise
-    return backup_dir
-
-
-def restore_migration_backup(backup_dir, vault_path, auth_path):
-    backup_dir = Path(backup_dir)
-    vault_path = Path(vault_path)
-    auth_path = Path(auth_path)
-    _atomic_copy(backup_dir / vault_path.name, vault_path)
-    _atomic_copy(backup_dir / auth_path.name, auth_path)
-
-
 def prepare_encrypted_database(database, data_key, auth_path):
     with database.connection() as connection:
         if database_is_empty(connection):
@@ -309,7 +274,11 @@ def prepare_encrypted_database(database, data_key, auth_path):
     if not needs_migration:
         return False
 
-    backup_dir = create_migration_backup(database.path, auth_path)
+    backup_dir = create_encrypted_backup(
+        database.path,
+        auth_path,
+        prefix=".migration-backup-",
+    )
     try:
         with database.connection() as connection:
             migrate_schema(connection)
@@ -320,9 +289,9 @@ def prepare_encrypted_database(database, data_key, auth_path):
             validate_schema(connection)
     except Exception:
         database.lock()
-        restore_migration_backup(backup_dir, database.path, auth_path)
+        restore_encrypted_backup(backup_dir, database.path, auth_path)
         database.unlock(data_key)
         raise
     else:
-        shutil.rmtree(backup_dir)
+        delete_encrypted_backup(backup_dir)
         return True
