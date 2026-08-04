@@ -1,32 +1,40 @@
 {% extends "base.html" %}
 {% block title %}Overview · {{ app_name }}{% endblock %}
-{% block eyebrow %}{{ month_label }}{% endblock %}
+{% block eyebrow %}Past {{ lookback_days }} days{% endblock %}
 {% block heading %}Spending overview{% endblock %}
 
 {% block content %}
-<section class="metric-grid">
+{% if overview_error == "lookback" %}<p class="form-message error overview-page-message">Choose a lookback between 1 and {{ max_lookback_days }} days.</p>{% endif %}
+<section class="metric-grid overview-metric-grid">
   <article class="metric-card hero">
-    <span class="metric-label">Total spending</span>
+    <span class="metric-label">Total spend · {{ lookback_days }} days</span>
     <div class="metric-value">{{ summary.total|money }}</div>
-    <span class="metric-note">Posted purchases across {{ summary.card_totals|length }} card{{ "" if summary.card_totals|length == 1 else "s" }}</span>
+    <span class="metric-note">{{ summary.date_from }}–{{ summary.date_to }} · {{ summary.card_totals|length }} card{{ "" if summary.card_totals|length == 1 else "s" }}</span>
   </article>
   <article class="metric-card">
-    <span class="metric-label">Compared with last month</span>
-    <div class="metric-value {{ 'up' if summary.change and summary.change > 0 else 'down' }}">
+    <span class="metric-label">Daily average · {{ lookback_days }} days</span>
+    <div class="metric-value">{{ summary.daily_average|money }}</div>
+    <span class="metric-note">Total divided across {{ lookback_days }} calendar days</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Prior {{ lookback_days }} days</span>
+    <div class="metric-value {{ 'up' if summary.change is not none and summary.change > 0 else ('down' if summary.change is not none and summary.change < 0 else '') }}">
       {% if summary.change is not none %}{{ "%+.0f"|format(summary.change) }}%{% else %}—{% endif %}
     </div>
-    <span class="metric-note">{{ summary.prior_total|money }} · {{ summary.comparison_label }}</span>
+    <span class="metric-note">{{ summary.prior_total|money }} · {{ summary.prior_date_from }}–{{ summary.prior_date_to }}</span>
   </article>
   <article class="metric-card">
-    <span class="metric-label">Daily average</span>
-    <div class="metric-value">{{ summary.daily_average|money }}</div>
-    <span class="metric-note">Across {{ summary.elapsed_days }} day{{ "" if summary.elapsed_days == 1 else "s" }}</span>
-  </article>
-  <article class="metric-card">
-    <span class="metric-label">Projected month</span>
+    <span class="metric-label">Projected calendar month</span>
     <div class="metric-value">{{ summary.projected_total|money }}</div>
+    <span class="metric-note">{{ summary.current_month_total|money }} through day {{ summary.current_month_elapsed_days }} of {{ summary.current_month_label }}</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">{{ summary.last_month_label }} vs prior average</span>
+    <div class="metric-value {{ 'up' if summary.last_month_change is not none and summary.last_month_change > 0 else ('down' if summary.last_month_change is not none and summary.last_month_change < 0 else '') }}">
+      {% if summary.last_month_change is not none %}{{ "%+.0f"|format(summary.last_month_change) }}%{% else %}—{% endif %}
+    </div>
     <span class="metric-note">
-      {% if summary.budget_total and not account_id and not connection_id %}{{ summary.budget_total|money }} total budget{% else %}Based on your pace so far{% endif %}
+      {% if summary.prior_month_count %}{{ summary.last_month_total|money }} vs {{ summary.prior_month_average|money }} across {{ summary.prior_month_count }} prior full month{{ "" if summary.prior_month_count == 1 else "s" }}{% else %}More complete calendar history is needed{% endif %}
     </span>
   </article>
 </section>
@@ -63,9 +71,9 @@
   <div class="panel-header">
     <div>
       <h2>What stands out</h2>
-      <p>A quick read on this month</p>
+      <p>A quick read on the past {{ lookback_days }} days</p>
     </div>
-    <a class="text-link" href="/trends?month={{ month }}{{ person_query }}{{ account_query }}">Explore long-term trends →</a>
+    <a class="text-link" href="{{ url_for('trends', person=connection_id, account=account_id) }}">Explore long-term trends →</a>
   </div>
   <div class="insight-list">
     {% for insight in summary.insights %}
@@ -81,13 +89,13 @@
     <div class="panel-header">
       <div>
         <h2>Top categories</h2>
-        <p>Where the largest share of your money went</p>
+        <p>Where the largest share went over {{ lookback_days }} days</p>
       </div>
-      <a class="text-link" href="/categories?month={{ month }}{{ person_query }}{{ account_query }}">View all →</a>
+      <a class="text-link" href="{{ url_for('transactions', date_from=summary.date_from, date_to=summary.date_to, person=connection_id, account=account_id) }}">View all →</a>
     </div>
     <div class="rank-list">
       {% for category in summary.categories[:6] %}
-        <a class="rank-row" href="/transactions?month={{ month }}&category={{ category.name|urlencode }}{{ person_query }}{{ account_query }}">
+        <a class="rank-row" href="{{ url_for('transactions', date_from=summary.date_from, date_to=summary.date_to, category=category.name, person=connection_id, account=account_id) }}">
           <span class="rank-number">{{ "%02d"|format(loop.index) }}</span>
           <span>
             <span class="rank-name">{{ category.name }}</span>
@@ -97,7 +105,7 @@
           <span class="rank-amount">{{ category.amount|money }}</span>
         </a>
       {% else %}
-        <div class="empty">No spending found for this month.</div>
+        <div class="empty">No spending found in this lookback window.</div>
       {% endfor %}
     </div>
   </article>
@@ -127,9 +135,9 @@
   <div class="panel-header">
     <div>
       <h2>Recent activity</h2>
-      <p>The latest purchases in this view</p>
+      <p>The latest transactions in this {{ lookback_days }}-day view</p>
     </div>
-    <a class="text-link" href="/transactions?month={{ month }}{{ person_query }}{{ account_query }}">See every transaction →</a>
+    <a class="text-link" href="{{ url_for('transactions', date_from=summary.date_from, date_to=summary.date_to, person=connection_id, account=account_id) }}">See every transaction →</a>
   </div>
   <div class="table-wrap">
     <table>

@@ -36,9 +36,12 @@ from vault import (
 )
 
 from analytics import (
+    DEFAULT_OVERVIEW_LOOKBACK_DAYS,
+    MAX_OVERVIEW_LOOKBACK_DAYS,
     category_details,
     long_term_trends,
     month_label,
+    rolling_spending_summary,
     spending_summary,
     transaction_list,
 )
@@ -392,6 +395,18 @@ def save_setting(key, value):
             """,
             (key, value),
         )
+
+
+def overview_lookback_days():
+    try:
+        value = int(setting("overview_lookback_days"))
+    except (TypeError, ValueError):
+        return DEFAULT_OVERVIEW_LOOKBACK_DAYS
+    return (
+        value
+        if 1 <= value <= MAX_OVERVIEW_LOOKBACK_DAYS
+        else DEFAULT_OVERVIEW_LOOKBACK_DAYS
+    )
 
 
 def plaid_credentials():
@@ -794,18 +809,22 @@ def page_context(active):
 @app.get("/")
 def overview():
     context = page_context("overview")
+    context["lookback_days"] = overview_lookback_days()
+    context["max_lookback_days"] = MAX_OVERVIEW_LOOKBACK_DAYS
+    context["overview_error"] = request.args.get("error")
     with db() as connection:
-        context["summary"] = spending_summary(
+        context["summary"] = rolling_spending_summary(
             connection,
-            context["month"],
+            context["lookback_days"],
             context["account_id"],
             context["connection_id"],
         )
         context["recent"] = transaction_list(
             connection,
-            context["month"],
-            context["account_id"],
-            context["connection_id"],
+            account_id=context["account_id"],
+            connection_id=context["connection_id"],
+            date_from=context["summary"]["date_from"],
+            date_to=context["summary"]["date_to"],
             limit=8,
         )[:8]
     context["credit_balances"] = [
@@ -1023,6 +1042,23 @@ def update_savings_goal():
         return redirect(url_for("savings", error="goal"))
     save_setting("savings_goal_cents", str(goal))
     return redirect(url_for("savings", saved="goal"))
+
+
+@app.post("/api/overview-lookback")
+def update_overview_lookback():
+    try:
+        lookback_days = int(request.form.get("lookback_days", ""))
+    except ValueError:
+        lookback_days = 0
+    redirect_arguments = {
+        "account": request.form.get("account") or None,
+        "person": request.form.get("person") or None,
+    }
+    if not 1 <= lookback_days <= MAX_OVERVIEW_LOOKBACK_DAYS:
+        redirect_arguments["error"] = "lookback"
+        return redirect(url_for("overview", **redirect_arguments))
+    save_setting("overview_lookback_days", str(lookback_days))
+    return redirect(url_for("overview", **redirect_arguments))
 
 
 def manual_account_values():

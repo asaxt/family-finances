@@ -65,8 +65,14 @@
 
     {% if active not in ["savings", "settings"] %}
     <section class="filterbar">
-      <form method="get" class="filter-form">
-        {% if active == "trends" %}
+      <form method="{{ 'post' if active == 'overview' else 'get' }}" class="filter-form"{% if active == "overview" %} action="{{ url_for('update_overview_lookback') }}"{% endif %}>
+        {% if active == "overview" %}
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <label>
+            <span>Lookback</span>
+            <input class="lookback-input" type="number" name="lookback_days" value="{{ lookback_days }}" min="1" max="{{ max_lookback_days }}" required>
+          </label>
+        {% elif active == "trends" %}
           <input type="hidden" name="month" value="{{ month }}">
         {% elif active != "transactions" %}
           <label>
