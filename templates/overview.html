@@ -5,7 +5,7 @@
 
 {% block content %}
 {% if overview_error == "lookback" %}<p class="form-message error overview-page-message">Choose a lookback between 1 and {{ max_lookback_days }} days.</p>{% endif %}
-<section class="metric-grid overview-metric-grid">
+<section class="metric-grid">
   <article class="metric-card hero">
     <span class="metric-label">Total spend · {{ lookback_days }} days</span>
     <div class="metric-value">{{ summary.total|money }}</div>
@@ -27,15 +27,6 @@
     <span class="metric-label">Projected calendar month</span>
     <div class="metric-value">{{ summary.projected_total|money }}</div>
     <span class="metric-note">{{ summary.current_month_total|money }} through day {{ summary.current_month_elapsed_days }} of {{ summary.current_month_label }}</span>
-  </article>
-  <article class="metric-card">
-    <span class="metric-label">{{ summary.last_month_label }} vs prior average</span>
-    <div class="metric-value {{ 'up' if summary.last_month_change is not none and summary.last_month_change > 0 else ('down' if summary.last_month_change is not none and summary.last_month_change < 0 else '') }}">
-      {% if summary.last_month_change is not none %}{{ "%+.0f"|format(summary.last_month_change) }}%{% else %}—{% endif %}
-    </div>
-    <span class="metric-note">
-      {% if summary.prior_month_count %}{{ summary.last_month_total|money }} vs {{ summary.prior_month_average|money }} across {{ summary.prior_month_count }} prior full month{{ "" if summary.prior_month_count == 1 else "s" }}{% else %}More complete calendar history is needed{% endif %}
-    </span>
   </article>
 </section>
 

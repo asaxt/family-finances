@@ -325,60 +325,21 @@ def rolling_spending_summary(
         else None
     )
 
-    monthly_rows = connection.execute(
-        f"""
-        SELECT substr(t.transacted_at, 1, 7) AS month,
-               SUM({SPEND_SQL}) AS amount
-        FROM transactions t
-        JOIN accounts a ON a.id = t.account_id
-        WHERE t.pending = 0 AND t.excluded = 0
-          AND t.transacted_at <= ?
-          {account_sql}
-        GROUP BY substr(t.transacted_at, 1, 7)
-        ORDER BY month
-        """,
-        [today.isoformat(), *account_params],
-    ).fetchall()
-    coverage = connection.execute(
-        f"""
-        SELECT MIN(t.transacted_at) AS first_date
-        FROM transactions t
-        JOIN accounts a ON a.id = t.account_id
-        WHERE t.pending = 0 AND t.excluded = 0
-          AND t.transacted_at <= ?
-          {account_sql}
-        """,
-        [today.isoformat(), *account_params],
-    ).fetchone()
-    amounts_by_month = {row["month"]: row["amount"] for row in monthly_rows}
     current_month = today.strftime("%Y-%m")
-    last_month = previous_month(current_month)
-    current_month_total = amounts_by_month.get(current_month, 0)
-    last_month_total = amounts_by_month.get(last_month, 0)
+    current_month_total = connection.execute(
+        f"""
+        SELECT COALESCE(SUM({SPEND_SQL}), 0) AS total
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        WHERE t.pending = 0 AND t.excluded = 0
+          AND substr(t.transacted_at, 1, 7) = ?
+          AND t.transacted_at <= ?
+          {account_sql}
+        """,
+        [current_month, today.isoformat(), *account_params],
+    ).fetchone()["total"]
     current_month_days = calendar.monthrange(today.year, today.month)[1]
     projected_total = round(current_month_total / today.day * current_month_days)
-
-    prior_months = []
-    first_date = coverage["first_date"]
-    if first_date:
-        first_date = datetime.strptime(first_date, "%Y-%m-%d").date()
-        final_prior_month = previous_month(last_month)
-        first_month = first_date.strftime("%Y-%m")
-        if first_month <= final_prior_month:
-            prior_months = month_range(first_month, final_prior_month)
-            if first_date.day > 1:
-                prior_months = prior_months[1:]
-    prior_month_average = (
-        sum(amounts_by_month.get(month, 0) for month in prior_months)
-        / len(prior_months)
-        if prior_months
-        else None
-    )
-    last_month_change = (
-        (last_month_total - prior_month_average) / prior_month_average * 100
-        if prior_month_average is not None and prior_month_average > 0
-        else None
-    )
 
     insights = []
     if categories and total > 0:
@@ -413,11 +374,6 @@ def rolling_spending_summary(
         "current_month_total": current_month_total,
         "current_month_label": month_label(current_month),
         "current_month_elapsed_days": today.day,
-        "last_month_total": last_month_total,
-        "last_month_label": month_label(last_month),
-        "prior_month_average": prior_month_average,
-        "prior_month_count": len(prior_months),
-        "last_month_change": last_month_change,
         "categories": categories,
         "merchants": merchants,
         "card_totals": card_totals,

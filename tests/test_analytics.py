@@ -60,7 +60,6 @@ class RollingOverviewAnalyticsTests(unittest.TestCase):
 
     def test_rolling_and_calendar_metrics_use_their_intended_windows(self):
         transactions = (
-            ("may", "2026-05-01", 5000, "Travel", "Rail"),
             ("june", "2026-06-17", 1000, "Dining", "Cafe"),
             ("july-prior", "2026-07-16", 3000, "Groceries", "Market"),
             ("july-current", "2026-07-17", 1000, "Dining", "Cafe"),
@@ -102,33 +101,12 @@ class RollingOverviewAnalyticsTests(unittest.TestCase):
         self.assertEqual(summary["change"], 50)
         self.assertEqual(summary["current_month_total"], 5000)
         self.assertEqual(summary["projected_total"], 10333)
-        self.assertEqual(summary["last_month_total"], 4000)
-        self.assertEqual(summary["prior_month_average"], 3000)
-        self.assertEqual(summary["prior_month_count"], 2)
-        self.assertAlmostEqual(summary["last_month_change"], 100 / 3)
         self.assertEqual(summary["categories"][0]["name"], "Groceries")
         self.assertEqual(summary["categories"][0]["amount"], 5000)
         self.assertEqual(summary["categories"][0]["transaction_count"], 2)
         self.assertEqual(summary["merchants"][0]["name"], "Market")
         self.assertEqual(summary["card_totals"][0]["amount"], 6000)
         self.assertEqual(summary["largest"]["amount"], 3000)
-
-    def test_partial_first_calendar_month_is_not_used_in_average(self):
-        self.add_transaction("partial", "2026-05-15", 9000, "Travel", "Hotel")
-        self.add_transaction("complete", "2026-06-01", 2000, "Dining", "Cafe")
-        self.add_transaction("last", "2026-07-01", 4000, "Dining", "Cafe")
-
-        summary = rolling_spending_summary(
-            self.connection,
-            lookback_days=30,
-            today=date(2026, 8, 15),
-        )
-
-        self.assertEqual(summary["prior_month_count"], 1)
-        self.assertEqual(summary["prior_month_average"], 2000)
-        self.assertEqual(summary["last_month_total"], 4000)
-        self.assertEqual(summary["last_month_change"], 100)
-
 
 if __name__ == "__main__":
     unittest.main()

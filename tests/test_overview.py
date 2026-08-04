@@ -64,7 +64,8 @@ class OverviewTests(unittest.TestCase):
         self.assertIn(b'name="lookback_days" value="30"', overview.data)
         self.assertNotIn(b'type="month"', overview.data)
         self.assertIn(b"Projected calendar month", overview.data)
-        self.assertIn(b"vs prior average", overview.data)
+        self.assertNotIn(b"vs prior average", overview.data)
+        self.assertEqual(overview.data.count(b'<article class="metric-card'), 4)
 
     def test_valid_lookback_is_encrypted_and_invalid_values_are_rejected(self):
         overview = self.client.get("/")
