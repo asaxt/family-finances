@@ -1,5 +1,5 @@
 import calendar
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 
 SPEND_SQL = """
@@ -9,6 +9,9 @@ CASE
     ELSE 0
 END
 """
+
+DEFAULT_OVERVIEW_LOOKBACK_DAYS = 30
+MAX_OVERVIEW_LOOKBACK_DAYS = 365
 
 
 def previous_month(month):
@@ -78,7 +81,11 @@ def spending_summary(connection, month, account_id=None, connection_id=None):
 
     total = total_for(month)
     prior_total = total_for(prior, comparison_day)
-    change = ((total - prior_total) / prior_total * 100) if prior_total else None
+    change = (
+        (total - prior_total) / prior_total * 100
+        if prior_total > 0
+        else None
+    )
 
     month_days = calendar.monthrange(*map(int, month.split("-")))[1]
     elapsed = today.day if month == today.strftime("%Y-%m") else month_days
@@ -208,6 +215,169 @@ def spending_summary(connection, month, account_id=None, connection_id=None):
         "budgets": budgets,
         "budget_total": budget_total,
         "budget_spent": budget_spent,
+        "insights": insights,
+    }
+
+
+def rolling_spending_summary(
+    connection,
+    lookback_days=DEFAULT_OVERVIEW_LOOKBACK_DAYS,
+    account_id=None,
+    connection_id=None,
+    today=None,
+):
+    today = today or date.today()
+    current_start = today - timedelta(days=lookback_days - 1)
+    prior_end = current_start - timedelta(days=1)
+    prior_start = prior_end - timedelta(days=lookback_days - 1)
+    account_sql, account_params = scope_filter(account_id, connection_id)
+
+    rows = [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT t.transacted_at AS date,
+                   COALESCE(t.category_override, t.category) AS category,
+                   COALESCE(NULLIF(t.merchant, ''), t.description) AS merchant,
+                   t.description,
+                   a.id AS account_id,
+                   a.name AS account_name,
+                   a.mask,
+                   c.owner_name,
+                   {SPEND_SQL} AS amount
+            FROM transactions t
+            JOIN accounts a ON a.id = t.account_id
+            JOIN connections c ON c.id = a.connection_id
+            WHERE t.pending = 0 AND t.excluded = 0
+              AND t.transacted_at BETWEEN ? AND ?
+              {account_sql}
+            ORDER BY t.transacted_at
+            """,
+            [prior_start.isoformat(), today.isoformat(), *account_params],
+        ).fetchall()
+    ]
+    current_rows = [row for row in rows if row["date"] >= current_start.isoformat()]
+    prior_rows = [row for row in rows if row["date"] <= prior_end.isoformat()]
+    total = sum(row["amount"] for row in current_rows)
+    prior_total = sum(row["amount"] for row in prior_rows)
+    change = ((total - prior_total) / prior_total * 100) if prior_total else None
+
+    category_groups = {}
+    merchant_groups = {}
+    card_groups = {}
+    for row in current_rows:
+        category = category_groups.setdefault(
+            row["category"],
+            {"name": row["category"], "amount": 0, "transaction_count": 0},
+        )
+        category["amount"] += row["amount"]
+        category["transaction_count"] += 1
+
+        merchant = merchant_groups.setdefault(
+            row["merchant"],
+            {"name": row["merchant"], "amount": 0, "transaction_count": 0},
+        )
+        merchant["amount"] += row["amount"]
+        merchant["transaction_count"] += 1
+
+        card_key = (
+            row["account_id"],
+            row["account_name"],
+            row["mask"],
+            row["owner_name"],
+        )
+        card = card_groups.setdefault(
+            card_key,
+            {
+                "id": row["account_id"],
+                "name": row["account_name"],
+                "mask": row["mask"],
+                "owner_name": row["owner_name"],
+                "amount": 0,
+            },
+        )
+        card["amount"] += row["amount"]
+
+    categories = sorted(
+        (row for row in category_groups.values() if row["amount"] > 0),
+        key=lambda row: row["amount"],
+        reverse=True,
+    )
+    merchants = sorted(
+        (row for row in merchant_groups.values() if row["amount"] > 0),
+        key=lambda row: row["amount"],
+        reverse=True,
+    )[:8]
+    card_totals = sorted(
+        (row for row in card_groups.values() if row["amount"] > 0),
+        key=lambda row: row["amount"],
+        reverse=True,
+    )
+    positive_rows = [row for row in current_rows if row["amount"] > 0]
+    largest_row = max(positive_rows, key=lambda row: row["amount"], default=None)
+    largest = (
+        {
+            "name": largest_row["merchant"],
+            "amount": largest_row["amount"],
+            "date": largest_row["date"],
+        }
+        if largest_row
+        else None
+    )
+
+    current_month = today.strftime("%Y-%m")
+    current_month_total = connection.execute(
+        f"""
+        SELECT COALESCE(SUM({SPEND_SQL}), 0) AS total
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        WHERE t.pending = 0 AND t.excluded = 0
+          AND substr(t.transacted_at, 1, 7) = ?
+          AND t.transacted_at <= ?
+          {account_sql}
+        """,
+        [current_month, today.isoformat(), *account_params],
+    ).fetchone()["total"]
+    current_month_days = calendar.monthrange(today.year, today.month)[1]
+    projected_total = round(current_month_total / today.day * current_month_days)
+
+    insights = []
+    if categories and total > 0:
+        top = categories[0]
+        insights.append(
+            f"{top['name']} is your largest category at {top['amount'] / total * 100:.0f}% of spending."
+        )
+    if change is not None:
+        if change == 0:
+            insights.append("Spending matches the preceding lookback window.")
+        else:
+            direction = "higher" if change > 0 else "lower"
+            insights.append(
+                f"Spending is {abs(change):.0f}% {direction} than the preceding {lookback_days} days."
+            )
+    if largest:
+        insights.append(
+            f"Your largest purchase was {largest['name']} at ${largest['amount'] / 100:,.2f}."
+        )
+
+    return {
+        "lookback_days": lookback_days,
+        "date_from": current_start.isoformat(),
+        "date_to": today.isoformat(),
+        "prior_date_from": prior_start.isoformat(),
+        "prior_date_to": prior_end.isoformat(),
+        "total": total,
+        "prior_total": prior_total,
+        "change": change,
+        "daily_average": total / lookback_days,
+        "projected_total": projected_total,
+        "current_month_total": current_month_total,
+        "current_month_label": month_label(current_month),
+        "current_month_elapsed_days": today.day,
+        "categories": categories,
+        "merchants": merchants,
+        "card_totals": card_totals,
+        "largest": largest,
         "insights": insights,
     }
 

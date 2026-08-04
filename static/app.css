@@ -59,6 +59,7 @@ h3 { margin: 0; font-size: 15px; }
 .filter-form { display: flex; gap: 11px; align-items: end; }
 .filter-form label { display: grid; gap: 4px; }
 .filter-form label span { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.lookback-input { width: 90px; }
 input, select { border: 1px solid #d9dfda; border-radius: 8px; padding: 8px 10px; color: var(--ink); background: white; outline: none; }
 input:focus, select:focus { border-color: var(--forest-2); box-shadow: 0 0 0 3px rgba(36,99,78,.1); }
 .data-status { margin: 0 4px 8px 0; color: var(--muted); font-size: 12px; }
@@ -182,6 +183,7 @@ input:focus, select:focus { border-color: var(--forest-2); box-shadow: 0 0 0 3px
 .form-message.error { color: #7d3034; background: #fde8e9; }
 .form-message.success { color: #2f6546; background: #e7f5eb; }
 .form-message.development { color: #654b1e; background: #fff4db; }
+.overview-page-message { margin: 0 0 16px; }
 .savings-account-list { display: grid; }
 .savings-account-row { display: flex; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .savings-account-row:first-child { padding-top: 2px; }
