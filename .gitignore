@@ -13,6 +13,7 @@
 *.vault-*
 backups/
 .migration-backup-*/
+.password-change-backup-*/
 
 # Python and editor files
 .venv

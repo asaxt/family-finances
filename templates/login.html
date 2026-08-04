@@ -12,6 +12,8 @@
     <p class="eyebrow">Private household finances</p>
     <h1>Welcome back</h1>
     <p class="auth-copy">Enter your app password to open the budget and savings dashboard.</p>
+    {% if password_changed %}<p class="form-message success">Password changed. Sign in with your new password.</p>{% endif %}
+    {% if password_backup_retained %}<p class="form-message error">The password changed, but an encrypted recovery copy could not be removed. Keep it private and remove it before relying on the old password being retired.</p>{% endif %}
     {% if error %}<p class="form-message error">{{ error }}</p>{% endif %}
     <form class="auth-form" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

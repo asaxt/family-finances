@@ -180,6 +180,7 @@ input:focus, select:focus { border-color: var(--forest-2); box-shadow: 0 0 0 3px
 .form-footer p { margin: 0; color: var(--muted); font-size: 11px; }
 .form-message { margin: -4px 0 16px; padding: 10px 12px; border-radius: 9px; font-size: 12px; }
 .form-message.error { color: #7d3034; background: #fde8e9; }
+.form-message.success { color: #2f6546; background: #e7f5eb; }
 .form-message.development { color: #654b1e; background: #fff4db; }
 .savings-account-list { display: grid; }
 .savings-account-row { display: flex; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
