@@ -56,7 +56,7 @@
 
   <div class="table-wrap transaction-table-wrap">
     <table>
-      <thead><tr><th class="select-column"><input id="select-all-transactions" type="checkbox" aria-label="Select every visible transaction"></th><th>Date</th><th>Merchant</th><th>Category</th><th>Card</th><th>Status</th><th class="currency">Amount</th><th>Review</th></tr></thead>
+      <thead><tr><th class="select-column"><input id="select-all-transactions" type="checkbox" aria-label="Select every visible transaction"></th><th>Date</th><th>Merchant</th><th>Category</th><th>Account</th><th>Status</th><th class="currency">Amount</th><th>Review</th></tr></thead>
       <tbody>
         {% for transaction in transactions %}
           <tr class="{{ 'muted-row' if transaction.excluded and transaction_view != 'excluded' }}">

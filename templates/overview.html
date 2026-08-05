@@ -9,7 +9,7 @@
   <article class="metric-card hero">
     <span class="metric-label">Total spend · {{ lookback_days }} days</span>
     <div class="metric-value">{{ summary.total|money }}</div>
-    <span class="metric-note">{{ summary.date_from }}–{{ summary.date_to }} · {{ summary.card_totals|length }} card{{ "" if summary.card_totals|length == 1 else "s" }}</span>
+    <span class="metric-note">{{ summary.date_from }}–{{ summary.date_to }} · {{ summary.card_totals|length }} account{{ "" if summary.card_totals|length == 1 else "s" }}</span>
   </article>
   <article class="metric-card">
     <span class="metric-label">Daily average · {{ lookback_days }} days</span>
@@ -57,6 +57,27 @@
     <div class="empty compact-empty">Use Sync once to retrieve the latest cached card balances.</div>
   {% endif %}
 </section>
+
+{% if cash_balances %}
+<section class="panel balance-panel">
+  <div class="panel-header balance-header">
+    <div>
+      <h2>Current cash balances</h2>
+      <p>Plaid’s latest cached checking and savings balances</p>
+    </div>
+    <div class="balance-total"><span>Total cash</span><strong>{{ cash_balance_total|money }}</strong></div>
+  </div>
+  <div class="balance-card-grid">
+    {% for account in cash_balances %}
+      <div class="balance-card">
+        <span>{{ account.owner_name }} · {{ account.institution }} · {{ account.name }} ····{{ account.mask }}</span>
+        <strong>{{ account.current_balance|money }}{% if account.available_balance is not none and account.available_balance != account.current_balance %}<small> · {{ account.available_balance|money }} available</small>{% endif %}</strong>
+      </div>
+    {% endfor %}
+  </div>
+  {% if cash_balance_updated_at %}<p class="balance-timestamp">Checked {{ cash_balance_updated_at[:16]|replace("T", " ") }} during the latest sync.</p>{% endif %}
+</section>
+{% endif %}
 
 <section class="panel overview-insights">
   <div class="panel-header">
@@ -132,7 +153,7 @@
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th>Card</th><th class="currency">Amount</th></tr></thead>
+      <thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th>Account</th><th class="currency">Amount</th></tr></thead>
       <tbody>
         {% for transaction in recent %}
           <tr>
