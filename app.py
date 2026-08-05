@@ -40,6 +40,7 @@ from analytics import (
     DEFAULT_OVERVIEW_LOOKBACK_DAYS,
     MAX_OVERVIEW_LOOKBACK_DAYS,
     category_details,
+    cash_flow_summary,
     long_term_trends,
     month_label,
     rolling_spending_summary,
@@ -720,6 +721,7 @@ def save_transaction(connection, transaction):
 
 def save_account(connection, account, connection_id, institution, checked_at):
     current = account.balances.current
+    available = getattr(account.balances, "available", None)
     current_balance = (
         int(
             (Decimal(str(current)) * 100).quantize(
@@ -729,19 +731,32 @@ def save_account(connection, account, connection_id, institution, checked_at):
         if current is not None
         else None
     )
+    available_balance = (
+        int(
+            (Decimal(str(available)) * 100).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+        if available is not None
+        else None
+    )
+    subtype = getattr(account, "subtype", None)
+    subtype = getattr(subtype, "value", subtype)
     connection.execute(
         """
         INSERT INTO accounts (
             id, connection_id, institution, name, mask, type,
-            current_balance, balance_updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            subtype, current_balance, available_balance, balance_updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             connection_id = excluded.connection_id,
             institution = excluded.institution,
             name = excluded.name,
             mask = excluded.mask,
             type = excluded.type,
+            subtype = excluded.subtype,
             current_balance = excluded.current_balance,
+            available_balance = excluded.available_balance,
             balance_updated_at = excluded.balance_updated_at
         """,
         (
@@ -751,7 +766,9 @@ def save_account(connection, account, connection_id, institution, checked_at):
             account.name,
             account.mask,
             account.type.value,
+            subtype,
             current_balance,
+            available_balance,
             checked_at,
         ),
     )
@@ -945,7 +962,45 @@ def overview():
         if account["balance_updated_at"]
     ]
     context["credit_balance_updated_at"] = max(balance_dates) if balance_dates else None
+    context["cash_balances"] = [
+        account
+        for account in context["accounts"]
+        if account["type"] == "depository"
+        and account["current_balance"] is not None
+        and (not context["account_id"] or account["id"] == context["account_id"])
+        and (
+            not context["connection_id"]
+            or account["connection_id"] == context["connection_id"]
+        )
+    ]
+    context["cash_balance_total"] = sum(
+        account["current_balance"] for account in context["cash_balances"]
+    )
+    cash_balance_dates = [
+        account["balance_updated_at"]
+        for account in context["cash_balances"]
+        if account["balance_updated_at"]
+    ]
+    context["cash_balance_updated_at"] = (
+        max(cash_balance_dates) if cash_balance_dates else None
+    )
     return render_template("overview.html", **context)
+
+
+@app.get("/cash-flow")
+def cash_flow():
+    context = page_context("cash_flow")
+    context["lookback_days"] = overview_lookback_days()
+    context["max_lookback_days"] = MAX_OVERVIEW_LOOKBACK_DAYS
+    context["cash_flow_error"] = request.args.get("error")
+    with db() as connection:
+        context["cash_flow"] = cash_flow_summary(
+            connection,
+            context["lookback_days"],
+            context["account_id"],
+            context["connection_id"],
+        )
+    return render_template("cash_flow.html", **context)
 
 
 @app.get("/trends")
@@ -1153,11 +1208,25 @@ def update_overview_lookback():
         "account": request.form.get("account") or None,
         "person": request.form.get("person") or None,
     }
+    destination = "cash_flow" if request.form.get("view") == "cash_flow" else "overview"
     if not 1 <= lookback_days <= MAX_OVERVIEW_LOOKBACK_DAYS:
         redirect_arguments["error"] = "lookback"
-        return redirect(url_for("overview", **redirect_arguments))
+        return redirect(url_for(destination, **redirect_arguments))
     save_setting("overview_lookback_days", str(lookback_days))
-    return redirect(url_for("overview", **redirect_arguments))
+    return redirect(url_for(destination, **redirect_arguments))
+
+
+@app.post("/api/cash-flow/<transaction_id>")
+def update_cash_flow_type(transaction_id):
+    flow_type = request.form.get("flow_type", "")
+    if flow_type not in {"", "income", "transfer", "refund", "ignore"}:
+        return redirect(url_for("cash_flow", error="classification"))
+    with db() as connection:
+        connection.execute(
+            "UPDATE transactions SET cash_flow_override = ? WHERE id = ?",
+            (flow_type or None, transaction_id),
+        )
+    return redirect(url_for("cash_flow"))
 
 
 def manual_account_values():

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
-  {% if active in ["trends", "categories", "savings"] %}<script src="/static/vendor/chart.umd.min.js"></script>{% endif %}
+  {% if active in ["trends", "categories", "savings", "cash_flow"] %}<script src="/static/vendor/chart.umd.min.js"></script>{% endif %}
 </head>
 <body>
   {% set person_query = '&person=' ~ connection_id if connection_id else '' %}
@@ -27,6 +27,9 @@
       </a>
       <a class="{{ 'active' if active == 'transactions' }}" href="/transactions?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">
         <span>≡</span> Transactions
+      </a>
+      <a class="{{ 'active' if active == 'cash_flow' }}" href="/cash-flow?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">
+        <span>↕</span> Cash Flow
       </a>
       <a class="{{ 'active' if active == 'savings' }}" href="/savings">
         <span>◇</span> Savings
@@ -65,9 +68,10 @@
 
     {% if active not in ["savings", "settings"] %}
     <section class="filterbar">
-      <form method="{{ 'post' if active == 'overview' else 'get' }}" class="filter-form"{% if active == "overview" %} action="{{ url_for('update_overview_lookback') }}"{% endif %}>
-        {% if active == "overview" %}
+      <form method="{{ 'post' if active in ['overview', 'cash_flow'] else 'get' }}" class="filter-form"{% if active in ["overview", "cash_flow"] %} action="{{ url_for('update_overview_lookback') }}"{% endif %}>
+        {% if active in ["overview", "cash_flow"] %}
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          {% if active == "cash_flow" %}<input type="hidden" name="view" value="cash_flow">{% endif %}
           <label>
             <span>Lookback</span>
             <input class="lookback-input" type="number" name="lookback_days" value="{{ lookback_days }}" min="1" max="{{ max_lookback_days }}" required>
@@ -81,24 +85,24 @@
           </label>
         {% endif %}
         <label>
-          <span>Household</span>
+          <span>Connection</span>
           <select name="person">
-            <option value="">Everyone combined</option>
+            <option value="">All connections</option>
             {% for profile in profiles %}
               <option value="{{ profile.id }}" {{ "selected" if profile.id == connection_id }}>
-                {{ profile.owner_name }}
+                {{ profile.owner_name }} · {{ profile.institution }}
               </option>
             {% endfor %}
           </select>
         </label>
         <label>
-          <span>Card</span>
+          <span>Account</span>
           <select name="account">
-            <option value="">All cards</option>
+            <option value="">All accounts</option>
             {% for account in accounts %}
               {% if not connection_id or account.connection_id == connection_id %}
                 <option value="{{ account.id }}" {{ "selected" if account.id == account_id }}>
-                  {{ account.owner_name }} · {{ account.name }} ····{{ account.mask }}
+                  {{ account.owner_name }} · {{ account.institution }} · {{ account.name }} ····{{ account.mask }}
                 </option>
               {% endif %}
             {% endfor %}
@@ -142,7 +146,7 @@
     <p class="dialog-copy">Use Plaid to connect the appropriate financial institution and select only accounts that are not already connected.</p>
     <form id="new-connection-form" class="connection-form">
       <label>
-        <span>Whose spending is this?</span>
+        <span>Whose account is this?</span>
         <input id="owner-name" name="owner_name" required maxlength="40" placeholder="Name">
       </label>
       <button class="button primary" type="submit">Continue to Plaid</button>

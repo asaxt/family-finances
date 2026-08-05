@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 0
+CURRENT_SCHEMA_VERSION = 1
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -13,7 +13,7 @@ class SchemaError(RuntimeError):
     pass
 
 
-EXPECTED_COLUMNS = {
+VERSION_ZERO_COLUMNS = {
     "settings": {"key", "value"},
     "connections": {
         "id",
@@ -70,6 +70,11 @@ EXPECTED_COLUMNS = {
         "created_at",
     },
 }
+EXPECTED_COLUMNS = {
+    **VERSION_ZERO_COLUMNS,
+    "accounts": VERSION_ZERO_COLUMNS["accounts"] | {"subtype", "available_balance"},
+    "transactions": VERSION_ZERO_COLUMNS["transactions"] | {"cash_flow_override"},
+}
 
 
 def schema_version(connection):
@@ -92,9 +97,9 @@ def database_is_empty(connection):
     return not user_tables(connection)
 
 
-def _validate_version_zero(connection):
+def _validate_columns(connection, expected_columns, version):
     tables = user_tables(connection)
-    expected_tables = set(EXPECTED_COLUMNS)
+    expected_tables = set(expected_columns)
     if tables != expected_tables:
         missing = sorted(expected_tables - tables)
         unexpected = sorted(tables - expected_tables)
@@ -103,18 +108,37 @@ def _validate_version_zero(connection):
             details.append(f"missing tables: {', '.join(missing)}")
         if unexpected:
             details.append(f"unexpected tables: {', '.join(unexpected)}")
-        raise SchemaError(f"Schema version 0 is not recognized ({'; '.join(details)}).")
+        raise SchemaError(f"Schema version {version} is not recognized ({'; '.join(details)}).")
 
-    for table, expected in EXPECTED_COLUMNS.items():
+    for table, expected in expected_columns.items():
         columns = {
             row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')
         }
         if columns != expected:
-            raise SchemaError(f"Schema version 0 has unexpected columns in {table}.")
+            raise SchemaError(f"Schema version {version} has unexpected columns in {table}.")
 
 
-VALIDATORS = {0: _validate_version_zero}
-MIGRATIONS = {}
+def _validate_version_zero(connection):
+    _validate_columns(connection, VERSION_ZERO_COLUMNS, 0)
+
+
+def _validate_version_one(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 1)
+
+
+def _migrate_zero_to_one(connection):
+    connection.execute("ALTER TABLE accounts ADD COLUMN subtype TEXT")
+    connection.execute("ALTER TABLE accounts ADD COLUMN available_balance INTEGER")
+    connection.execute(
+        """
+        ALTER TABLE transactions ADD COLUMN cash_flow_override TEXT
+        CHECK (cash_flow_override IN ('income', 'transfer', 'refund', 'ignore'))
+        """
+    )
+
+
+VALIDATORS = {0: _validate_version_zero, 1: _validate_version_one}
+MIGRATIONS = {0: _migrate_zero_to_one}
 
 
 def validate_schema(connection, version=None):
@@ -166,7 +190,9 @@ def create_schema(connection):
                 name TEXT NOT NULL,
                 mask TEXT,
                 type TEXT NOT NULL,
+                subtype TEXT,
                 current_balance INTEGER,
+                available_balance INTEGER,
                 balance_updated_at TEXT,
                 FOREIGN KEY (connection_id) REFERENCES connections(id)
             );
@@ -181,6 +207,9 @@ def create_schema(connection):
                 transacted_at TEXT NOT NULL,
                 category TEXT NOT NULL,
                 category_override TEXT,
+                cash_flow_override TEXT CHECK (
+                    cash_flow_override IN ('income', 'transfer', 'refund', 'ignore')
+                ),
                 excluded INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE budgets (

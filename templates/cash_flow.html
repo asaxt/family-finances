@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Cash Flow · {{ app_name }}{% endblock %}
+{% block eyebrow %}Past {{ lookback_days }} days{% endblock %}
+{% block heading %}Cash flow{% endblock %}
+
+{% block content %}
+{% if cash_flow_error == "lookback" %}<p class="form-message error overview-page-message">Choose a lookback between 1 and {{ max_lookback_days }} days.</p>{% endif %}
+{% if cash_flow_error == "classification" %}<p class="form-message error overview-page-message">Choose a valid cash-flow classification.</p>{% endif %}
+<section class="metric-grid">
+  <article class="metric-card hero">
+    <span class="metric-label">Income · {{ lookback_days }} days</span>
+    <div class="metric-value">{{ cash_flow.income|money }}</div>
+    <span class="metric-note">Deposits categorized or confirmed as income</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Spending</span>
+    <div class="metric-value">{{ cash_flow.spending|money }}</div>
+    <span class="metric-note">Existing spending rules for the same dates</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Net cash flow</span>
+    <div class="metric-value {{ 'down' if cash_flow.net >= 0 else 'up' }}">{{ cash_flow.net|money }}</div>
+    <span class="metric-note">Income and other inflows minus spending</span>
+  </article>
+  <article class="metric-card">
+    <span class="metric-label">Savings rate</span>
+    <div class="metric-value">{% if cash_flow.savings_rate is not none %}{{ "%.0f"|format(cash_flow.savings_rate) }}%{% else %}—{% endif %}</div>
+    <span class="metric-note">Net cash flow as a share of income</span>
+  </article>
+</section>
+
+<section class="content-grid cash-flow-secondary">
+  <article class="panel">
+    <div class="panel-header"><div><h2>Monthly cash flow</h2><p>Up to 24 months of available transaction history</p></div></div>
+    {% if cash_flow.months %}<div class="chart-large"><canvas id="cash-flow-chart"></canvas></div>{% else %}<div class="empty">Connect checking or savings accounts to build cash-flow history.</div>{% endif %}
+  </article>
+  <article class="panel">
+    <div class="panel-header"><div><h2>Movement summary</h2><p>Transfers remain visible but do not count as income or spending</p></div></div>
+    <div class="insight-list">
+      <div class="insight"><span class="insight-icon">+</span><span><strong>Other inflows</strong><br>{{ cash_flow.other_inflows|money }} awaiting review · {{ cash_flow.refunds|money }} refunds</span></div>
+      <div class="insight"><span class="insight-icon">↓</span><span><strong>Transfers in</strong><br>{{ cash_flow.transfers_in|money }}</span></div>
+      <div class="insight"><span class="insight-icon">↑</span><span><strong>Transfers out</strong><br>{{ cash_flow.transfers_out|money }}</span></div>
+    </div>
+    {% if cash_flow.review_count %}<p class="form-message development cash-flow-review-note">{{ cash_flow.review_count }} inflow{{ "" if cash_flow.review_count == 1 else "s" }} need classification below.</p>{% endif %}
+  </article>
+</section>
+
+<section class="panel recent-panel">
+  <div class="panel-header"><div><h2>Income and transfers</h2><p>Review deposits that Plaid did not clearly classify</p></div></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Date</th><th>Description</th><th>Account</th><th>Current treatment</th><th class="currency">Amount</th><th>Change</th></tr></thead>
+      <tbody>
+      {% for item in cash_flow.activity %}
+        <tr>
+          <td>{{ item.date }}</td>
+          <td><span class="transaction-name">{{ item.display_name }}</span><div class="transaction-sub">{{ item.category }}</div></td>
+          <td>{{ item.institution }} · {{ item.account_name }} ····{{ item.mask }}</td>
+          <td><span class="pill {{ 'pending' if item.flow_type == 'review' }}">{{ "Needs review" if item.flow_type == "review" else item.flow_type|title }}</span></td>
+          <td class="currency {{ 'credit' if item.amount < 0 }}">{% if item.amount < 0 %}+{% else %}−{% endif %}{{ item.display_amount|money }}</td>
+          <td>
+            <form class="cash-flow-edit" method="post" action="/api/cash-flow/{{ item.id }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <select name="flow_type">
+                <option value="" {{ "selected" if not item.cash_flow_override }}>Use Plaid category</option>
+                <option value="income" {{ "selected" if item.cash_flow_override == "income" }}>Income</option>
+                <option value="transfer" {{ "selected" if item.cash_flow_override == "transfer" }}>Transfer</option>
+                <option value="refund" {{ "selected" if item.cash_flow_override == "refund" }}>Refund</option>
+                <option value="ignore" {{ "selected" if item.cash_flow_override == "ignore" }}>Ignore</option>
+              </select>
+              <button class="button compact" type="submit">Save</button>
+            </form>
+          </td>
+        </tr>
+      {% else %}<tr><td colspan="6" class="empty">No income or transfer activity found in this lookback.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{% if cash_flow.months %}
+<script>
+  const cashFlowMonths = {{ cash_flow.months|tojson }};
+  const cashFlowMoney = value => `$${value.toLocaleString(undefined, {maximumFractionDigits: 0})}`;
+  new Chart(document.querySelector("#cash-flow-chart"), {
+    type: "bar",
+    data: {
+      labels: cashFlowMonths.map(point => new Date(`${point.month}-02T12:00:00`).toLocaleDateString(undefined, {month: "short", year: "2-digit"})),
+      datasets: [
+        {label: "Income and other inflows", data: cashFlowMonths.map(point => point.total_inflows / 100), backgroundColor: "#65a783"},
+        {label: "Spending", data: cashFlowMonths.map(point => point.spending / 100), backgroundColor: "#d86d73"},
+        {type: "line", label: "Net", data: cashFlowMonths.map(point => point.net / 100), borderColor: "#163f32", backgroundColor: "#163f32", tension: .25}
+      ]
+    },
+    options: {responsive: true, maintainAspectRatio: false, interaction: {mode: "index", intersect: false}, scales: {x: {grid: {display: false}}, y: {border: {display: false}, grid: {color: "#edf0ed"}, ticks: {callback: cashFlowMoney}}}, plugins: {tooltip: {callbacks: {label: item => `${item.dataset.label}: ${cashFlowMoney(item.raw)}`}}}}
+  });
+</script>
+{% endif %}
+{% endblock %}

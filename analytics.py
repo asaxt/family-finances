@@ -382,6 +382,122 @@ def rolling_spending_summary(
     }
 
 
+def cash_flow_summary(
+    connection,
+    lookback_days=DEFAULT_OVERVIEW_LOOKBACK_DAYS,
+    account_id=None,
+    connection_id=None,
+    today=None,
+):
+    today = today or date.today()
+    current_start = today - timedelta(days=lookback_days - 1)
+    prior_end = current_start - timedelta(days=1)
+    prior_start = prior_end - timedelta(days=lookback_days - 1)
+    account_sql, account_params = scope_filter(account_id, connection_id)
+    rows = [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT t.id, t.transacted_at AS date, t.amount, t.description,
+                   t.merchant, t.excluded, t.cash_flow_override,
+                   COALESCE(t.category_override, t.category) AS category,
+                   a.type, a.name AS account_name, a.mask,
+                   c.owner_name, c.institution
+            FROM transactions t
+            JOIN accounts a ON a.id = t.account_id
+            JOIN connections c ON c.id = a.connection_id
+            WHERE t.pending = 0 AND t.transacted_at <= ? {account_sql}
+            ORDER BY t.transacted_at DESC, ABS(t.amount) DESC
+            """,
+            [today.isoformat(), *account_params],
+        ).fetchall()
+    ]
+
+    def classify(row):
+        if row["cash_flow_override"]:
+            return row["cash_flow_override"]
+        category = row["category"].lower()
+        if category.startswith("transfer") or category in {
+            "loan payments",
+            "loan disbursements",
+        }:
+            return "transfer"
+        if row["type"] == "depository" and row["amount"] < 0:
+            return "income" if category.startswith("income") else "review"
+        return "spending"
+
+    for row in rows:
+        row["flow_type"] = classify(row)
+        row["display_name"] = row["merchant"] or row["description"]
+        row["display_amount"] = abs(row["amount"])
+
+    def totals(selected):
+        result = {
+            "income": 0,
+            "refunds": 0,
+            "other_inflows": 0,
+            "spending": 0,
+            "transfers_in": 0,
+            "transfers_out": 0,
+        }
+        for row in selected:
+            is_cash_inflow = row["type"] == "depository" and row["amount"] < 0
+            if row["flow_type"] == "income" and is_cash_inflow:
+                result["income"] += -row["amount"]
+            elif row["flow_type"] == "refund" and is_cash_inflow:
+                result["refunds"] += -row["amount"]
+            elif row["flow_type"] == "review" and is_cash_inflow:
+                result["other_inflows"] += -row["amount"]
+            elif row["flow_type"] == "transfer":
+                key = "transfers_in" if row["amount"] < 0 else "transfers_out"
+                result[key] += abs(row["amount"])
+            elif row["flow_type"] != "ignore" and not row["excluded"]:
+                if row["type"] == "credit" or row["amount"] > 0:
+                    result["spending"] += row["amount"]
+        result["total_inflows"] = (
+            result["income"] + result["refunds"] + result["other_inflows"]
+        )
+        result["net"] = result["total_inflows"] - result["spending"]
+        result["savings_rate"] = (
+            result["net"] / result["income"] * 100 if result["income"] else None
+        )
+        return result
+
+    current = [row for row in rows if row["date"] >= current_start.isoformat()]
+    prior = [
+        row
+        for row in rows
+        if prior_start.isoformat() <= row["date"] <= prior_end.isoformat()
+    ]
+    current_totals = totals(current)
+    prior_totals = totals(prior)
+
+    monthly = {}
+    for row in rows:
+        month = row["date"][:7]
+        monthly.setdefault(month, []).append(row)
+    months = [
+        {"month": month, **totals(monthly[month])}
+        for month in sorted(monthly)[-24:]
+    ]
+    activity = [
+        row
+        for row in current
+        if row["flow_type"] in {"income", "transfer", "refund", "review"}
+    ][:30]
+    return {
+        **current_totals,
+        "prior": prior_totals,
+        "date_from": current_start.isoformat(),
+        "date_to": today.isoformat(),
+        "prior_date_from": prior_start.isoformat(),
+        "prior_date_to": prior_end.isoformat(),
+        "months": months,
+        "activity": activity,
+        "review_count": sum(row["flow_type"] == "review" for row in current),
+    }
+
+
 def daily_trends(connection, account_id=None, connection_id=None):
     account_sql, account_params = scope_filter(account_id, connection_id)
     rows = connection.execute(

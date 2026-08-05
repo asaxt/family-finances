@@ -222,6 +222,10 @@ input:focus, select:focus { border-color: var(--forest-2); box-shadow: 0 0 0 3px
 .product-fields dt { color: var(--muted); font-weight: 700; }
 .product-fields dd { margin: 0; }
 .product-check-form { margin-top: 15px; }
+.cash-flow-secondary { grid-template-columns: minmax(0, 1.4fr) minmax(280px, .6fr); }
+.cash-flow-review-note { margin: 14px 0 0; }
+.cash-flow-edit { display: flex; align-items: center; gap: 6px; }
+.cash-flow-edit select { min-width: 150px; }
 
 .auth-body { min-height: 100vh; padding: 28px; display: grid; place-items: center; background: radial-gradient(circle at top left, #e5f2e9, var(--canvas) 48%); }
 .auth-card { width: min(430px, 100%); padding: 34px; border: 1px solid var(--line); border-radius: 22px; background: white; box-shadow: 0 24px 70px rgba(22, 63, 50, .13); }
@@ -317,7 +321,7 @@ tr:last-child td { border-bottom: 0; }
 @media (max-width: 760px) {
   .sidebar { position: static; width: auto; min-height: auto; padding: 16px; }
   .brand { padding-bottom: 14px; }
-  .nav { grid-template-columns: repeat(6, 1fr); }
+  .nav { grid-template-columns: repeat(7, 1fr); }
   .nav a { justify-content: center; padding: 10px 5px; font-size: 11px; }
   .nav a span { display: none; }
   .sidebar-footer { display: none; }

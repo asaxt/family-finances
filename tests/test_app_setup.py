@@ -4,6 +4,8 @@ import re
 import sys
 import tempfile
 import unittest
+from datetime import date
+from types import SimpleNamespace
 
 from schema import schema_version
 
@@ -46,7 +48,7 @@ class AppSetupTests(unittest.TestCase):
             rb'name="csrf_token" value="([^"]+)"', response.data
         ).group(1).decode()
 
-    def test_new_installation_creates_schema_zero_and_encrypted_settings(self):
+    def test_new_installation_creates_current_schema_and_encrypted_settings(self):
         password = "a long setup password"
         setup_page = self.client.get("/setup")
         response = self.client.post(
@@ -66,6 +68,7 @@ class AppSetupTests(unittest.TestCase):
             "/trends",
             "/categories",
             "/transactions",
+            "/cash-flow",
             "/savings",
             "/settings",
         ):
@@ -74,11 +77,71 @@ class AppSetupTests(unittest.TestCase):
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
         with self.application.db() as connection:
-            self.assertEqual(schema_version(connection), 0)
+            self.assertEqual(schema_version(connection), 1)
             initial_goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO connections (
+                    plaid_item_id, owner_name, institution, access_token
+                ) VALUES ('item', 'Household', 'Example Bank', 'fake-token')
+                """
+            )
+            self.application.save_account(
+                connection,
+                SimpleNamespace(
+                    account_id="checking",
+                    name="Checking",
+                    mask="1234",
+                    type=SimpleNamespace(value="depository"),
+                    subtype=SimpleNamespace(value="checking"),
+                    balances=SimpleNamespace(current=1250.50, available=1200.25),
+                ),
+                1,
+                "Example Bank",
+                "2026-08-04T12:00:00",
+            )
+            checking = connection.execute(
+                """
+                SELECT subtype, current_balance, available_balance
+                FROM accounts WHERE id = 'checking'
+                """
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, merchant,
+                    pending, transacted_at, category, excluded
+                ) VALUES (
+                    'deposit', 'checking', -50000, 'USD', 'Deposit', NULL,
+                    0, ?, 'Other', 0
+                )
+                """,
+                (date.today().isoformat(),),
+            )
         self.assertEqual(initial_goal, "1000000")
+        self.assertEqual(tuple(checking), ("checking", 125050, 120025))
+        overview_with_cash = self.client.get("/")
+        self.assertIn(b"Current cash balances", overview_with_cash.data)
+        cash_flow_page = self.client.get("/cash-flow")
+        self.assertIn(b"Household \xc2\xb7 Example Bank", cash_flow_page.data)
+        self.assertIn(b"Needs review", cash_flow_page.data)
+        self.assertEqual(
+            self.client.post(
+                "/api/cash-flow/deposit",
+                data={
+                    "csrf_token": self.csrf_token(cash_flow_page),
+                    "flow_type": "income",
+                },
+            ).status_code,
+            302,
+        )
+        with self.application.db() as connection:
+            cash_flow_override = connection.execute(
+                "SELECT cash_flow_override FROM transactions WHERE id = 'deposit'"
+            ).fetchone()[0]
+        self.assertEqual(cash_flow_override, "income")
 
         self.assertEqual(
             self.client.post(

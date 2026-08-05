@@ -23,7 +23,7 @@
   <article class="panel">
     <div class="panel-header"><div><h2>Budget snapshot</h2><p>Optional guardrails for the month</p></div></div>
     {% if account_id or connection_id %}
-      <div class="empty compact-empty">Category budgets apply across all cards. Choose “All cards” above to view or edit them.</div>
+      <div class="empty compact-empty">Category budgets apply across all accounts. Choose “All accounts” above to view or edit them.</div>
     {% elif summary.budget_total %}
       {% set budget_percent = summary.budget_spent / summary.budget_total * 100 %}
       <div class="budget-total">{{ summary.budget_spent|money }} <span>of {{ summary.budget_total|money }}</span></div>
