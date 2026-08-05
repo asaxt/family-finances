@@ -14,6 +14,7 @@ from plaid.api_client import ApiClient
 from plaid.configuration import Configuration
 from plaid.model.country_code import CountryCode
 from plaid.model.accounts_get_request import AccountsGetRequest
+from plaid.model.item_get_request import ItemGetRequest
 from plaid.model.item_public_token_exchange_request import (
     ItemPublicTokenExchangeRequest,
 )
@@ -39,6 +40,7 @@ from analytics import (
     DEFAULT_OVERVIEW_LOOKBACK_DAYS,
     MAX_OVERVIEW_LOOKBACK_DAYS,
     category_details,
+    cash_flow_summary,
     long_term_trends,
     month_label,
     rolling_spending_summary,
@@ -81,6 +83,7 @@ SAVINGS_CLASSIFICATIONS = {
     "post_tax": "Post-tax",
     "taxable": "Taxable",
 }
+EXPECTED_PLAID_PRODUCTS = {"transactions"}
 app = Flask(__name__)
 LOGIN_ATTEMPTS = {}
 vault = EncryptedDatabase(VAULT_PATH)
@@ -419,6 +422,102 @@ def plaid_credentials():
     return values.get("plaid_client_id", ""), values.get("plaid_secret", "")
 
 
+def normalize_plaid_products(values):
+    return sorted(
+        {
+            str(getattr(value, "value", value)).strip().lower()
+            for value in (values or [])
+            if str(getattr(value, "value", value)).strip()
+        }
+    )
+
+
+def plaid_product_status():
+    try:
+        saved = json.loads(setting("plaid_product_audit") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        saved = {}
+    saved_connections = {
+        record.get("connection_id"): record
+        for record in saved.get("connections", [])
+        if isinstance(record, dict)
+    }
+    connections = []
+    for connection in connection_rows():
+        record = saved_connections.get(connection["id"], {})
+        product_fields = {
+            field: normalize_plaid_products(record.get(field))
+            for field in ("products", "billed_products", "consented_products")
+        }
+        unexpected = sorted(
+            set().union(*map(set, product_fields.values())) - EXPECTED_PLAID_PRODUCTS
+        )
+        connections.append(
+            {
+                **connection,
+                **product_fields,
+                "unavailable": bool(record.get("unavailable")),
+                "unexpected_products": unexpected,
+            }
+        )
+    return {
+        "checked_at": saved.get("checked_at"),
+        "connections": connections,
+        "has_warning": any(
+            item["unavailable"] or item["unexpected_products"]
+            for item in connections
+        ),
+    }
+
+
+def audit_plaid_products():
+    with db() as connection:
+        items = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT id, access_token FROM connections ORDER BY id"
+            )
+        ]
+    client = plaid_client()
+    results = []
+    for item in items:
+        try:
+            plaid_item = client.item_get(
+                ItemGetRequest(access_token=item["access_token"])
+            ).item
+        except Exception:
+            app.logger.warning(
+                "Plaid product status could not be checked for connection %s.",
+                item["id"],
+            )
+            results.append({"connection_id": item["id"], "unavailable": True})
+            continue
+        results.append(
+            {
+                "connection_id": item["id"],
+                "products": normalize_plaid_products(plaid_item.products),
+                "billed_products": normalize_plaid_products(
+                    getattr(plaid_item, "billed_products", [])
+                ),
+                "consented_products": normalize_plaid_products(
+                    getattr(plaid_item, "consented_products", [])
+                ),
+            }
+        )
+    save_setting(
+        "plaid_product_audit",
+        json.dumps(
+            {
+                "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "connections": results,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+    return results
+
+
 def month_after(value):
     year = value.year + (value.month == 12)
     month = 1 if value.month == 12 else value.month + 1
@@ -622,6 +721,7 @@ def save_transaction(connection, transaction):
 
 def save_account(connection, account, connection_id, institution, checked_at):
     current = account.balances.current
+    available = getattr(account.balances, "available", None)
     current_balance = (
         int(
             (Decimal(str(current)) * 100).quantize(
@@ -631,19 +731,32 @@ def save_account(connection, account, connection_id, institution, checked_at):
         if current is not None
         else None
     )
+    available_balance = (
+        int(
+            (Decimal(str(available)) * 100).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+        if available is not None
+        else None
+    )
+    subtype = getattr(account, "subtype", None)
+    subtype = getattr(subtype, "value", subtype)
     connection.execute(
         """
         INSERT INTO accounts (
             id, connection_id, institution, name, mask, type,
-            current_balance, balance_updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            subtype, current_balance, available_balance, balance_updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             connection_id = excluded.connection_id,
             institution = excluded.institution,
             name = excluded.name,
             mask = excluded.mask,
             type = excluded.type,
+            subtype = excluded.subtype,
             current_balance = excluded.current_balance,
+            available_balance = excluded.available_balance,
             balance_updated_at = excluded.balance_updated_at
         """,
         (
@@ -653,7 +766,9 @@ def save_account(connection, account, connection_id, institution, checked_at):
             account.name,
             account.mask,
             account.type.value,
+            subtype,
             current_balance,
+            available_balance,
             checked_at,
         ),
     )
@@ -847,7 +962,45 @@ def overview():
         if account["balance_updated_at"]
     ]
     context["credit_balance_updated_at"] = max(balance_dates) if balance_dates else None
+    context["cash_balances"] = [
+        account
+        for account in context["accounts"]
+        if account["type"] == "depository"
+        and account["current_balance"] is not None
+        and (not context["account_id"] or account["id"] == context["account_id"])
+        and (
+            not context["connection_id"]
+            or account["connection_id"] == context["connection_id"]
+        )
+    ]
+    context["cash_balance_total"] = sum(
+        account["current_balance"] for account in context["cash_balances"]
+    )
+    cash_balance_dates = [
+        account["balance_updated_at"]
+        for account in context["cash_balances"]
+        if account["balance_updated_at"]
+    ]
+    context["cash_balance_updated_at"] = (
+        max(cash_balance_dates) if cash_balance_dates else None
+    )
     return render_template("overview.html", **context)
+
+
+@app.get("/cash-flow")
+def cash_flow():
+    context = page_context("cash_flow")
+    context["lookback_days"] = overview_lookback_days()
+    context["max_lookback_days"] = MAX_OVERVIEW_LOOKBACK_DAYS
+    context["cash_flow_error"] = request.args.get("error")
+    with db() as connection:
+        context["cash_flow"] = cash_flow_summary(
+            connection,
+            context["lookback_days"],
+            context["account_id"],
+            context["connection_id"],
+        )
+    return render_template("cash_flow.html", **context)
 
 
 @app.get("/trends")
@@ -966,6 +1119,7 @@ def settings_page():
     context.update(
         plaid_client_id=client_id,
         plaid_configured=bool(client_id and plaid_secret),
+        plaid_product_status=plaid_product_status(),
         settings_saved=request.args.get("saved"),
         settings_error=request.args.get("error"),
     )
@@ -1054,11 +1208,25 @@ def update_overview_lookback():
         "account": request.form.get("account") or None,
         "person": request.form.get("person") or None,
     }
+    destination = "cash_flow" if request.form.get("view") == "cash_flow" else "overview"
     if not 1 <= lookback_days <= MAX_OVERVIEW_LOOKBACK_DAYS:
         redirect_arguments["error"] = "lookback"
-        return redirect(url_for("overview", **redirect_arguments))
+        return redirect(url_for(destination, **redirect_arguments))
     save_setting("overview_lookback_days", str(lookback_days))
-    return redirect(url_for("overview", **redirect_arguments))
+    return redirect(url_for(destination, **redirect_arguments))
+
+
+@app.post("/api/cash-flow/<transaction_id>")
+def update_cash_flow_type(transaction_id):
+    flow_type = request.form.get("flow_type", "")
+    if flow_type not in {"", "income", "transfer", "refund", "ignore"}:
+        return redirect(url_for("cash_flow", error="classification"))
+    with db() as connection:
+        connection.execute(
+            "UPDATE transactions SET cash_flow_override = ? WHERE id = ?",
+            (flow_type or None, transaction_id),
+        )
+    return redirect(url_for("cash_flow"))
 
 
 def manual_account_values():
@@ -1134,6 +1302,27 @@ def update_plaid_settings():
                 (new_secret,),
             )
     return redirect(url_for("settings_page", saved="plaid"))
+
+
+@app.post("/api/plaid-products")
+def update_plaid_product_status():
+    if PLAID_DISABLED:
+        return jsonify(error="Plaid is disabled in this local environment."), 403
+    client_id, plaid_secret = plaid_credentials()
+    if not client_id or not plaid_secret:
+        return redirect(url_for("settings_page", error="plaid"))
+    if not connection_rows():
+        return redirect(url_for("settings_page", error="plaid_products_connections"))
+    results = audit_plaid_products()
+    error = "plaid_products_check" if all(
+        result.get("unavailable") for result in results
+    ) else None
+    return redirect(
+        url_for(
+            "settings_page",
+            **({"error": error} if error else {"saved": "plaid_products"}),
+        )
+    )
 
 
 @app.post("/api/app-name")

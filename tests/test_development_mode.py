@@ -88,6 +88,7 @@ class DevelopmentModeTests(unittest.TestCase):
             ("/api/link-token", {}),
             ("/api/exchange-token", {}),
             ("/api/sync", None),
+            ("/api/plaid-products", None),
         ):
             response = self.client.post(
                 path,

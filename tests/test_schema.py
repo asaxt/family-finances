@@ -18,11 +18,11 @@ class SchemaTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_new_schema_is_version_zero_and_strictly_validated(self):
+    def test_new_schema_is_version_one_and_strictly_validated(self):
         connection = sqlite3.connect(":memory:")
         try:
             schema.create_schema(connection)
-            self.assertEqual(schema.schema_version(connection), 0)
+            self.assertEqual(schema.schema_version(connection), 1)
             schema.validate_schema(connection)
             goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
@@ -45,43 +45,31 @@ class SchemaTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_a_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         with database.connection() as connection:
-            connection.execute("PRAGMA user_version = 1")
+            connection.execute("PRAGMA user_version = 2")
         database.persist()
 
-        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 0"):
+        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 1"):
             schema.prepare_encrypted_database(database, key, auth_path)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
     def test_successful_migration_deletes_encrypted_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
-
-        def migrate_to_one(connection):
-            connection.execute(
-                "INSERT INTO settings (key, value) VALUES ('migration_test', 'complete')"
-            )
-
-        def validate_one(connection):
-            schema._validate_version_zero(connection)
-            row = connection.execute(
-                "SELECT value FROM settings WHERE key = 'migration_test'"
-            ).fetchone()
-            if not row or row[0] != "complete":
-                raise schema.SchemaError("Migration test marker is missing.")
-
-        with self.future_schema(migrate_to_one, validate_one):
-            changed = schema.prepare_encrypted_database(database, key, auth_path)
-            self.assertTrue(changed)
-            with database.connection() as connection:
-                self.assertEqual(schema.schema_version(connection), 1)
-                self.assertEqual(
-                    connection.execute(
-                        "SELECT value FROM settings WHERE key = 'migration_test'"
-                    ).fetchone()[0],
-                    "complete",
-                )
+        changed = schema.prepare_encrypted_database(database, key, auth_path)
+        self.assertTrue(changed)
+        with database.connection() as connection:
+            self.assertEqual(schema.schema_version(connection), 1)
+            account_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(accounts)")
+            }
+            transaction_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(transactions)")
+            }
+        self.assertIn("available_balance", account_columns)
+        self.assertIn("subtype", account_columns)
+        self.assertIn("cash_flow_override", transaction_columns)
 
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
-        self.assertNotIn(b"migration_test", database.path.read_bytes())
+        self.assertNotIn(b"cash_flow_override", database.path.read_bytes())
 
     def test_failed_migration_restores_original_and_keeps_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
@@ -94,7 +82,7 @@ class SchemaTests(unittest.TestCase):
             )
             raise RuntimeError("simulated migration failure")
 
-        with self.future_schema(fail_migration, schema._validate_version_zero):
+        with patch.dict(schema.MIGRATIONS, {0: fail_migration}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "simulated migration failure"):
                 schema.prepare_encrypted_database(database, key, auth_path)
 
@@ -125,33 +113,14 @@ class SchemaTests(unittest.TestCase):
         database.create(key)
         database.unlock(key)
         schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            connection.execute("ALTER TABLE transactions DROP COLUMN cash_flow_override")
+            connection.execute("ALTER TABLE accounts DROP COLUMN available_balance")
+            connection.execute("ALTER TABLE accounts DROP COLUMN subtype")
+            connection.execute("PRAGMA user_version = 0")
+            schema._validate_version_zero(connection)
+        database.persist()
         return database, key, auth_path
-
-    @staticmethod
-    def future_schema(migration, validator):
-        return _FutureSchema(migration, validator)
-
-
-class _FutureSchema:
-    def __init__(self, migration, validator):
-        self.patches = (
-            patch.object(schema, "CURRENT_SCHEMA_VERSION", 1),
-            patch.dict(schema.MIGRATIONS, {0: migration}, clear=True),
-            patch.dict(
-                schema.VALIDATORS,
-                {0: schema._validate_version_zero, 1: validator},
-                clear=True,
-            ),
-        )
-
-    def __enter__(self):
-        for active_patch in self.patches:
-            active_patch.start()
-        return self
-
-    def __exit__(self, *error):
-        for active_patch in reversed(self.patches):
-            active_patch.stop()
 
 
 if __name__ == "__main__":
