@@ -1,16 +1,20 @@
 # Local credentials and authentication
 .env
 .env.*
-.local.env
-.auth.json
+.local.env*
+.auth.json*
+..auth.json.*.tmp
 
 # Financial data
 *.db
 *.db-*
 *.sqlite
+*.sqlite-*
 *.sqlite3
+*.sqlite3-*
 *.vault
 *.vault-*
+*.vault.*
 backups/
 .migration-backup-*/
 .password-change-backup-*/
