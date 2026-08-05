@@ -81,6 +81,55 @@
   </article>
 
   <article class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Plaid product access</h2>
+        <p>Expected use: Transactions only</p>
+      </div>
+      {% if plaid_product_status.checked_at %}
+      <span class="pill {{ 'excluded' if plaid_product_status.has_warning else 'configured' }}">{{ "Review" if plaid_product_status.has_warning else "Expected" }}</span>
+      {% else %}
+      <span class="pill pending">Not checked</span>
+      {% endif %}
+    </div>
+    {% if settings_error == "plaid_products_connections" %}<p class="form-message error">Connect an institution before checking product access.</p>{% endif %}
+    {% if settings_error == "plaid_products_check" %}<p class="form-message error">Plaid could not return product status. No saved credentials or connections were changed.</p>{% endif %}
+    {% if plaid_product_status.checked_at %}
+      <p class="product-checked-at">Last checked {{ plaid_product_status.checked_at | replace("T", " ") }} UTC</p>
+      <div class="product-status-list">
+      {% for item in plaid_product_status.connections %}
+        <div class="product-status-item">
+          <div class="product-status-heading">
+            <span><strong>{{ item.owner_name }}</strong><small>{{ item.institution }}</small></span>
+            {% if item.unavailable %}
+            <span class="pill excluded">Unavailable</span>
+            {% elif item.unexpected_products %}
+            <span class="pill excluded">Unexpected: {{ item.unexpected_products | join(", ") | title }}</span>
+            {% else %}
+            <span class="pill configured">Expected</span>
+            {% endif %}
+          </div>
+          {% if not item.unavailable %}
+          <dl class="product-fields">
+            <div><dt>Added</dt><dd>{{ item.products | join(", ") | title if item.products else "None reported" }}</dd></div>
+            <div><dt>Billed</dt><dd>{{ item.billed_products | join(", ") | title if item.billed_products else "None reported" }}</dd></div>
+            <div><dt>Consented</dt><dd>{{ item.consented_products | join(", ") | title if item.consented_products else "None reported" }}</dd></div>
+          </dl>
+          {% endif %}
+        </div>
+      {% endfor %}
+      </div>
+    {% else %}
+      <p class="security-note">Run a read-only check to see the products Plaid reports as added, billed, or consented for each connection.</p>
+    {% endif %}
+    <form class="settings-form product-check-form" method="post" action="/api/plaid-products">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="button primary" type="submit" {{ "disabled" if plaid_disabled or not plaid_configured or not connected }}>Check product access</button>
+    </form>
+    <p class="security-note">Products that are merely available at an institution are intentionally omitted because availability does not mean access is enabled. This check does not enable, disable, or use any product.</p>
+  </article>
+
+  <article class="panel">
     <div class="panel-header"><div><h2>Local data protection</h2><p>How this installation protects financial information</p></div></div>
     <div class="insight-list">
       <div class="insight"><span class="insight-icon">✓</span><span><strong>Encrypted at rest</strong><br>The database, Plaid secret, access tokens, transactions, and savings data are stored in one authenticated encrypted vault.</span></div>
@@ -94,5 +143,7 @@
 
 {% block scripts %}
 {% if settings_saved == "plaid" %}<script>showNotice("Plaid settings saved securely.");</script>{% endif %}
+{% if settings_saved == "plaid_products" and plaid_product_status.has_warning %}<script>showNotice("Unexpected Plaid product access needs review.", "error");</script>{% endif %}
+{% if settings_saved == "plaid_products" and not plaid_product_status.has_warning %}<script>showNotice("Plaid product access matches Transactions only.");</script>{% endif %}
 {% if settings_saved == "app_name" %}<script>showNotice("App name updated.");</script>{% endif %}
 {% endblock %}
