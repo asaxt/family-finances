@@ -14,6 +14,7 @@ from plaid.api_client import ApiClient
 from plaid.configuration import Configuration
 from plaid.model.country_code import CountryCode
 from plaid.model.accounts_get_request import AccountsGetRequest
+from plaid.model.item_get_request import ItemGetRequest
 from plaid.model.item_public_token_exchange_request import (
     ItemPublicTokenExchangeRequest,
 )
@@ -81,6 +82,7 @@ SAVINGS_CLASSIFICATIONS = {
     "post_tax": "Post-tax",
     "taxable": "Taxable",
 }
+EXPECTED_PLAID_PRODUCTS = {"transactions"}
 app = Flask(__name__)
 LOGIN_ATTEMPTS = {}
 vault = EncryptedDatabase(VAULT_PATH)
@@ -417,6 +419,102 @@ def plaid_credentials():
             ).fetchall()
         )
     return values.get("plaid_client_id", ""), values.get("plaid_secret", "")
+
+
+def normalize_plaid_products(values):
+    return sorted(
+        {
+            str(getattr(value, "value", value)).strip().lower()
+            for value in (values or [])
+            if str(getattr(value, "value", value)).strip()
+        }
+    )
+
+
+def plaid_product_status():
+    try:
+        saved = json.loads(setting("plaid_product_audit") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        saved = {}
+    saved_connections = {
+        record.get("connection_id"): record
+        for record in saved.get("connections", [])
+        if isinstance(record, dict)
+    }
+    connections = []
+    for connection in connection_rows():
+        record = saved_connections.get(connection["id"], {})
+        product_fields = {
+            field: normalize_plaid_products(record.get(field))
+            for field in ("products", "billed_products", "consented_products")
+        }
+        unexpected = sorted(
+            set().union(*map(set, product_fields.values())) - EXPECTED_PLAID_PRODUCTS
+        )
+        connections.append(
+            {
+                **connection,
+                **product_fields,
+                "unavailable": bool(record.get("unavailable")),
+                "unexpected_products": unexpected,
+            }
+        )
+    return {
+        "checked_at": saved.get("checked_at"),
+        "connections": connections,
+        "has_warning": any(
+            item["unavailable"] or item["unexpected_products"]
+            for item in connections
+        ),
+    }
+
+
+def audit_plaid_products():
+    with db() as connection:
+        items = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT id, access_token FROM connections ORDER BY id"
+            )
+        ]
+    client = plaid_client()
+    results = []
+    for item in items:
+        try:
+            plaid_item = client.item_get(
+                ItemGetRequest(access_token=item["access_token"])
+            ).item
+        except Exception:
+            app.logger.warning(
+                "Plaid product status could not be checked for connection %s.",
+                item["id"],
+            )
+            results.append({"connection_id": item["id"], "unavailable": True})
+            continue
+        results.append(
+            {
+                "connection_id": item["id"],
+                "products": normalize_plaid_products(plaid_item.products),
+                "billed_products": normalize_plaid_products(
+                    getattr(plaid_item, "billed_products", [])
+                ),
+                "consented_products": normalize_plaid_products(
+                    getattr(plaid_item, "consented_products", [])
+                ),
+            }
+        )
+    save_setting(
+        "plaid_product_audit",
+        json.dumps(
+            {
+                "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "connections": results,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+    return results
 
 
 def month_after(value):
@@ -966,6 +1064,7 @@ def settings_page():
     context.update(
         plaid_client_id=client_id,
         plaid_configured=bool(client_id and plaid_secret),
+        plaid_product_status=plaid_product_status(),
         settings_saved=request.args.get("saved"),
         settings_error=request.args.get("error"),
     )
@@ -1134,6 +1233,27 @@ def update_plaid_settings():
                 (new_secret,),
             )
     return redirect(url_for("settings_page", saved="plaid"))
+
+
+@app.post("/api/plaid-products")
+def update_plaid_product_status():
+    if PLAID_DISABLED:
+        return jsonify(error="Plaid is disabled in this local environment."), 403
+    client_id, plaid_secret = plaid_credentials()
+    if not client_id or not plaid_secret:
+        return redirect(url_for("settings_page", error="plaid"))
+    if not connection_rows():
+        return redirect(url_for("settings_page", error="plaid_products_connections"))
+    results = audit_plaid_products()
+    error = "plaid_products_check" if all(
+        result.get("unavailable") for result in results
+    ) else None
+    return redirect(
+        url_for(
+            "settings_page",
+            **({"error": error} if error else {"saved": "plaid_products"}),
+        )
+    )
 
 
 @app.post("/api/app-name")
