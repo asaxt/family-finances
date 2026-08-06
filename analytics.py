@@ -399,13 +399,16 @@ def cash_flow_summary(
         for row in connection.execute(
             f"""
             SELECT t.id, t.transacted_at AS date, t.amount, t.description,
-                   t.merchant, t.excluded, t.cash_flow_override,
+                   t.merchant, t.excluded, t.flow_override,
                    COALESCE(t.category_override, t.category) AS category,
+                   r.flow_type AS category_flow_type,
                    a.type, a.name AS account_name, a.mask,
                    c.owner_name, c.institution
             FROM transactions t
             JOIN accounts a ON a.id = t.account_id
             JOIN connections c ON c.id = a.connection_id
+            LEFT JOIN category_rules r
+              ON r.name = COALESCE(t.category_override, t.category) COLLATE NOCASE
             WHERE t.pending = 0 AND t.transacted_at <= ? {account_sql}
             ORDER BY t.transacted_at DESC, ABS(t.amount) DESC
             """,
@@ -414,16 +417,19 @@ def cash_flow_summary(
     ]
 
     def classify(row):
-        if row["cash_flow_override"]:
-            return row["cash_flow_override"]
+        if row["excluded"]:
+            return "excluded"
+        if row["flow_override"]:
+            return row["flow_override"]
+        if row["category_flow_type"]:
+            return row["category_flow_type"]
         category = row["category"].lower()
-        if category.startswith("transfer") or category in {
-            "loan payments",
-            "loan disbursements",
-        }:
+        if category.startswith("transfer"):
             return "transfer"
-        if row["type"] == "depository" and row["amount"] < 0:
-            return "income" if category.startswith("income") else "review"
+        if row["type"] == "credit" and category == "loan payments":
+            return "transfer"
+        if row["amount"] < 0:
+            return "earned_income" if category.startswith("income") else "other_inflow"
         return "spending"
 
     for row in rows:
@@ -434,29 +440,22 @@ def cash_flow_summary(
     def totals(selected):
         result = {
             "income": 0,
-            "refunds": 0,
             "other_inflows": 0,
             "spending": 0,
             "transfers_in": 0,
             "transfers_out": 0,
         }
         for row in selected:
-            is_cash_inflow = row["type"] == "depository" and row["amount"] < 0
-            if row["flow_type"] == "income" and is_cash_inflow:
+            if row["flow_type"] == "earned_income" and row["amount"] < 0:
                 result["income"] += -row["amount"]
-            elif row["flow_type"] == "refund" and is_cash_inflow:
-                result["refunds"] += -row["amount"]
-            elif row["flow_type"] == "review" and is_cash_inflow:
+            elif row["flow_type"] == "other_inflow" and row["amount"] < 0:
                 result["other_inflows"] += -row["amount"]
             elif row["flow_type"] == "transfer":
                 key = "transfers_in" if row["amount"] < 0 else "transfers_out"
                 result[key] += abs(row["amount"])
-            elif row["flow_type"] != "ignore" and not row["excluded"]:
-                if row["type"] == "credit" or row["amount"] > 0:
-                    result["spending"] += row["amount"]
-        result["total_inflows"] = (
-            result["income"] + result["refunds"] + result["other_inflows"]
-        )
+            elif row["flow_type"] == "spending" and row["amount"] > 0:
+                result["spending"] += row["amount"]
+        result["total_inflows"] = result["income"] + result["other_inflows"]
         result["net"] = result["total_inflows"] - result["spending"]
         result["savings_rate"] = (
             result["net"] / result["income"] * 100 if result["income"] else None
@@ -483,7 +482,7 @@ def cash_flow_summary(
     activity = [
         row
         for row in current
-        if row["flow_type"] in {"income", "transfer", "refund", "review"}
+        if row["flow_type"] in {"earned_income", "other_inflow", "transfer"}
     ][:30]
     return {
         **current_totals,
@@ -494,7 +493,6 @@ def cash_flow_summary(
         "prior_date_to": prior_end.isoformat(),
         "months": months,
         "activity": activity,
-        "review_count": sum(row["flow_type"] == "review" for row in current),
     }
 
 

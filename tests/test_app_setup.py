@@ -77,7 +77,7 @@ class AppSetupTests(unittest.TestCase):
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
         with self.application.db() as connection:
-            self.assertEqual(schema_version(connection), 1)
+            self.assertEqual(schema_version(connection), 2)
             initial_goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
@@ -126,22 +126,88 @@ class AppSetupTests(unittest.TestCase):
         self.assertIn(b"Current cash balances", overview_with_cash.data)
         cash_flow_page = self.client.get("/cash-flow")
         self.assertIn(b"Household \xc2\xb7 Example Bank", cash_flow_page.data)
-        self.assertIn(b"Needs review", cash_flow_page.data)
+        self.assertIn(b"Other money in", cash_flow_page.data)
         self.assertEqual(
             self.client.post(
                 "/api/cash-flow/deposit",
                 data={
                     "csrf_token": self.csrf_token(cash_flow_page),
-                    "flow_type": "income",
+                    "flow_type": "earned_income",
                 },
             ).status_code,
             302,
         )
         with self.application.db() as connection:
-            cash_flow_override = connection.execute(
-                "SELECT cash_flow_override FROM transactions WHERE id = 'deposit'"
+            flow_override = connection.execute(
+                "SELECT flow_override FROM transactions WHERE id = 'deposit'"
             ).fetchone()[0]
-        self.assertEqual(cash_flow_override, "income")
+        self.assertEqual(flow_override, "earned_income")
+
+        transactions_page = self.client.get("/transactions")
+        self.assertEqual(
+            self.client.post(
+                "/api/transaction/deposit",
+                data={
+                    "csrf_token": self.csrf_token(transactions_page),
+                    "category_choice": "__new__",
+                    "new_category": "  Payback  ",
+                    "new_category_flow_type": "other_inflow",
+                    "flow_override": "",
+                },
+            ).status_code,
+            302,
+        )
+        with self.application.db() as connection:
+            transaction = connection.execute(
+                "SELECT category_override, flow_override, excluded FROM transactions WHERE id = 'deposit'"
+            ).fetchone()
+            rule = connection.execute(
+                "SELECT flow_type FROM category_rules WHERE name = 'payback'"
+            ).fetchone()[0]
+        self.assertEqual(tuple(transaction), ("Payback", None, 0))
+        self.assertEqual(rule, "other_inflow")
+
+        transactions_page = self.client.get("/transactions")
+        self.client.post(
+            "/api/transaction/deposit",
+            data={
+                "csrf_token": self.csrf_token(transactions_page),
+                "category_choice": "__new__",
+                "new_category": "payback",
+                "new_category_flow_type": "other_inflow",
+                "flow_override": "",
+            },
+        )
+        with self.application.db() as connection:
+            category = connection.execute(
+                "SELECT category_override FROM transactions WHERE id = 'deposit'"
+            ).fetchone()[0]
+            matching_rules = connection.execute(
+                "SELECT COUNT(*) FROM category_rules WHERE name = 'payback' COLLATE NOCASE"
+            ).fetchone()[0]
+        self.assertEqual(category, "Payback")
+        self.assertEqual(matching_rules, 1)
+
+        transactions_page = self.client.get("/transactions")
+        self.assertEqual(
+            self.client.post(
+                "/api/transactions/bulk",
+                data={
+                    "csrf_token": self.csrf_token(transactions_page),
+                    "transaction_ids": ["deposit"],
+                    "action": "apply",
+                    "category_choice": "__no_change__",
+                    "flow_override": "transfer",
+                    "inclusion": "exclude",
+                },
+            ).status_code,
+            302,
+        )
+        with self.application.db() as connection:
+            transaction = connection.execute(
+                "SELECT category_override, flow_override, excluded FROM transactions WHERE id = 'deposit'"
+            ).fetchone()
+        self.assertEqual(tuple(transaction), ("Payback", "transfer", 1))
 
         self.assertEqual(
             self.client.post(

@@ -270,6 +270,7 @@ input:focus, select:focus { border-color: var(--forest-2); box-shadow: 0 0 0 3px
 .transaction-filterbar .clear-link { margin: 0 3px 9px; }
 .bulk-action-bar { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin: 0 0 8px; padding: 10px 12px; border-radius: 10px; color: var(--muted); background: #eef3ef; font-size: 12px; }
 .bulk-action-bar > div { display: flex; gap: 7px; }
+.bulk-action-bar .bulk-fields { flex-wrap: wrap; justify-content: flex-end; }
 .bulk-action-bar .button { padding: 7px 10px; font-size: 12px; }
 .bulk-action-bar .button:disabled { cursor: not-allowed; }
 .transaction-table-wrap th { position: sticky; top: 0; z-index: 1; background: white; box-shadow: 0 1px var(--line); }
