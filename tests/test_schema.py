@@ -18,11 +18,11 @@ class SchemaTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_new_schema_is_version_one_and_strictly_validated(self):
+    def test_new_schema_is_version_two_and_strictly_validated(self):
         connection = sqlite3.connect(":memory:")
         try:
             schema.create_schema(connection)
-            self.assertEqual(schema.schema_version(connection), 1)
+            self.assertEqual(schema.schema_version(connection), 2)
             schema.validate_schema(connection)
             goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
@@ -45,10 +45,10 @@ class SchemaTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_a_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         with database.connection() as connection:
-            connection.execute("PRAGMA user_version = 2")
+            connection.execute("PRAGMA user_version = 3")
         database.persist()
 
-        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 1"):
+        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 2"):
             schema.prepare_encrypted_database(database, key, auth_path)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -57,7 +57,7 @@ class SchemaTests(unittest.TestCase):
         changed = schema.prepare_encrypted_database(database, key, auth_path)
         self.assertTrue(changed)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 1)
+            self.assertEqual(schema.schema_version(connection), 2)
             account_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(accounts)")
             }
@@ -66,10 +66,57 @@ class SchemaTests(unittest.TestCase):
             }
         self.assertIn("available_balance", account_columns)
         self.assertIn("subtype", account_columns)
-        self.assertIn("cash_flow_override", transaction_columns)
+        self.assertIn("flow_override", transaction_columns)
 
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
-        self.assertNotIn(b"cash_flow_override", database.path.read_bytes())
+        self.assertNotIn(b"flow_override", database.path.read_bytes())
+
+    def test_version_one_classifications_migrate_to_explicit_treatments(self):
+        database, key, auth_path = self.encrypted_schema_zero()
+        with database.connection() as connection:
+            schema._migrate_zero_to_one(connection)
+            connection.execute(
+                """
+                INSERT INTO connections (id, owner_name, institution, access_token)
+                VALUES (1, 'Household', 'Example Bank', 'test-token')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO accounts (id, connection_id, institution, name, type)
+                VALUES ('card', 1, 'Example Bank', 'Card', 'credit')
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, pending,
+                    transacted_at, category, cash_flow_override, excluded
+                ) VALUES (?, 'card', ?, 'USD', ?, 0, '2026-08-01', ?, ?, ?)
+                """,
+                (
+                    ("income", -100, "Income", "Income", "income", 0),
+                    ("refund", -200, "Refund", "Other", "refund", 0),
+                    ("payment", -300, "Payment", "Loan Payments", None, 1),
+                    ("ignored", 400, "Ignored", "Other", "ignore", 0),
+                ),
+            )
+            connection.execute("PRAGMA user_version = 1")
+            schema._validate_version_one(connection)
+        database.persist()
+
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            rows = {
+                row[0]: tuple(row[1:])
+                for row in connection.execute(
+                    "SELECT id, flow_override, excluded FROM transactions"
+                )
+            }
+        self.assertEqual(rows["income"], ("earned_income", 0))
+        self.assertEqual(rows["refund"], ("other_inflow", 0))
+        self.assertEqual(rows["payment"], ("transfer", 0))
+        self.assertEqual(rows["ignored"], (None, 1))
 
     def test_failed_migration_restores_original_and_keeps_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
@@ -114,7 +161,8 @@ class SchemaTests(unittest.TestCase):
         database.unlock(key)
         schema.prepare_encrypted_database(database, key, auth_path)
         with database.connection() as connection:
-            connection.execute("ALTER TABLE transactions DROP COLUMN cash_flow_override")
+            connection.execute("DROP TABLE category_rules")
+            connection.execute("ALTER TABLE transactions DROP COLUMN flow_override")
             connection.execute("ALTER TABLE accounts DROP COLUMN available_balance")
             connection.execute("ALTER TABLE accounts DROP COLUMN subtype")
             connection.execute("PRAGMA user_version = 0")

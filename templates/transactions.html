@@ -48,7 +48,28 @@
     <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
     <span><strong id="selected-count">0</strong> selected</span>
-    <div>
+    <div class="bulk-fields">
+      <select id="bulk-category" name="category_choice" aria-label="Change category">
+        <option value="__no_change__">Category: no change</option>
+        <option value="">Use Plaid category</option>
+        {% for category in category_options %}<option value="{{ category }}">{{ category }}</option>{% endfor %}
+        <option value="__new__">Create new category…</option>
+      </select>
+      <input id="bulk-new-category" name="new_category" maxlength="80" placeholder="New category" aria-label="New category name" hidden>
+      <select id="bulk-new-category-flow" name="new_category_flow_type" aria-label="New category treatment" hidden>
+        {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+      </select>
+      <select name="flow_override" aria-label="Change cash-flow treatment">
+        <option value="__no_change__">Treatment: no change</option>
+        <option value="">Automatic</option>
+        {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+      </select>
+      <select name="inclusion" aria-label="Change inclusion">
+        <option value="__no_change__">Inclusion: no change</option>
+        <option value="include">Include</option>
+        <option value="exclude">Exclude</option>
+      </select>
+      <button class="button primary bulk-button" type="submit" name="action" value="apply" disabled>Apply changes</button>
       {% if transaction_view in ["excluded", "all"] %}<button class="button secondary bulk-button" type="submit" name="action" value="restore" disabled>Restore selected</button>{% endif %}
       {% if transaction_view in ["active", "all"] %}<button class="button primary bulk-button" type="submit" name="action" value="exclude" disabled>Exclude selected</button>{% endif %}
     </div>
@@ -82,6 +103,7 @@
                 data-name="{{ transaction.merchant or transaction.description }}"
                 data-category="{{ transaction.category }}"
                 data-override="{{ transaction.category_override or '' }}"
+                data-flow-override="{{ transaction.flow_override or '' }}"
                 data-excluded="{{ transaction.excluded }}"
               >Review</button>
             </td>
@@ -108,8 +130,26 @@
     <input type="hidden" name="return_q" value="{{ search_query }}">
     <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
-    <label>Category<input id="review-category" type="text" name="category"></label>
-    <label class="check-label"><input id="review-excluded" type="checkbox" name="excluded"> Exclude from spending totals</label>
+    <label>Category
+      <select id="review-category" name="category_choice">
+        <option value="">Use Plaid category</option>
+        {% for category in category_options %}<option value="{{ category }}">{{ category }}</option>{% endfor %}
+        <option value="__new__">Create new category…</option>
+      </select>
+    </label>
+    <label id="review-new-category-label" hidden>New category<input id="review-new-category" name="new_category" maxlength="80"></label>
+    <label id="review-new-category-flow-label" hidden>Default treatment
+      <select name="new_category_flow_type">
+        {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Cash-flow treatment
+      <select id="review-flow-override" name="flow_override">
+        <option value="">Automatic from category and direction</option>
+        {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="check-label"><input id="review-excluded" type="checkbox" name="excluded"> Exclude from all cash-flow calculations</label>
     <button class="button primary" type="submit">Save changes</button>
   </form>
 </dialog>
@@ -120,7 +160,14 @@
   const reviewDialog = document.querySelector("#transaction-review-dialog");
   const reviewForm = document.querySelector("#transaction-review-form");
   const reviewCategory = document.querySelector("#review-category");
+  const reviewNewCategory = document.querySelector("#review-new-category");
+  const reviewNewCategoryLabel = document.querySelector("#review-new-category-label");
+  const reviewNewCategoryFlowLabel = document.querySelector("#review-new-category-flow-label");
+  const reviewFlowOverride = document.querySelector("#review-flow-override");
   const reviewExcluded = document.querySelector("#review-excluded");
+  const bulkCategory = document.querySelector("#bulk-category");
+  const bulkNewCategory = document.querySelector("#bulk-new-category");
+  const bulkNewCategoryFlow = document.querySelector("#bulk-new-category-flow");
   const transactionCheckboxes = [...document.querySelectorAll(".transaction-select")];
   const selectAll = document.querySelector("#select-all-transactions");
   const bulkButtons = document.querySelectorAll(".bulk-button");
@@ -140,13 +187,29 @@
   });
   transactionCheckboxes.forEach(checkbox => checkbox.addEventListener("change", updateBulkSelection));
 
+  function showReviewNewCategory() {
+    const show = reviewCategory.value === "__new__";
+    reviewNewCategoryLabel.hidden = !show;
+    reviewNewCategoryFlowLabel.hidden = !show;
+    reviewNewCategory.required = show;
+  }
+  reviewCategory.addEventListener("change", showReviewNewCategory);
+  bulkCategory.addEventListener("change", () => {
+    const show = bulkCategory.value === "__new__";
+    bulkNewCategory.hidden = !show;
+    bulkNewCategoryFlow.hidden = !show;
+    bulkNewCategory.required = show;
+  });
+
   document.querySelectorAll(".review-button").forEach(button => {
     button.addEventListener("click", () => {
       document.querySelector("#review-transaction-name").textContent = button.dataset.name;
       reviewForm.action = `/api/transaction/${encodeURIComponent(button.dataset.id)}`;
       reviewCategory.value = button.dataset.override;
-      reviewCategory.placeholder = button.dataset.category;
+      reviewNewCategory.value = "";
+      reviewFlowOverride.value = button.dataset.flowOverride;
       reviewExcluded.checked = button.dataset.excluded === "1";
+      showReviewNewCategory();
       reviewDialog.showModal();
     });
   });

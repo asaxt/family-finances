@@ -84,6 +84,12 @@ SAVINGS_CLASSIFICATIONS = {
     "taxable": "Taxable",
 }
 EXPECTED_PLAID_PRODUCTS = {"transactions"}
+FLOW_TYPES = {
+    "earned_income": "Earned income",
+    "other_inflow": "Other money in",
+    "spending": "Money out",
+    "transfer": "Transfer",
+}
 app = Flask(__name__)
 LOGIN_ATTEMPTS = {}
 vault = EncryptedDatabase(VAULT_PATH)
@@ -711,10 +717,7 @@ def save_transaction(connection, transaction):
             int(transaction.pending),
             transaction.date.isoformat(),
             category,
-            int(
-                category.startswith("Transfer")
-                or category in {"Loan Payments", "Loan Disbursements"}
-            ),
+            0,
         ),
     )
 
@@ -990,6 +993,7 @@ def overview():
 @app.get("/cash-flow")
 def cash_flow():
     context = page_context("cash_flow")
+    context["flow_types"] = FLOW_TYPES
     context["lookback_days"] = overview_lookback_days()
     context["max_lookback_days"] = MAX_OVERVIEW_LOOKBACK_DAYS
     context["cash_flow_error"] = request.args.get("error")
@@ -1087,11 +1091,16 @@ def transactions():
             row["name"]
             for row in connection.execute(
                 """
-                SELECT DISTINCT COALESCE(category_override, category) AS name
-                FROM transactions ORDER BY name
+                SELECT name FROM (
+                    SELECT COALESCE(category_override, category) AS name
+                    FROM transactions
+                    UNION
+                    SELECT name FROM category_rules
+                ) ORDER BY name COLLATE NOCASE
                 """
             )
         ]
+    context["flow_types"] = FLOW_TYPES
     context.update(
         selected_category=category,
         search_query=query or "",
@@ -1219,13 +1228,19 @@ def update_overview_lookback():
 @app.post("/api/cash-flow/<transaction_id>")
 def update_cash_flow_type(transaction_id):
     flow_type = request.form.get("flow_type", "")
-    if flow_type not in {"", "income", "transfer", "refund", "ignore"}:
+    if flow_type not in {"", "excluded", *FLOW_TYPES}:
         return redirect(url_for("cash_flow", error="classification"))
     with db() as connection:
-        connection.execute(
-            "UPDATE transactions SET cash_flow_override = ? WHERE id = ?",
-            (flow_type or None, transaction_id),
-        )
+        if flow_type == "excluded":
+            connection.execute(
+                "UPDATE transactions SET flow_override = NULL, excluded = 1 WHERE id = ?",
+                (transaction_id,),
+            )
+        else:
+            connection.execute(
+                "UPDATE transactions SET flow_override = ?, excluded = 0 WHERE id = ?",
+                (flow_type or None, transaction_id),
+            )
     return redirect(url_for("cash_flow"))
 
 
@@ -1530,18 +1545,69 @@ def save_budget():
     )
 
 
+def normalized_category(value):
+    return " ".join(value.split())[:80] or None
+
+
+def canonical_category(connection, name):
+    return connection.execute(
+        """
+        SELECT name FROM (
+            SELECT COALESCE(category_override, category) AS name FROM transactions
+            UNION SELECT name FROM category_rules
+        ) WHERE name = ? COLLATE NOCASE LIMIT 1
+        """,
+        (name,),
+    ).fetchone()
+
+
+def selected_category(connection, choice, new_name=None, new_flow_type=None):
+    if choice == "":
+        return True, None
+    if choice == "__new__":
+        name = normalized_category(new_name or "")
+        if not name or new_flow_type not in FLOW_TYPES:
+            return False, None
+        existing = canonical_category(connection, name)
+        if existing:
+            name = existing[0]
+        connection.execute(
+            """
+            INSERT INTO category_rules (name, flow_type) VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET flow_type = excluded.flow_type
+            """,
+            (name, new_flow_type),
+        )
+        return True, name
+    name = normalized_category(choice)
+    if not name:
+        return False, None
+    row = canonical_category(connection, name)
+    return (True, row[0]) if row else (False, None)
+
+
 @app.post("/api/transaction/<transaction_id>")
 def update_transaction(transaction_id):
-    category = request.form.get("category", "").strip() or None
+    flow_override = request.form.get("flow_override", "")
+    if flow_override not in {"", *FLOW_TYPES}:
+        return transaction_cleanup_redirect()
     excluded = int(request.form.get("excluded") == "on")
     with db() as connection:
+        valid, category = selected_category(
+            connection,
+            request.form.get("category_choice", ""),
+            request.form.get("new_category"),
+            request.form.get("new_category_flow_type"),
+        )
+        if not valid:
+            return transaction_cleanup_redirect()
         connection.execute(
             """
             UPDATE transactions
-            SET category_override = ?, excluded = ?
+            SET category_override = ?, flow_override = ?, excluded = ?
             WHERE id = ?
             """,
-            (category, excluded, transaction_id),
+            (category, flow_override or None, excluded, transaction_id),
         )
     return transaction_cleanup_redirect()
 
@@ -1550,15 +1616,52 @@ def update_transaction(transaction_id):
 def bulk_update_transactions():
     transaction_ids = list(dict.fromkeys(request.form.getlist("transaction_ids")))
     action = request.form.get("action")
-    if transaction_ids and action in {"exclude", "restore"}:
+    if transaction_ids and action in {"exclude", "restore", "apply"}:
         with db() as connection:
+            category = "__no_change__"
+            if action == "apply":
+                flow_override = request.form.get("flow_override", "__no_change__")
+                inclusion = request.form.get("inclusion", "__no_change__")
+                if flow_override not in {"__no_change__", "", *FLOW_TYPES}:
+                    return transaction_cleanup_redirect()
+                if inclusion not in {"__no_change__", "include", "exclude"}:
+                    return transaction_cleanup_redirect()
+                choice = request.form.get("category_choice", "__no_change__")
+                if choice != "__no_change__":
+                    valid, category = selected_category(
+                        connection,
+                        choice,
+                        request.form.get("new_category"),
+                        request.form.get("new_category_flow_type"),
+                    )
+                    if not valid:
+                        return transaction_cleanup_redirect()
             for start in range(0, len(transaction_ids), 500):
                 batch = transaction_ids[start : start + 500]
                 placeholders = ",".join("?" for _ in batch)
-                connection.execute(
-                    f"UPDATE transactions SET excluded = ? WHERE id IN ({placeholders})",
-                    [int(action == "exclude"), *batch],
-                )
+                if action in {"exclude", "restore"}:
+                    connection.execute(
+                        f"UPDATE transactions SET excluded = ? WHERE id IN ({placeholders})",
+                        [int(action == "exclude"), *batch],
+                    )
+                    continue
+                assignments = []
+                values = []
+                if category != "__no_change__":
+                    assignments.append("category_override = ?")
+                    values.append(category)
+                if flow_override != "__no_change__":
+                    assignments.append("flow_override = ?")
+                    values.append(flow_override or None)
+                if inclusion != "__no_change__":
+                    assignments.append("excluded = ?")
+                    values.append(int(inclusion == "exclude"))
+                if assignments:
+                    connection.execute(
+                        f"UPDATE transactions SET {', '.join(assignments)} "
+                        f"WHERE id IN ({placeholders})",
+                        [*values, *batch],
+                    )
     return transaction_cleanup_redirect()
 
 

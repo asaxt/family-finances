@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -70,10 +70,16 @@ VERSION_ZERO_COLUMNS = {
         "created_at",
     },
 }
-EXPECTED_COLUMNS = {
+VERSION_ONE_COLUMNS = {
     **VERSION_ZERO_COLUMNS,
     "accounts": VERSION_ZERO_COLUMNS["accounts"] | {"subtype", "available_balance"},
     "transactions": VERSION_ZERO_COLUMNS["transactions"] | {"cash_flow_override"},
+}
+EXPECTED_COLUMNS = {
+    **VERSION_ZERO_COLUMNS,
+    "accounts": VERSION_ZERO_COLUMNS["accounts"] | {"subtype", "available_balance"},
+    "transactions": VERSION_ZERO_COLUMNS["transactions"] | {"flow_override"},
+    "category_rules": {"name", "flow_type"},
 }
 
 
@@ -123,7 +129,11 @@ def _validate_version_zero(connection):
 
 
 def _validate_version_one(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 1)
+    _validate_columns(connection, VERSION_ONE_COLUMNS, 1)
+
+
+def _validate_version_two(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 2)
 
 
 def _migrate_zero_to_one(connection):
@@ -137,8 +147,82 @@ def _migrate_zero_to_one(connection):
     )
 
 
-VALIDATORS = {0: _validate_version_zero, 1: _validate_version_one}
-MIGRATIONS = {0: _migrate_zero_to_one}
+def _migrate_one_to_two(connection):
+    statements = (
+        """
+        CREATE TABLE transactions_v2 (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            description TEXT NOT NULL,
+            merchant TEXT,
+            pending INTEGER NOT NULL,
+            transacted_at TEXT NOT NULL,
+            category TEXT NOT NULL,
+            category_override TEXT,
+            flow_override TEXT CHECK (
+                flow_override IN (
+                    'earned_income', 'other_inflow', 'spending', 'transfer'
+                )
+            ),
+            excluded INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        """
+        INSERT INTO transactions_v2 (
+            id, account_id, amount, currency, description, merchant, pending,
+            transacted_at, category, category_override, flow_override, excluded
+        )
+        SELECT
+            t.id, t.account_id, t.amount, t.currency, t.description, t.merchant,
+            t.pending, t.transacted_at, t.category, t.category_override,
+            CASE
+                WHEN t.cash_flow_override = 'income' THEN 'earned_income'
+                WHEN t.cash_flow_override = 'refund' THEN 'other_inflow'
+                WHEN t.cash_flow_override = 'transfer' THEN 'transfer'
+                WHEN LOWER(COALESCE(t.category_override, t.category)) LIKE 'transfer%'
+                    THEN 'transfer'
+                WHEN a.type = 'credit'
+                     AND LOWER(COALESCE(t.category_override, t.category)) = 'loan payments'
+                    THEN 'transfer'
+                ELSE NULL
+            END,
+            CASE
+                WHEN t.cash_flow_override = 'ignore' THEN 1
+                WHEN t.excluded = 1 AND (
+                    LOWER(COALESCE(t.category_override, t.category)) LIKE 'transfer%'
+                    OR LOWER(COALESCE(t.category_override, t.category)) = 'loan payments'
+                    OR LOWER(COALESCE(t.category_override, t.category)) = 'loan disbursements'
+                ) THEN 0
+                ELSE t.excluded
+            END
+        FROM transactions t
+        LEFT JOIN accounts a ON a.id = t.account_id
+        """,
+        "DROP TABLE transactions",
+        "ALTER TABLE transactions_v2 RENAME TO transactions",
+        """
+        CREATE TABLE category_rules (
+            name TEXT PRIMARY KEY COLLATE NOCASE,
+            flow_type TEXT NOT NULL CHECK (
+                flow_type IN (
+                    'earned_income', 'other_inflow', 'spending', 'transfer'
+                )
+            )
+        )
+        """,
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
+VALIDATORS = {
+    0: _validate_version_zero,
+    1: _validate_version_one,
+    2: _validate_version_two,
+}
+MIGRATIONS = {0: _migrate_zero_to_one, 1: _migrate_one_to_two}
 
 
 def validate_schema(connection, version=None):
@@ -207,10 +291,20 @@ def create_schema(connection):
                 transacted_at TEXT NOT NULL,
                 category TEXT NOT NULL,
                 category_override TEXT,
-                cash_flow_override TEXT CHECK (
-                    cash_flow_override IN ('income', 'transfer', 'refund', 'ignore')
+                flow_override TEXT CHECK (
+                    flow_override IN (
+                        'earned_income', 'other_inflow', 'spending', 'transfer'
+                    )
                 ),
                 excluded INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE category_rules (
+                name TEXT PRIMARY KEY COLLATE NOCASE,
+                flow_type TEXT NOT NULL CHECK (
+                    flow_type IN (
+                        'earned_income', 'other_inflow', 'spending', 'transfer'
+                    )
+                )
             );
             CREATE TABLE budgets (
                 month TEXT NOT NULL,
