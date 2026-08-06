@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 4
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -136,6 +136,14 @@ def _validate_version_two(connection):
     _validate_columns(connection, EXPECTED_COLUMNS, 2)
 
 
+def _validate_version_three(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 3)
+
+
+def _validate_version_four(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 4)
+
+
 def _migrate_zero_to_one(connection):
     connection.execute("ALTER TABLE accounts ADD COLUMN subtype TEXT")
     connection.execute("ALTER TABLE accounts ADD COLUMN available_balance INTEGER")
@@ -217,12 +225,43 @@ def _migrate_one_to_two(connection):
         connection.execute(statement)
 
 
+def _normalize_venmo_transactions(connection):
+    connection.execute(
+        """
+        UPDATE transactions
+        SET category_override = 'Venmo', flow_override = NULL
+        WHERE (
+              LOWER(COALESCE(merchant, '')) LIKE '%venmo%'
+              OR LOWER(description) LIKE '%venmo%'
+          )
+        """
+    )
+    connection.execute(
+        "DELETE FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
+    )
+
+
+def _migrate_two_to_three(connection):
+    _normalize_venmo_transactions(connection)
+
+
+def _migrate_three_to_four(connection):
+    _normalize_venmo_transactions(connection)
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
     2: _validate_version_two,
+    3: _validate_version_three,
+    4: _validate_version_four,
 }
-MIGRATIONS = {0: _migrate_zero_to_one, 1: _migrate_one_to_two}
+MIGRATIONS = {
+    0: _migrate_zero_to_one,
+    1: _migrate_one_to_two,
+    2: _migrate_two_to_three,
+    3: _migrate_three_to_four,
+}
 
 
 def validate_schema(connection, version=None):

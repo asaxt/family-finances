@@ -2,7 +2,7 @@ import sqlite3
 import unittest
 from datetime import date
 
-from analytics import cash_flow_summary
+from analytics import cash_flow_summary, transaction_list
 from schema import create_schema
 
 
@@ -56,6 +56,9 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         )
 
     def test_income_spending_and_internal_transfers_remain_separate(self):
+        self.connection.execute(
+            "INSERT INTO category_rules (name, flow_type) VALUES ('Venmo', 'earned_income')"
+        )
         self.add("paycheck", "checking", -500_000, "Income", "2026-08-01")
         self.add("purchase", "card", 150_000, "Travel", "2026-08-02")
         self.add("checking-to-savings", "checking", 100_000, "Transfer Out", "2026-08-03")
@@ -63,8 +66,8 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         self.add("card-payment-out", "checking", 150_000, "Transfer Out", "2026-08-04")
         self.add("card-payment-in", "card", -150_000, "Loan Payments", "2026-08-04")
         self.add("unclear-deposit", "checking", -20_000, "Other", "2026-08-05")
-        self.add("peer-payment-out", "checking", 5_000, "Other", "2026-08-06")
-        self.add("peer-payment-in", "checking", -7_000, "Other", "2026-08-07")
+        self.add("venmo-out", "checking", 5_000, "Transfer Out", "2026-08-06")
+        self.add("venmo-in", "checking", -7_000, "Venmo", "2026-08-07")
         self.add("loan-payment", "checking", 8_000, "Loan Payments", "2026-08-08")
         self.add("excluded-inflow", "checking", -99_000, "Income", "2026-08-09", excluded=1)
         self.add("excluded-transfer", "checking", 99_000, "Transfer Out", "2026-08-10", excluded=1)
@@ -84,6 +87,15 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         self.assertEqual(summary["net"], 364_000)
         self.assertEqual(summary["savings_rate"], 72.8)
         self.assertGreaterEqual(len(summary["months"]), 2)
+
+        treatments = {
+            row["id"]: row["flow_type"]
+            for row in transaction_list(self.connection, include_excluded=True)
+        }
+        self.assertEqual(treatments["venmo-in"], "other_inflow")
+        self.assertEqual(treatments["venmo-out"], "spending")
+        self.assertEqual(treatments["checking-to-savings"], "transfer")
+        self.assertEqual(treatments["paycheck"], "earned_income")
 
         self.connection.execute(
             "UPDATE transactions SET flow_override = 'earned_income' WHERE id = 'unclear-deposit'"

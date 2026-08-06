@@ -77,7 +77,7 @@ class AppSetupTests(unittest.TestCase):
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
         with self.application.db() as connection:
-            self.assertEqual(schema_version(connection), 2)
+            self.assertEqual(schema_version(connection), 4)
             initial_goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
@@ -108,6 +108,23 @@ class AppSetupTests(unittest.TestCase):
                 FROM accounts WHERE id = 'checking'
                 """
             ).fetchone()
+            self.application.save_transaction(
+                connection,
+                SimpleNamespace(
+                    transaction_id="peer-payment",
+                    account_id="checking",
+                    amount=-25.00,
+                    iso_currency_code="USD",
+                    name="Payment",
+                    merchant_name="Venmo",
+                    pending=False,
+                    date=date.today(),
+                    personal_finance_category=SimpleNamespace(primary="TRANSFER_IN"),
+                ),
+            )
+            peer_payment_category = connection.execute(
+                "SELECT category FROM transactions WHERE id = 'peer-payment'"
+            ).fetchone()[0]
             connection.execute(
                 """
                 INSERT INTO transactions (
@@ -122,6 +139,7 @@ class AppSetupTests(unittest.TestCase):
             )
         self.assertEqual(initial_goal, "1000000")
         self.assertEqual(tuple(checking), ("checking", 125050, 120025))
+        self.assertEqual(peer_payment_category, "Venmo")
         overview_with_cash = self.client.get("/")
         self.assertIn(b"Current cash balances", overview_with_cash.data)
         cash_flow_page = self.client.get("/cash-flow")
@@ -144,6 +162,24 @@ class AppSetupTests(unittest.TestCase):
         self.assertEqual(flow_override, "earned_income")
 
         transactions_page = self.client.get("/transactions")
+        self.assertIn(
+            b'value="other_inflow" selected>Other money in',
+            transactions_page.data,
+        )
+        self.assertIn(b"<th>Cash flow</th>", transactions_page.data)
+        self.assertIn(b'data-flow-type="other_inflow"', transactions_page.data)
+        self.assertNotIn(
+            b"Automatic from category and direction",
+            transactions_page.data,
+        )
+        css_response = self.client.get("/static/app.css")
+        try:
+            self.assertIn(
+                b"[hidden] { display: none !important; }",
+                css_response.data,
+            )
+        finally:
+            css_response.close()
         self.assertEqual(
             self.client.post(
                 "/api/transaction/deposit",
@@ -152,7 +188,7 @@ class AppSetupTests(unittest.TestCase):
                     "category_choice": "__new__",
                     "new_category": "  Payback  ",
                     "new_category_flow_type": "other_inflow",
-                    "flow_override": "",
+                    "flow_override": "other_inflow",
                 },
             ).status_code,
             302,
@@ -164,7 +200,7 @@ class AppSetupTests(unittest.TestCase):
             rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'payback'"
             ).fetchone()[0]
-        self.assertEqual(tuple(transaction), ("Payback", None, 0))
+        self.assertEqual(tuple(transaction), ("Payback", "other_inflow", 0))
         self.assertEqual(rule, "other_inflow")
 
         transactions_page = self.client.get("/transactions")
@@ -175,7 +211,7 @@ class AppSetupTests(unittest.TestCase):
                 "category_choice": "__new__",
                 "new_category": "payback",
                 "new_category_flow_type": "other_inflow",
-                "flow_override": "",
+                "flow_override": "other_inflow",
             },
         )
         with self.application.db() as connection:

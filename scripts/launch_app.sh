@@ -15,21 +15,28 @@ log_name="${FAMILY_FINANCES_LOG_NAME:-Family Finances}"
 app_url="http://127.0.0.1:$FAMILY_FINANCES_PORT"
 log_file="$HOME/Library/Logs/$log_name.log"
 
-if ! /usr/bin/curl -fsS "$app_url/health" >/dev/null 2>&1; then
-  /bin/launchctl remove "$launch_label" >/dev/null 2>&1 || true
-  /bin/launchctl submit \
-    -l "$launch_label" \
-    -o "$log_file" \
-    -e "$log_file" \
-    -- "$project_dir/scripts/run_server.sh"
-
-  for _ in {1..40}; do
-    if /usr/bin/curl -fsS "$app_url/health" >/dev/null 2>&1; then
-      break
-    fi
-    /bin/sleep 0.25
-  done
+if [[ "${FAMILY_FINANCES_REFRESH_ON_LAUNCH:-0}" == "1" ]]; then
+  refresh_script="${FAMILY_FINANCES_REFRESH_SCRIPT:-}"
+  if [[ -z "$refresh_script" || ! -x "$refresh_script" ]]; then
+    /usr/bin/osascript -e 'display alert "Development refresh is not configured" as critical'
+    exit 1
+  fi
+  "$refresh_script"
 fi
+
+/bin/launchctl remove "$launch_label" >/dev/null 2>&1 || true
+/bin/launchctl submit \
+  -l "$launch_label" \
+  -o "$log_file" \
+  -e "$log_file" \
+  -- "$project_dir/scripts/run_server.sh"
+
+for _ in {1..40}; do
+  if /usr/bin/curl -fsS "$app_url/health" >/dev/null 2>&1; then
+    break
+  fi
+  /bin/sleep 0.25
+done
 
 if /usr/bin/curl -fsS "$app_url/health" >/dev/null 2>&1; then
   /usr/bin/open "$app_url"

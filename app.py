@@ -691,7 +691,10 @@ def connection_rows():
 
 def save_transaction(connection, transaction):
     category = "Other"
-    if transaction.personal_finance_category:
+    transaction_name = f"{transaction.merchant_name or ''} {transaction.name}".lower()
+    if "venmo" in transaction_name:
+        category = "Venmo"
+    elif transaction.personal_finance_category:
         category = transaction.personal_finance_category.primary.replace("_", " ").title()
     connection.execute(
         """
@@ -1589,7 +1592,7 @@ def selected_category(connection, choice, new_name=None, new_flow_type=None):
 @app.post("/api/transaction/<transaction_id>")
 def update_transaction(transaction_id):
     flow_override = request.form.get("flow_override", "")
-    if flow_override not in {"", *FLOW_TYPES}:
+    if flow_override not in FLOW_TYPES:
         return transaction_cleanup_redirect()
     excluded = int(request.form.get("excluded") == "on")
     with db() as connection:
@@ -1607,7 +1610,7 @@ def update_transaction(transaction_id):
             SET category_override = ?, flow_override = ?, excluded = ?
             WHERE id = ?
             """,
-            (category, flow_override or None, excluded, transaction_id),
+            (category, flow_override, excluded, transaction_id),
         )
     return transaction_cleanup_redirect()
 

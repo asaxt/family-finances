@@ -382,6 +382,24 @@ def rolling_spending_summary(
     }
 
 
+def effective_cash_flow_type(row):
+    if row["flow_override"]:
+        return row["flow_override"]
+    description = f"{row['merchant'] or ''} {row['description']}".lower()
+    if "venmo" in description:
+        return "other_inflow" if row["amount"] < 0 else "spending"
+    if row["category_flow_type"]:
+        return row["category_flow_type"]
+    category = row["category"].lower()
+    if category.startswith("transfer"):
+        return "transfer"
+    if row["account_type"] == "credit" and category == "loan payments":
+        return "transfer"
+    if row["amount"] < 0:
+        return "earned_income" if category.startswith("income") else "other_inflow"
+    return "spending"
+
+
 def cash_flow_summary(
     connection,
     lookback_days=DEFAULT_OVERVIEW_LOOKBACK_DAYS,
@@ -402,7 +420,7 @@ def cash_flow_summary(
                    t.merchant, t.excluded, t.flow_override,
                    COALESCE(t.category_override, t.category) AS category,
                    r.flow_type AS category_flow_type,
-                   a.type, a.name AS account_name, a.mask,
+                   a.type AS account_type, a.name AS account_name, a.mask,
                    c.owner_name, c.institution
             FROM transactions t
             JOIN accounts a ON a.id = t.account_id
@@ -416,24 +434,10 @@ def cash_flow_summary(
         ).fetchall()
     ]
 
-    def classify(row):
-        if row["excluded"]:
-            return "excluded"
-        if row["flow_override"]:
-            return row["flow_override"]
-        if row["category_flow_type"]:
-            return row["category_flow_type"]
-        category = row["category"].lower()
-        if category.startswith("transfer"):
-            return "transfer"
-        if row["type"] == "credit" and category == "loan payments":
-            return "transfer"
-        if row["amount"] < 0:
-            return "earned_income" if category.startswith("income") else "other_inflow"
-        return "spending"
-
     for row in rows:
-        row["flow_type"] = classify(row)
+        row["flow_type"] = (
+            "excluded" if row["excluded"] else effective_cash_flow_type(row)
+        )
         row["display_name"] = row["merchant"] or row["description"]
         row["display_amount"] = abs(row["amount"])
 
@@ -778,15 +782,24 @@ def transaction_list(
 
     rows = connection.execute(
         f"""
-        SELECT t.*, a.name AS account_name, a.mask, c.owner_name,
-               COALESCE(t.category_override, t.category) AS effective_category
+        SELECT t.*, a.name AS account_name, a.mask, a.type AS account_type,
+               c.owner_name,
+               COALESCE(t.category_override, t.category) AS effective_category,
+               r.flow_type AS category_flow_type
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         JOIN connections c ON c.id = a.connection_id
+        LEFT JOIN category_rules r
+          ON r.name = COALESCE(t.category_override, t.category) COLLATE NOCASE
         WHERE {where_sql}
         ORDER BY t.transacted_at DESC, ABS(t.amount) DESC
         {limit_sql}
         """,
         params,
     ).fetchall()
-    return [dict(row) for row in rows]
+    results = [dict(row) for row in rows]
+    for row in results:
+        row["flow_type"] = effective_cash_flow_type(
+            {**row, "category": row["effective_category"]}
+        )
+    return results
