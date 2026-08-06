@@ -421,6 +421,9 @@ def cash_flow_summary(
             return "excluded"
         if row["flow_override"]:
             return row["flow_override"]
+        description = f"{row['merchant'] or ''} {row['description']}".lower()
+        if "venmo" in description:
+            return "other_inflow" if row["amount"] < 0 else "spending"
         if row["category_flow_type"]:
             return row["category_flow_type"]
         category = row["category"].lower()

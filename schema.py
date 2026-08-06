@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -136,6 +136,10 @@ def _validate_version_two(connection):
     _validate_columns(connection, EXPECTED_COLUMNS, 2)
 
 
+def _validate_version_three(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 3)
+
+
 def _migrate_zero_to_one(connection):
     connection.execute("ALTER TABLE accounts ADD COLUMN subtype TEXT")
     connection.execute("ALTER TABLE accounts ADD COLUMN available_balance INTEGER")
@@ -217,12 +221,31 @@ def _migrate_one_to_two(connection):
         connection.execute(statement)
 
 
+def _migrate_two_to_three(connection):
+    connection.execute(
+        """
+        UPDATE transactions
+        SET flow_override = NULL
+        WHERE flow_override = 'transfer'
+          AND (
+              LOWER(COALESCE(merchant, '')) LIKE '%venmo%'
+              OR LOWER(description) LIKE '%venmo%'
+          )
+        """
+    )
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
     2: _validate_version_two,
+    3: _validate_version_three,
 }
-MIGRATIONS = {0: _migrate_zero_to_one, 1: _migrate_one_to_two}
+MIGRATIONS = {
+    0: _migrate_zero_to_one,
+    1: _migrate_one_to_two,
+    2: _migrate_two_to_three,
+}
 
 
 def validate_schema(connection, version=None):

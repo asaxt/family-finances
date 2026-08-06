@@ -18,11 +18,11 @@ class SchemaTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_new_schema_is_version_two_and_strictly_validated(self):
+    def test_new_schema_is_version_three_and_strictly_validated(self):
         connection = sqlite3.connect(":memory:")
         try:
             schema.create_schema(connection)
-            self.assertEqual(schema.schema_version(connection), 2)
+            self.assertEqual(schema.schema_version(connection), 3)
             schema.validate_schema(connection)
             goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
@@ -45,10 +45,10 @@ class SchemaTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_a_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         with database.connection() as connection:
-            connection.execute("PRAGMA user_version = 3")
+            connection.execute("PRAGMA user_version = 4")
         database.persist()
 
-        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 2"):
+        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 3"):
             schema.prepare_encrypted_database(database, key, auth_path)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -57,7 +57,7 @@ class SchemaTests(unittest.TestCase):
         changed = schema.prepare_encrypted_database(database, key, auth_path)
         self.assertTrue(changed)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 2)
+            self.assertEqual(schema.schema_version(connection), 3)
             account_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(accounts)")
             }
@@ -117,6 +117,54 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(rows["refund"], ("other_inflow", 0))
         self.assertEqual(rows["payment"], ("transfer", 0))
         self.assertEqual(rows["ignored"], (None, 1))
+
+    def test_version_two_clears_only_venmo_transfer_overrides(self):
+        database, key, auth_path = self.encrypted_schema_zero()
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO connections (id, owner_name, institution, access_token)
+                VALUES (1, 'Household', 'Example Bank', 'test-token')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO accounts (id, connection_id, institution, name, type)
+                VALUES ('checking', 1, 'Example Bank', 'Checking', 'depository')
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, merchant,
+                    pending, transacted_at, category, flow_override
+                ) VALUES (?, 'checking', ?, 'USD', ?, ?, 0, '2026-08-01', ?, ?)
+                """,
+                (
+                    ("venmo-in", -100, "Payment", "Venmo", "Transfer In", "transfer"),
+                    ("venmo-out", 200, "VENMO payment", None, "Transfer Out", "transfer"),
+                    ("bank-transfer", 300, "Transfer", "Example Bank", "Transfer Out", "transfer"),
+                    ("reviewed", -400, "Venmo payment", None, "Transfer In", "other_inflow"),
+                ),
+            )
+            connection.execute("PRAGMA user_version = 2")
+            schema._validate_version_two(connection)
+        database.persist()
+
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            rows = dict(
+                connection.execute(
+                    "SELECT id, flow_override FROM transactions ORDER BY id"
+                ).fetchall()
+            )
+            self.assertEqual(schema.schema_version(connection), 3)
+        self.assertIsNone(rows["venmo-in"])
+        self.assertIsNone(rows["venmo-out"])
+        self.assertEqual(rows["bank-transfer"], "transfer")
+        self.assertEqual(rows["reviewed"], "other_inflow")
+        self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
     def test_failed_migration_restores_original_and_keeps_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
