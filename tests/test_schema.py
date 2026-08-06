@@ -18,11 +18,11 @@ class SchemaTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_new_schema_is_version_three_and_strictly_validated(self):
+    def test_new_schema_is_version_four_and_strictly_validated(self):
         connection = sqlite3.connect(":memory:")
         try:
             schema.create_schema(connection)
-            self.assertEqual(schema.schema_version(connection), 3)
+            self.assertEqual(schema.schema_version(connection), 4)
             schema.validate_schema(connection)
             goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
@@ -45,10 +45,10 @@ class SchemaTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_a_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         with database.connection() as connection:
-            connection.execute("PRAGMA user_version = 4")
+            connection.execute("PRAGMA user_version = 5")
         database.persist()
 
-        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 3"):
+        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 4"):
             schema.prepare_encrypted_database(database, key, auth_path)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -57,7 +57,7 @@ class SchemaTests(unittest.TestCase):
         changed = schema.prepare_encrypted_database(database, key, auth_path)
         self.assertTrue(changed)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 3)
+            self.assertEqual(schema.schema_version(connection), 4)
             account_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(accounts)")
             }
@@ -118,7 +118,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(rows["payment"], ("transfer", 0))
         self.assertEqual(rows["ignored"], (None, 1))
 
-    def test_version_two_clears_only_venmo_transfer_overrides(self):
+    def test_version_two_normalizes_venmo_categories_and_treatments(self):
         database, key, auth_path = self.encrypted_schema_zero()
         schema.prepare_encrypted_database(database, key, auth_path)
         with database.connection() as connection:
@@ -148,22 +148,77 @@ class SchemaTests(unittest.TestCase):
                     ("reviewed", -400, "Venmo payment", None, "Transfer In", "other_inflow"),
                 ),
             )
+            connection.execute(
+                "INSERT INTO category_rules (name, flow_type) VALUES ('Venmo', 'earned_income')"
+            )
             connection.execute("PRAGMA user_version = 2")
             schema._validate_version_two(connection)
         database.persist()
 
         schema.prepare_encrypted_database(database, key, auth_path)
         with database.connection() as connection:
-            rows = dict(
-                connection.execute(
-                    "SELECT id, flow_override FROM transactions ORDER BY id"
-                ).fetchall()
+            rows = {
+                row[0]: tuple(row[1:])
+                for row in connection.execute(
+                    "SELECT id, category_override, flow_override FROM transactions ORDER BY id"
+                )
+            }
+            venmo_rule = connection.execute(
+                "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
+            ).fetchone()
+            self.assertEqual(schema.schema_version(connection), 4)
+        self.assertEqual(rows["venmo-in"], ("Venmo", None))
+        self.assertEqual(rows["venmo-out"], ("Venmo", None))
+        self.assertEqual(rows["bank-transfer"], (None, "transfer"))
+        self.assertEqual(rows["reviewed"], ("Venmo", None))
+        self.assertIsNone(venmo_rule)
+        self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
+
+    def test_version_three_reapplies_venmo_normalization(self):
+        database, key, auth_path = self.encrypted_schema_zero()
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO connections (id, owner_name, institution, access_token)
+                VALUES (1, 'Household', 'Example Bank', 'test-token')
+                """
             )
-            self.assertEqual(schema.schema_version(connection), 3)
-        self.assertIsNone(rows["venmo-in"])
-        self.assertIsNone(rows["venmo-out"])
-        self.assertEqual(rows["bank-transfer"], "transfer")
-        self.assertEqual(rows["reviewed"], "other_inflow")
+            connection.execute(
+                """
+                INSERT INTO accounts (id, connection_id, institution, name, type)
+                VALUES ('checking', 1, 'Example Bank', 'Checking', 'depository')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, merchant,
+                    pending, transacted_at, category, flow_override
+                ) VALUES (
+                    'venmo', 'checking', -100, 'USD', 'Payment', 'Venmo',
+                    0, '2026-08-01', 'Venmo', 'earned_income'
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO category_rules (name, flow_type) VALUES ('Venmo', 'earned_income')"
+            )
+            connection.execute("PRAGMA user_version = 3")
+            schema._validate_version_three(connection)
+        database.persist()
+
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            transaction = connection.execute(
+                "SELECT category_override, flow_override FROM transactions WHERE id = 'venmo'"
+            ).fetchone()
+            rule = connection.execute(
+                "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
+            ).fetchone()
+            self.assertEqual(schema.schema_version(connection), 4)
+        self.assertEqual(tuple(transaction), ("Venmo", None))
+        self.assertIsNone(rule)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
     def test_failed_migration_restores_original_and_keeps_backup(self):

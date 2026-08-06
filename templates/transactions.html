@@ -57,7 +57,7 @@
       </select>
       <input id="bulk-new-category" name="new_category" maxlength="80" placeholder="New category" aria-label="New category name" hidden>
       <select id="bulk-new-category-flow" name="new_category_flow_type" aria-label="New category treatment" hidden>
-        {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+        {% for value, label in flow_types.items() %}<option value="{{ value }}" {{ "selected" if value == "other_inflow" }}>{{ label }}</option>{% endfor %}
       </select>
       <select name="flow_override" aria-label="Change cash-flow treatment">
         <option value="__no_change__">Treatment: no change</option>
@@ -77,7 +77,7 @@
 
   <div class="table-wrap transaction-table-wrap">
     <table>
-      <thead><tr><th class="select-column"><input id="select-all-transactions" type="checkbox" aria-label="Select every visible transaction"></th><th>Date</th><th>Merchant</th><th>Category</th><th>Account</th><th>Status</th><th class="currency">Amount</th><th>Review</th></tr></thead>
+      <thead><tr><th class="select-column"><input id="select-all-transactions" type="checkbox" aria-label="Select every visible transaction"></th><th>Date</th><th>Merchant</th><th>Category</th><th>Cash flow</th><th>Account</th><th>Status</th><th class="currency">Amount</th><th>Review</th></tr></thead>
       <tbody>
         {% for transaction in transactions %}
           <tr class="{{ 'muted-row' if transaction.excluded and transaction_view != 'excluded' }}">
@@ -88,6 +88,7 @@
               {% if transaction.merchant and transaction.description != transaction.merchant %}<div class="transaction-sub">{{ transaction.description }}</div>{% endif %}
             </td>
             <td><span class="pill">{{ transaction.effective_category }}</span></td>
+            <td><span class="pill">{{ flow_types[transaction.flow_type] }}</span></td>
             <td>{{ transaction.owner_name }} · {{ transaction.account_name }}<div class="transaction-sub">····{{ transaction.mask }}</div></td>
             <td>
               {% if transaction.excluded %}<span class="pill excluded">Excluded</span>
@@ -101,15 +102,14 @@
                 type="button"
                 data-id="{{ transaction.id }}"
                 data-name="{{ transaction.merchant or transaction.description }}"
-                data-category="{{ transaction.category }}"
                 data-override="{{ transaction.category_override or '' }}"
-                data-flow-override="{{ transaction.flow_override or '' }}"
+                data-flow-type="{{ transaction.flow_type }}"
                 data-excluded="{{ transaction.excluded }}"
               >Review</button>
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="8" class="empty">No transactions match these filters.</td></tr>
+          <tr><td colspan="9" class="empty">No transactions match these filters.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -139,13 +139,12 @@
     </label>
     <label id="review-new-category-label" hidden>New category<input id="review-new-category" name="new_category" maxlength="80"></label>
     <label id="review-new-category-flow-label" hidden>Default treatment
-      <select name="new_category_flow_type">
-        {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+      <select id="review-new-category-flow" name="new_category_flow_type">
+        {% for value, label in flow_types.items() %}<option value="{{ value }}" {{ "selected" if value == "other_inflow" }}>{{ label }}</option>{% endfor %}
       </select>
     </label>
     <label>Cash-flow treatment
       <select id="review-flow-override" name="flow_override">
-        <option value="">Automatic from category and direction</option>
         {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
       </select>
     </label>
@@ -163,6 +162,7 @@
   const reviewNewCategory = document.querySelector("#review-new-category");
   const reviewNewCategoryLabel = document.querySelector("#review-new-category-label");
   const reviewNewCategoryFlowLabel = document.querySelector("#review-new-category-flow-label");
+  const reviewNewCategoryFlow = document.querySelector("#review-new-category-flow");
   const reviewFlowOverride = document.querySelector("#review-flow-override");
   const reviewExcluded = document.querySelector("#review-excluded");
   const bulkCategory = document.querySelector("#bulk-category");
@@ -192,8 +192,12 @@
     reviewNewCategoryLabel.hidden = !show;
     reviewNewCategoryFlowLabel.hidden = !show;
     reviewNewCategory.required = show;
+    if (show) reviewFlowOverride.value = reviewNewCategoryFlow.value;
   }
   reviewCategory.addEventListener("change", showReviewNewCategory);
+  reviewNewCategoryFlow.addEventListener("change", () => {
+    if (reviewCategory.value === "__new__") reviewFlowOverride.value = reviewNewCategoryFlow.value;
+  });
   bulkCategory.addEventListener("change", () => {
     const show = bulkCategory.value === "__new__";
     bulkNewCategory.hidden = !show;
@@ -207,7 +211,7 @@
       reviewForm.action = `/api/transaction/${encodeURIComponent(button.dataset.id)}`;
       reviewCategory.value = button.dataset.override;
       reviewNewCategory.value = "";
-      reviewFlowOverride.value = button.dataset.flowOverride;
+      reviewFlowOverride.value = button.dataset.flowType;
       reviewExcluded.checked = button.dataset.excluded === "1";
       showReviewNewCategory();
       reviewDialog.showModal();
