@@ -2,7 +2,15 @@ import sqlite3
 import unittest
 from datetime import date
 
-from analytics import cash_flow_summary, transaction_list
+from analytics import (
+    cash_flow_summary,
+    category_details,
+    daily_trends,
+    long_term_trends,
+    rolling_spending_summary,
+    spending_summary,
+    transaction_list,
+)
 from schema import create_schema
 
 
@@ -126,6 +134,119 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         )
         self.assertEqual(overridden["other_inflows"], 0)
         self.assertEqual(overridden["transfers_in"], 12_000)
+
+    def test_spending_pages_share_cash_flow_classification(self):
+        self.add("earlier-purchase", "card", 1_000, "Dining", "2026-07-01")
+        self.add("purchase", "card", 2_500, "Dining", "2026-08-04")
+        self.add("transfer", "checking", 500_000, "Transfer Out", "2026-08-05")
+        self.add(
+            "reviewed-transfer",
+            "checking",
+            600_000,
+            "General",
+            "2026-08-06",
+            override="transfer",
+        )
+        self.add("income", "checking", -100_000, "Income", "2026-08-07")
+        self.add(
+            "excluded-purchase",
+            "card",
+            70_000,
+            "Travel",
+            "2026-08-08",
+            excluded=1,
+        )
+
+        monthly = spending_summary(self.connection, "2026-08")
+        rolling = rolling_spending_summary(
+            self.connection, lookback_days=30, today=date(2026, 8, 15)
+        )
+        cash_flow = cash_flow_summary(
+            self.connection, lookback_days=30, today=date(2026, 8, 15)
+        )
+        trends = long_term_trends(self.connection)
+        details = category_details(self.connection, "2026-08")
+
+        self.assertEqual(monthly["total"], 2_500)
+        self.assertEqual(rolling["total"], 2_500)
+        self.assertEqual(cash_flow["spending"], 2_500)
+        august_daily_total = sum(
+            row["amount"]
+            for row in daily_trends(self.connection)
+            if row["date"].startswith("2026-08")
+        )
+        self.assertEqual(august_daily_total, 2_500)
+        self.assertEqual(trends["months"][-1]["amount"], 2_500)
+        self.assertEqual([row["name"] for row in monthly["categories"]], ["Dining"])
+        self.assertEqual([row["name"] for row in details], ["Dining"])
+
+    def test_account_scoped_merchant_rules_apply_until_transaction_override(self):
+        self.connection.execute(
+            """
+            INSERT INTO merchant_rules (
+                account_id, match_type, match_value, category, flow_type
+            ) VALUES ('checking', 'merchant', 'Recurring Payment', 'Transfer Out', 'transfer')
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO merchant_rules (
+                account_id, match_type, match_value, category, flow_type
+            ) VALUES ('checking', 'description', 'Fallback Payment', 'Transfer Out', 'transfer')
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO transactions (
+                id, account_id, amount, currency, description, merchant,
+                pending, transacted_at, category, excluded
+            ) VALUES (
+                'matched', 'checking', 90000, 'USD', 'Payment detail',
+                'Recurring Payment', 0, '2026-08-05', 'Loan Payments', 0
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO transactions (
+                id, account_id, amount, currency, description, merchant,
+                pending, transacted_at, category, excluded
+            ) VALUES
+                ('description-match', 'checking', 80000, 'USD',
+                 'Fallback Payment', NULL, 0, '2026-08-06', 'Loan Payments', 0),
+                ('different-account', 'card', 1200, 'USD', 'Payment detail',
+                 'Recurring Payment', 0, '2026-08-07', 'General', 0)
+            """
+        )
+
+        transactions = {
+            row["id"]: row for row in transaction_list(self.connection)
+        }
+        matched = transactions["matched"]
+        self.assertEqual(matched["effective_category"], "Transfer Out")
+        self.assertEqual(matched["flow_type"], "transfer")
+        self.assertIsNotNone(matched["merchant_rule_id"])
+        self.assertEqual(transactions["description-match"]["flow_type"], "transfer")
+        self.assertEqual(transactions["different-account"]["flow_type"], "spending")
+        self.assertEqual(
+            rolling_spending_summary(
+                self.connection, lookback_days=30, today=date(2026, 8, 15)
+            )["total"],
+            1_200,
+        )
+
+        self.connection.execute(
+            """
+            UPDATE transactions
+            SET category_override = 'Housing', flow_override = 'spending'
+            WHERE id = 'matched'
+            """
+        )
+        overridden = {
+            row["id"]: row for row in transaction_list(self.connection)
+        }["matched"]
+        self.assertEqual(overridden["effective_category"], "Housing")
+        self.assertEqual(overridden["flow_type"], "spending")
 
 
 if __name__ == "__main__":

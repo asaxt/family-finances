@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -75,11 +75,22 @@ VERSION_ONE_COLUMNS = {
     "accounts": VERSION_ZERO_COLUMNS["accounts"] | {"subtype", "available_balance"},
     "transactions": VERSION_ZERO_COLUMNS["transactions"] | {"cash_flow_override"},
 }
-EXPECTED_COLUMNS = {
+VERSION_TWO_COLUMNS = {
     **VERSION_ZERO_COLUMNS,
     "accounts": VERSION_ZERO_COLUMNS["accounts"] | {"subtype", "available_balance"},
     "transactions": VERSION_ZERO_COLUMNS["transactions"] | {"flow_override"},
     "category_rules": {"name", "flow_type"},
+}
+EXPECTED_COLUMNS = {
+    **VERSION_TWO_COLUMNS,
+    "merchant_rules": {
+        "id",
+        "account_id",
+        "match_type",
+        "match_value",
+        "category",
+        "flow_type",
+    },
 }
 
 
@@ -133,15 +144,19 @@ def _validate_version_one(connection):
 
 
 def _validate_version_two(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 2)
+    _validate_columns(connection, VERSION_TWO_COLUMNS, 2)
 
 
 def _validate_version_three(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 3)
+    _validate_columns(connection, VERSION_TWO_COLUMNS, 3)
 
 
 def _validate_version_four(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 4)
+    _validate_columns(connection, VERSION_TWO_COLUMNS, 4)
+
+
+def _validate_version_five(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 5)
 
 
 def _migrate_zero_to_one(connection):
@@ -249,18 +264,43 @@ def _migrate_three_to_four(connection):
     _normalize_venmo_transactions(connection)
 
 
+def _migrate_four_to_five(connection):
+    connection.execute(
+        """
+        CREATE TABLE merchant_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            match_type TEXT NOT NULL CHECK (
+                match_type IN ('merchant', 'description')
+            ),
+            match_value TEXT NOT NULL COLLATE NOCASE,
+            category TEXT NOT NULL,
+            flow_type TEXT NOT NULL CHECK (
+                flow_type IN (
+                    'earned_income', 'other_inflow', 'spending', 'transfer'
+                )
+            ),
+            UNIQUE (account_id, match_type, match_value),
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
     2: _validate_version_two,
     3: _validate_version_three,
     4: _validate_version_four,
+    5: _validate_version_five,
 }
 MIGRATIONS = {
     0: _migrate_zero_to_one,
     1: _migrate_one_to_two,
     2: _migrate_two_to_three,
     3: _migrate_three_to_four,
+    4: _migrate_four_to_five,
 }
 
 
@@ -344,6 +384,22 @@ def create_schema(connection):
                         'earned_income', 'other_inflow', 'spending', 'transfer'
                     )
                 )
+            );
+            CREATE TABLE merchant_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL,
+                match_type TEXT NOT NULL CHECK (
+                    match_type IN ('merchant', 'description')
+                ),
+                match_value TEXT NOT NULL COLLATE NOCASE,
+                category TEXT NOT NULL,
+                flow_type TEXT NOT NULL CHECK (
+                    flow_type IN (
+                        'earned_income', 'other_inflow', 'spending', 'transfer'
+                    )
+                ),
+                UNIQUE (account_id, match_type, match_value),
+                FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
             );
             CREATE TABLE budgets (
                 month TEXT NOT NULL,

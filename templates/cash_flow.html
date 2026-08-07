@@ -13,6 +13,11 @@
     <span class="metric-note">Paychecks, bonuses, and other earned income</span>
   </article>
   <article class="metric-card">
+    <span class="metric-label">Other money in</span>
+    <div class="metric-value">{{ cash_flow.other_inflows|money }}</div>
+    <span class="metric-note">Reimbursements and other non-earned inflows</span>
+  </article>
+  <article class="metric-card">
     <span class="metric-label">Money out</span>
     <div class="metric-value">{{ cash_flow.spending|money }}</div>
     <span class="metric-note">Included outgoing transactions for the same dates</span>
@@ -21,11 +26,6 @@
     <span class="metric-label">Net cash flow</span>
     <div class="metric-value {{ 'down' if cash_flow.net >= 0 else 'up' }}">{{ cash_flow.net|money }}</div>
     <span class="metric-note">Income and other inflows minus spending</span>
-  </article>
-  <article class="metric-card">
-    <span class="metric-label">Savings rate</span>
-    <div class="metric-value">{% if cash_flow.savings_rate is not none %}{{ "%.0f"|format(cash_flow.savings_rate) }}%{% else %}—{% endif %}</div>
-    <span class="metric-note">Net cash flow as a share of income</span>
   </article>
 </section>
 
@@ -37,7 +37,7 @@
   <article class="panel">
     <div class="panel-header"><div><h2>Movement summary</h2><p>Transfers remain visible but do not count as income or spending</p></div></div>
     <div class="insight-list">
-      <div class="insight"><span class="insight-icon">+</span><span><strong>Other money in</strong><br>{{ cash_flow.other_inflows|money }}</span></div>
+      <div class="insight"><span class="insight-icon">%</span><span><strong>Savings rate</strong><br>{% if cash_flow.savings_rate is not none %}{{ "%.0f"|format(cash_flow.savings_rate) }}%{% else %}—{% endif %}</span></div>
       <div class="insight"><span class="insight-icon">↓</span><span><strong>Transfers in</strong><br>{{ cash_flow.transfers_in|money }}</span></div>
       <div class="insight"><span class="insight-icon">↑</span><span><strong>Transfers out</strong><br>{{ cash_flow.transfers_out|money }}</span></div>
     </div>

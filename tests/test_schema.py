@@ -22,7 +22,7 @@ class SchemaTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         try:
             schema.create_schema(connection)
-            self.assertEqual(schema.schema_version(connection), 4)
+            self.assertEqual(schema.schema_version(connection), 5)
             schema.validate_schema(connection)
             goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
@@ -45,10 +45,10 @@ class SchemaTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_a_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         with database.connection() as connection:
-            connection.execute("PRAGMA user_version = 5")
+            connection.execute("PRAGMA user_version = 6")
         database.persist()
 
-        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 4"):
+        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 5"):
             schema.prepare_encrypted_database(database, key, auth_path)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -57,7 +57,7 @@ class SchemaTests(unittest.TestCase):
         changed = schema.prepare_encrypted_database(database, key, auth_path)
         self.assertTrue(changed)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 4)
+            self.assertEqual(schema.schema_version(connection), 5)
             account_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(accounts)")
             }
@@ -151,6 +151,7 @@ class SchemaTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO category_rules (name, flow_type) VALUES ('Venmo', 'earned_income')"
             )
+            connection.execute("DROP TABLE merchant_rules")
             connection.execute("PRAGMA user_version = 2")
             schema._validate_version_two(connection)
         database.persist()
@@ -166,7 +167,7 @@ class SchemaTests(unittest.TestCase):
             venmo_rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 4)
+            self.assertEqual(schema.schema_version(connection), 5)
         self.assertEqual(rows["venmo-in"], ("Venmo", None))
         self.assertEqual(rows["venmo-out"], ("Venmo", None))
         self.assertEqual(rows["bank-transfer"], (None, "transfer"))
@@ -204,6 +205,7 @@ class SchemaTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO category_rules (name, flow_type) VALUES ('Venmo', 'earned_income')"
             )
+            connection.execute("DROP TABLE merchant_rules")
             connection.execute("PRAGMA user_version = 3")
             schema._validate_version_three(connection)
         database.persist()
@@ -216,9 +218,28 @@ class SchemaTests(unittest.TestCase):
             rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 4)
+            self.assertEqual(schema.schema_version(connection), 5)
         self.assertEqual(tuple(transaction), ("Venmo", None))
         self.assertIsNone(rule)
+        self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
+
+    def test_version_four_adds_recurring_merchant_rules(self):
+        database, key, auth_path = self.encrypted_schema_zero()
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            connection.execute("DROP TABLE merchant_rules")
+            connection.execute("PRAGMA user_version = 4")
+            schema._validate_version_four(connection)
+        database.persist()
+
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(merchant_rules)")
+            }
+            self.assertEqual(schema.schema_version(connection), 5)
+        self.assertEqual(columns, schema.EXPECTED_COLUMNS["merchant_rules"])
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
     def test_failed_migration_restores_original_and_keeps_backup(self):
@@ -264,6 +285,7 @@ class SchemaTests(unittest.TestCase):
         database.unlock(key)
         schema.prepare_encrypted_database(database, key, auth_path)
         with database.connection() as connection:
+            connection.execute("DROP TABLE merchant_rules")
             connection.execute("DROP TABLE category_rules")
             connection.execute("ALTER TABLE transactions DROP COLUMN flow_override")
             connection.execute("ALTER TABLE accounts DROP COLUMN available_balance")

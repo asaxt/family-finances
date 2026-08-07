@@ -930,11 +930,18 @@ def page_context(active):
 @app.get("/")
 def overview():
     context = page_context("overview")
+    context["flow_types"] = FLOW_TYPES
     context["lookback_days"] = overview_lookback_days()
     context["max_lookback_days"] = MAX_OVERVIEW_LOOKBACK_DAYS
     context["overview_error"] = request.args.get("error")
     with db() as connection:
         context["summary"] = rolling_spending_summary(
+            connection,
+            context["lookback_days"],
+            context["account_id"],
+            context["connection_id"],
+        )
+        context["cash_flow"] = cash_flow_summary(
             connection,
             context["lookback_days"],
             context["account_id"],
@@ -948,6 +955,11 @@ def overview():
             date_to=context["summary"]["date_to"],
             limit=8,
         )[:8]
+    context["savings"] = (
+        savings_data()
+        if not context["account_id"] and not context["connection_id"]
+        else None
+    )
     context["credit_balances"] = [
         account
         for account in context["accounts"]
@@ -1099,6 +1111,8 @@ def transactions():
                     FROM transactions
                     UNION
                     SELECT name FROM category_rules
+                    UNION
+                    SELECT category AS name FROM merchant_rules
                 ) ORDER BY name COLLATE NOCASE
                 """
             )
@@ -1558,6 +1572,7 @@ def canonical_category(connection, name):
         SELECT name FROM (
             SELECT COALESCE(category_override, category) AS name FROM transactions
             UNION SELECT name FROM category_rules
+            UNION SELECT category AS name FROM merchant_rules
         ) WHERE name = ? COLLATE NOCASE LIMIT 1
         """,
         (name,),
@@ -1589,6 +1604,13 @@ def selected_category(connection, choice, new_name=None, new_flow_type=None):
     return (True, row[0]) if row else (False, None)
 
 
+def recurring_match(transaction):
+    merchant = (transaction["merchant"] or "").strip()
+    if merchant:
+        return "merchant", merchant
+    return "description", transaction["description"].strip()
+
+
 @app.post("/api/transaction/<transaction_id>")
 def update_transaction(transaction_id):
     flow_override = request.form.get("flow_override", "")
@@ -1596,6 +1618,16 @@ def update_transaction(transaction_id):
         return transaction_cleanup_redirect()
     excluded = int(request.form.get("excluded") == "on")
     with db() as connection:
+        transaction = connection.execute(
+            """
+            SELECT account_id, merchant, description,
+                   COALESCE(category_override, category) AS category
+            FROM transactions WHERE id = ?
+            """,
+            (transaction_id,),
+        ).fetchone()
+        if not transaction:
+            return transaction_cleanup_redirect()
         valid, category = selected_category(
             connection,
             request.form.get("category_choice", ""),
@@ -1604,6 +1636,41 @@ def update_transaction(transaction_id):
         )
         if not valid:
             return transaction_cleanup_redirect()
+        match_type, match_value = recurring_match(transaction)
+        existing_rule = connection.execute(
+            """
+            SELECT id, category FROM merchant_rules
+            WHERE account_id = ? AND match_type = ?
+              AND match_value = ? COLLATE NOCASE
+            """,
+            (transaction["account_id"], match_type, match_value),
+        ).fetchone()
+        if request.form.get("remember_match") == "on":
+            recurring_category = category or (
+                existing_rule["category"] if existing_rule else transaction["category"]
+            )
+            connection.execute(
+                """
+                INSERT INTO merchant_rules (
+                    account_id, match_type, match_value, category, flow_type
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
+                    category = excluded.category,
+                    flow_type = excluded.flow_type
+                """,
+                (
+                    transaction["account_id"],
+                    match_type,
+                    match_value,
+                    recurring_category,
+                    flow_override,
+                ),
+            )
+        elif existing_rule:
+            connection.execute(
+                "DELETE FROM merchant_rules WHERE id = ?",
+                (existing_rule["id"],),
+            )
         connection.execute(
             """
             UPDATE transactions

@@ -65,7 +65,13 @@ class OverviewTests(unittest.TestCase):
         self.assertNotIn(b'type="month"', overview.data)
         self.assertIn(b"Projected calendar month", overview.data)
         self.assertNotIn(b"vs prior average", overview.data)
-        self.assertEqual(overview.data.count(b'<article class="metric-card'), 4)
+        self.assertIn(b"Savings snapshot", overview.data)
+        self.assertIn(b"Cash flow", overview.data)
+        self.assertLess(
+            overview.data.index(b"Earned income"),
+            overview.data.index(b"Total spend"),
+        )
+        self.assertEqual(overview.data.count(b'<article class="metric-card'), 8)
 
     def test_valid_lookback_is_encrypted_and_invalid_values_are_rejected(self):
         overview = self.client.get("/")
