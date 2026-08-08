@@ -77,7 +77,7 @@ class AppSetupTests(unittest.TestCase):
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
         with self.application.db() as connection:
-            self.assertEqual(schema_version(connection), 4)
+            self.assertEqual(schema_version(connection), 5)
             initial_goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
@@ -311,6 +311,117 @@ class AppSetupTests(unittest.TestCase):
         )
         self.assertEqual(rejected_login.status_code, 200)
         self.assertIn(b"That password is not correct", rejected_login.data)
+
+    def test_recurring_transaction_rule_updates_existing_and_future_matches(self):
+        setup_page = self.client.get("/setup")
+        self.client.post(
+            "/setup",
+            data={
+                "csrf_token": self.csrf_token(setup_page),
+                "password": "a recurring rule test password",
+                "confirmation": "a recurring rule test password",
+            },
+        )
+        with self.application.db() as connection:
+            connection.execute(
+                """
+                INSERT INTO connections (
+                    id, owner_name, institution, access_token
+                ) VALUES (1, 'Household', 'Example Bank', 'fake-token')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO accounts (
+                    id, connection_id, institution, name, type
+                ) VALUES ('checking', 1, 'Example Bank', 'Checking', 'depository')
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, merchant,
+                    pending, transacted_at, category, excluded
+                ) VALUES (?, 'checking', 5000, 'USD', 'Payment detail',
+                          'Recurring Payment', 0, '2026-08-05', 'Loan Payments', 0)
+                """,
+                (("reviewed",), ("existing-match",)),
+            )
+
+        page = self.client.get("/transactions")
+        self.client.post(
+            "/api/transaction/reviewed",
+            data={
+                "csrf_token": self.csrf_token(page),
+                "category_choice": "__new__",
+                "new_category": "Transfer Out",
+                "new_category_flow_type": "transfer",
+                "flow_override": "transfer",
+                "remember_match": "on",
+            },
+        )
+        with self.application.db() as connection:
+            connection.execute(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, merchant,
+                    pending, transacted_at, category, excluded
+                ) VALUES (
+                    'future-match', 'checking', 6000, 'USD', 'Another detail',
+                    'Recurring Payment', 0, '2026-08-06', 'Loan Payments', 0
+                )
+                """
+            )
+            rows = {
+                row["id"]: row
+                for row in self.application.transaction_list(connection)
+            }
+            rule_count = connection.execute(
+                "SELECT COUNT(*) FROM merchant_rules"
+            ).fetchone()[0]
+        self.assertEqual(rule_count, 1)
+        for transaction_id in ("existing-match", "future-match"):
+            self.assertEqual(rows[transaction_id]["effective_category"], "Transfer Out")
+            self.assertEqual(rows[transaction_id]["flow_type"], "transfer")
+        self.assertIn(b'data-recurring-rule="1"', self.client.get("/transactions").data)
+        self.assertNotIn(
+            b"Recurring Payment",
+            self.application.VAULT_PATH.read_bytes(),
+        )
+
+        with self.application.db() as connection:
+            connection.execute(
+                """
+                UPDATE transactions SET flow_override = 'spending'
+                WHERE id = 'future-match'
+                """
+            )
+            overridden = {
+                row["id"]: row
+                for row in self.application.transaction_list(connection)
+            }["future-match"]
+        self.assertEqual(overridden["flow_type"], "spending")
+
+        page = self.client.get("/transactions")
+        self.client.post(
+            "/api/transaction/reviewed",
+            data={
+                "csrf_token": self.csrf_token(page),
+                "category_choice": "Transfer Out",
+                "flow_override": "transfer",
+            },
+        )
+        with self.application.db() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0],
+                0,
+            )
+            reverted = {
+                row["id"]: row
+                for row in self.application.transaction_list(connection)
+            }["existing-match"]
+        self.assertEqual(reverted["effective_category"], "Loan Payments")
+        self.assertEqual(reverted["flow_type"], "spending")
 
 
 if __name__ == "__main__":

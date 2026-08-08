@@ -104,6 +104,7 @@
                 data-name="{{ transaction.merchant or transaction.description }}"
                 data-override="{{ transaction.category_override or '' }}"
                 data-flow-type="{{ transaction.flow_type }}"
+                data-recurring-rule="{{ 1 if transaction.merchant_rule_id else 0 }}"
                 data-excluded="{{ transaction.excluded }}"
               >Review</button>
             </td>
@@ -148,6 +149,8 @@
         {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
       </select>
     </label>
+    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category and treatment for matching transactions on this account</label>
+    <p class="transaction-sub">This applies to existing and future matches. Clear it and save to remove an existing recurring rule.</p>
     <label class="check-label"><input id="review-excluded" type="checkbox" name="excluded"> Exclude from all cash-flow calculations</label>
     <button class="button primary" type="submit">Save changes</button>
   </form>
@@ -164,6 +167,7 @@
   const reviewNewCategoryFlowLabel = document.querySelector("#review-new-category-flow-label");
   const reviewNewCategoryFlow = document.querySelector("#review-new-category-flow");
   const reviewFlowOverride = document.querySelector("#review-flow-override");
+  const reviewRememberMatch = document.querySelector("#review-remember-match");
   const reviewExcluded = document.querySelector("#review-excluded");
   const bulkCategory = document.querySelector("#bulk-category");
   const bulkNewCategory = document.querySelector("#bulk-new-category");
@@ -212,6 +216,7 @@
       reviewCategory.value = button.dataset.override;
       reviewNewCategory.value = "";
       reviewFlowOverride.value = button.dataset.flowType;
+      reviewRememberMatch.checked = button.dataset.recurringRule === "1";
       reviewExcluded.checked = button.dataset.excluded === "1";
       showReviewNewCategory();
       reviewDialog.showModal();
