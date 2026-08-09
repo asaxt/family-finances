@@ -6,6 +6,11 @@
 {% block content %}
 {% if cash_flow_error == "lookback" %}<p class="form-message error overview-page-message">Choose a lookback between 1 and {{ max_lookback_days }} days.</p>{% endif %}
 {% if cash_flow_error == "classification" %}<p class="form-message error overview-page-message">Choose a valid cash-flow classification.</p>{% endif %}
+{% if cash_flow_accounts %}
+<p class="cash-flow-scope-note">Cash flow uses {{ cash_flow_accounts | length }} designated account{{ "" if cash_flow_accounts | length == 1 else "s" }}. Credit-card transactions remain available in spending reports. <a href="{{ url_for('settings_page') }}">Manage account roles</a></p>
+{% else %}
+<p class="form-message development overview-page-message">No cash-flow accounts are selected. <a href="{{ url_for('settings_page') }}">Choose account roles in Settings.</a></p>
+{% endif %}
 <section class="metric-grid cash-flow-metrics">
   <article class="metric-card hero">
     <span class="metric-label">Total money in · {{ lookback_days }} days</span>

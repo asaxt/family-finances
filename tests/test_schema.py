@@ -22,7 +22,7 @@ class SchemaTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         try:
             schema.create_schema(connection)
-            self.assertEqual(schema.schema_version(connection), 6)
+            self.assertEqual(schema.schema_version(connection), 8)
             self.assertNotIn("budgets", schema.user_tables(connection))
             schema.validate_schema(connection)
             goal = connection.execute(
@@ -46,10 +46,10 @@ class SchemaTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_a_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         with database.connection() as connection:
-            connection.execute("PRAGMA user_version = 7")
+            connection.execute("PRAGMA user_version = 9")
         database.persist()
 
-        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 6"):
+        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 8"):
             schema.prepare_encrypted_database(database, key, auth_path)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -58,7 +58,7 @@ class SchemaTests(unittest.TestCase):
         changed = schema.prepare_encrypted_database(database, key, auth_path)
         self.assertTrue(changed)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 6)
+            self.assertEqual(schema.schema_version(connection), 8)
             account_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(accounts)")
             }
@@ -154,6 +154,8 @@ class SchemaTests(unittest.TestCase):
             )
             self.create_legacy_budget_table(connection)
             connection.execute("DROP TABLE merchant_rules")
+            self.drop_version_eight_columns(connection, merchant_rules=False)
+            connection.execute("ALTER TABLE accounts DROP COLUMN cash_flow_role")
             connection.execute("PRAGMA user_version = 2")
             schema._validate_version_two(connection)
         database.persist()
@@ -169,7 +171,7 @@ class SchemaTests(unittest.TestCase):
             venmo_rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 6)
+            self.assertEqual(schema.schema_version(connection), 8)
         self.assertEqual(rows["venmo-in"], ("Venmo", None))
         self.assertEqual(rows["venmo-out"], ("Venmo", None))
         self.assertEqual(rows["bank-transfer"], (None, "transfer"))
@@ -209,6 +211,8 @@ class SchemaTests(unittest.TestCase):
             )
             self.create_legacy_budget_table(connection)
             connection.execute("DROP TABLE merchant_rules")
+            self.drop_version_eight_columns(connection, merchant_rules=False)
+            connection.execute("ALTER TABLE accounts DROP COLUMN cash_flow_role")
             connection.execute("PRAGMA user_version = 3")
             schema._validate_version_three(connection)
         database.persist()
@@ -221,7 +225,7 @@ class SchemaTests(unittest.TestCase):
             rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 6)
+            self.assertEqual(schema.schema_version(connection), 8)
         self.assertEqual(tuple(transaction), ("Venmo", None))
         self.assertIsNone(rule)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
@@ -232,6 +236,8 @@ class SchemaTests(unittest.TestCase):
         with database.connection() as connection:
             self.create_legacy_budget_table(connection)
             connection.execute("DROP TABLE merchant_rules")
+            self.drop_version_eight_columns(connection, merchant_rules=False)
+            connection.execute("ALTER TABLE accounts DROP COLUMN cash_flow_role")
             connection.execute("PRAGMA user_version = 4")
             schema._validate_version_four(connection)
         database.persist()
@@ -242,7 +248,7 @@ class SchemaTests(unittest.TestCase):
                 row[1]
                 for row in connection.execute("PRAGMA table_info(merchant_rules)")
             }
-            self.assertEqual(schema.schema_version(connection), 6)
+            self.assertEqual(schema.schema_version(connection), 8)
         self.assertEqual(columns, schema.EXPECTED_COLUMNS["merchant_rules"])
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -251,14 +257,100 @@ class SchemaTests(unittest.TestCase):
         schema.prepare_encrypted_database(database, key, auth_path)
         with database.connection() as connection:
             self.create_legacy_budget_table(connection)
+            self.drop_version_eight_columns(connection)
+            connection.execute("ALTER TABLE accounts DROP COLUMN cash_flow_role")
             connection.execute("PRAGMA user_version = 5")
             schema._validate_version_five(connection)
         database.persist()
 
         schema.prepare_encrypted_database(database, key, auth_path)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 6)
+            self.assertEqual(schema.schema_version(connection), 8)
             self.assertNotIn("budgets", schema.user_tables(connection))
+        self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
+
+    def test_version_six_assigns_default_account_roles(self):
+        database, key, auth_path = self.encrypted_schema_zero()
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            self.drop_version_eight_columns(connection)
+            connection.execute("ALTER TABLE accounts DROP COLUMN cash_flow_role")
+            connection.execute(
+                """
+                INSERT INTO connections (id, owner_name, institution, access_token)
+                VALUES (1, 'Household', 'Example Bank', 'test-token')
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO accounts (id, connection_id, institution, name, type)
+                VALUES (?, 1, 'Example Bank', ?, ?)
+                """,
+                (
+                    ("checking", "Checking", "depository"),
+                    ("card", "Card", "credit"),
+                    ("investment", "Investment", "investment"),
+                ),
+            )
+            connection.execute("PRAGMA user_version = 6")
+            schema._validate_version_six(connection)
+        database.persist()
+
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            roles = dict(
+                connection.execute(
+                    "SELECT id, cash_flow_role FROM accounts ORDER BY id"
+                ).fetchall()
+            )
+            self.assertEqual(schema.schema_version(connection), 8)
+        self.assertEqual(
+            roles,
+            {
+                "card": "credit_card",
+                "checking": "cash_flow",
+                "investment": "other",
+            },
+        )
+        self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
+
+    def test_version_seven_enables_spending_for_credit_cards(self):
+        database, key, auth_path = self.encrypted_schema_zero()
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            self.drop_version_eight_columns(connection)
+            connection.execute(
+                """
+                INSERT INTO connections (id, owner_name, institution, access_token)
+                VALUES (1, 'Household', 'Example Bank', 'test-token')
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO accounts (
+                    id, connection_id, institution, name, type, cash_flow_role
+                ) VALUES (?, 1, 'Example Bank', ?, ?, ?)
+                """,
+                (
+                    ("checking", "Checking", "depository", "cash_flow"),
+                    ("card", "Card", "credit", "credit_card"),
+                ),
+            )
+            connection.execute("PRAGMA user_version = 7")
+            schema._validate_version_seven(connection)
+        database.persist()
+
+        schema.prepare_encrypted_database(database, key, auth_path)
+        with database.connection() as connection:
+            settings = {
+                row[0]: tuple(row[1:])
+                for row in connection.execute(
+                    "SELECT id, cash_flow_role, spending_enabled FROM accounts"
+                )
+            }
+            self.assertEqual(schema.schema_version(connection), 8)
+        self.assertEqual(settings["checking"], ("cash_flow", 0))
+        self.assertEqual(settings["card"], ("credit_card", 1))
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
     def test_failed_migration_restores_original_and_keeps_backup(self):
@@ -307,6 +399,8 @@ class SchemaTests(unittest.TestCase):
             connection.execute("DROP TABLE merchant_rules")
             connection.execute("DROP TABLE category_rules")
             connection.execute("ALTER TABLE transactions DROP COLUMN flow_override")
+            self.drop_version_eight_columns(connection, merchant_rules=False)
+            connection.execute("ALTER TABLE accounts DROP COLUMN cash_flow_role")
             connection.execute("ALTER TABLE accounts DROP COLUMN available_balance")
             connection.execute("ALTER TABLE accounts DROP COLUMN subtype")
             self.create_legacy_budget_table(connection)
@@ -327,6 +421,15 @@ class SchemaTests(unittest.TestCase):
             )
             """
         )
+
+    @staticmethod
+    def drop_version_eight_columns(connection, merchant_rules=True):
+        connection.execute("ALTER TABLE accounts DROP COLUMN spending_enabled")
+        connection.execute("ALTER TABLE transactions DROP COLUMN spending_override")
+        if merchant_rules:
+            connection.execute(
+                "ALTER TABLE merchant_rules DROP COLUMN spending_override"
+            )
 
 
 if __name__ == "__main__":

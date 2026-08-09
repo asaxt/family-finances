@@ -29,13 +29,23 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         self.connection.executemany(
             """
             INSERT INTO accounts (
-                id, connection_id, institution, name, mask, type, subtype
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, connection_id, institution, name, mask, type, subtype,
+                cash_flow_role, spending_enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                ("card", 1, "Card Bank", "Credit Card", "1111", "credit", "credit card"),
-                ("checking", 2, "Cash Bank", "Checking", "2222", "depository", "checking"),
-                ("savings", 2, "Cash Bank", "Savings", "3333", "depository", "savings"),
+                (
+                    "card", 1, "Card Bank", "Credit Card", "1111", "credit",
+                    "credit card", "credit_card", 1,
+                ),
+                (
+                    "checking", 2, "Cash Bank", "Checking", "2222",
+                    "depository", "checking", "cash_flow", 0,
+                ),
+                (
+                    "savings", 2, "Cash Bank", "Savings", "3333",
+                    "depository", "savings", "cash_flow", 0,
+                ),
             ),
         )
 
@@ -71,7 +81,7 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         self.add("purchase", "card", 150_000, "Travel", "2026-08-02")
         self.add("checking-to-savings", "checking", 100_000, "Transfer Out", "2026-08-03")
         self.add("savings-from-checking", "savings", -100_000, "Transfer In", "2026-08-03")
-        self.add("card-payment-out", "checking", 150_000, "Transfer Out", "2026-08-04")
+        self.add("card-payment-out", "checking", 150_000, "Loan Payments", "2026-08-04")
         self.add("card-payment-in", "card", -150_000, "Loan Payments", "2026-08-04")
         self.add("unclear-deposit", "checking", -20_000, "Other", "2026-08-05")
         self.add("venmo-out", "checking", 5_000, "Transfer Out", "2026-08-06")
@@ -90,8 +100,8 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         self.assertEqual(summary["income"], 500_000)
         self.assertEqual(summary["spending"], 163_000)
         self.assertEqual(summary["other_inflows"], 27_000)
-        self.assertEqual(summary["transfers_in"], 250_000)
-        self.assertEqual(summary["transfers_out"], 250_000)
+        self.assertEqual(summary["transfers_in"], 100_000)
+        self.assertEqual(summary["transfers_out"], 100_000)
         self.assertEqual(summary["net"], 364_000)
         self.assertEqual(summary["savings_rate"], 72.8)
         self.assertGreaterEqual(len(summary["months"]), 2)
@@ -169,7 +179,7 @@ class CashFlowAnalyticsTests(unittest.TestCase):
 
         self.assertEqual(monthly["total"], 2_500)
         self.assertEqual(rolling["total"], 2_500)
-        self.assertEqual(cash_flow["spending"], 2_500)
+        self.assertEqual(cash_flow["spending"], 0)
         august_daily_total = sum(
             row["amount"]
             for row in daily_trends(self.connection)
@@ -179,6 +189,46 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         self.assertEqual(trends["months"][-1]["amount"], 2_500)
         self.assertEqual([row["name"] for row in monthly["categories"]], ["Dining"])
         self.assertEqual([row["name"] for row in details], ["Dining"])
+
+        spending_ids = {
+            row["id"]
+            for row in transaction_list(
+                self.connection, reporting_scope="spending"
+            )
+        }
+        cash_flow_ids = {
+            row["id"]
+            for row in transaction_list(
+                self.connection, reporting_scope="cash_flow"
+            )
+        }
+        self.assertIn("purchase", spending_ids)
+        self.assertNotIn("income", spending_ids)
+        self.assertIn("income", cash_flow_ids)
+        self.assertNotIn("purchase", cash_flow_ids)
+
+    def test_bank_purchase_can_be_added_to_spending_without_changing_cash_flow(self):
+        self.add("debit-purchase", "checking", 3_000, "Dining", "2026-08-04")
+
+        cash_flow = cash_flow_summary(
+            self.connection, lookback_days=30, today=date(2026, 8, 15)
+        )
+        spending = spending_summary(self.connection, "2026-08")
+        self.assertEqual(cash_flow["spending"], 3_000)
+        self.assertEqual(spending["total"], 0)
+
+        self.connection.execute(
+            """
+            UPDATE transactions SET spending_override = 'include'
+            WHERE id = 'debit-purchase'
+            """
+        )
+        spending = spending_summary(self.connection, "2026-08")
+        cash_flow = cash_flow_summary(
+            self.connection, lookback_days=30, today=date(2026, 8, 15)
+        )
+        self.assertEqual(spending["total"], 3_000)
+        self.assertEqual(cash_flow["spending"], 3_000)
 
     def test_account_scoped_merchant_rules_apply_until_transaction_override(self):
         self.connection.execute(

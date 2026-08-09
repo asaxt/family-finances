@@ -24,6 +24,41 @@
     </form>
   </article>
 
+  <article class="panel account-role-panel">
+    <div class="panel-header">
+      <div>
+        <h2>Account reporting roles</h2>
+        <p>Keep bank cash movement distinct from day-to-day spending analysis.</p>
+      </div>
+    </div>
+    {% if settings_error == "account_roles" %}<p class="form-message error">Account roles could not be saved. Reload the page and try again.</p>{% endif %}
+    {% if accounts %}
+    <form class="settings-form" method="post" action="/api/account-roles">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="account-role-list">
+        {% for account in accounts %}
+        <div class="account-role-row">
+          <input type="hidden" name="account_id" value="{{ account.id }}">
+          <span><strong>{{ account.owner_name }} · {{ account.institution }}</strong><small>{{ account.name }} ····{{ account.mask }} · {{ account.type | title }}</small></span>
+          <label>
+            <span class="sr-only">Reporting role for {{ account.name }}</span>
+            <select name="reporting_purpose">
+              {% for value, label in account_purposes.items() %}
+                {% if account.type == "depository" or value not in ["cash_flow", "both"] %}<option value="{{ value }}" {{ "selected" if account.reporting_purpose == value }}>{{ label }}</option>{% endif %}
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        {% endfor %}
+      </div>
+      <p class="security-note">Bank cash flow only is the default for checking and savings. Spending analysis only is the default for credit cards. Choose both for a debit-card or single-account workflow; individual and recurring transaction settings can still handle exceptions.</p>
+      <button class="button primary" type="submit">Save account roles</button>
+    </form>
+    {% else %}
+    <p class="security-note">Connect an institution before choosing account roles.</p>
+    {% endif %}
+  </article>
+
   <article class="panel">
     <div class="panel-header">
       <div>
@@ -146,4 +181,5 @@
 {% if settings_saved == "plaid_products" and plaid_product_status.has_warning %}<script>showNotice("Unexpected Plaid product access needs review.", "error");</script>{% endif %}
 {% if settings_saved == "plaid_products" and not plaid_product_status.has_warning %}<script>showNotice("Plaid product access matches Transactions only.");</script>{% endif %}
 {% if settings_saved == "app_name" %}<script>showNotice("App name updated.");</script>{% endif %}
+{% if settings_saved == "account_roles" %}<script>showNotice("Account reporting roles updated.");</script>{% endif %}
 {% endblock %}

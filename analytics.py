@@ -29,8 +29,13 @@ END
 
 SPEND_SQL = f"""
 CASE
-    WHEN ({EFFECTIVE_CASH_FLOW_SQL}) = 'spending' AND t.amount > 0
-        THEN t.amount
+    WHEN t.amount <= 0 THEN 0
+    WHEN t.spending_override = 'exclude' THEN 0
+    WHEN t.spending_override = 'include' THEN t.amount
+    WHEN mr.spending_override = 'exclude' THEN 0
+    WHEN mr.spending_override = 'include' THEN t.amount
+    WHEN a.spending_enabled = 1
+         AND ({EFFECTIVE_CASH_FLOW_SQL}) = 'spending' THEN t.amount
     ELSE 0
 END
 """
@@ -452,6 +457,16 @@ def effective_cash_flow_type(row):
     return "spending"
 
 
+def included_in_spending(row):
+    if row["amount"] <= 0:
+        return False
+    if row.get("spending_override"):
+        return row["spending_override"] == "include"
+    if row.get("merchant_rule_spending_override"):
+        return row["merchant_rule_spending_override"] == "include"
+    return bool(row.get("spending_enabled")) and effective_cash_flow_type(row) == "spending"
+
+
 def cash_flow_summary(
     connection,
     lookback_days=DEFAULT_OVERVIEW_LOOKBACK_DAYS,
@@ -480,7 +495,9 @@ def cash_flow_summary(
             JOIN accounts a ON a.id = t.account_id
             JOIN connections c ON c.id = a.connection_id
             {CATEGORY_RULE_JOIN}
-            WHERE t.pending = 0 AND t.transacted_at <= ? {account_sql}
+            WHERE t.pending = 0
+              AND a.cash_flow_role = 'cash_flow'
+              AND t.transacted_at <= ? {account_sql}
             ORDER BY t.transacted_at DESC, ABS(t.amount) DESC
             """,
             [today.isoformat(), *account_params],
@@ -804,6 +821,8 @@ def transaction_list(
     date_from=None,
     date_to=None,
     limit=None,
+    reporting_scope="all",
+    spending_only=False,
 ):
     conditions = []
     params = []
@@ -822,6 +841,16 @@ def transaction_list(
     if connection_id:
         conditions.append("a.connection_id = ?")
         params.append(connection_id)
+    if reporting_scope == "cash_flow":
+        conditions.append("a.cash_flow_role = 'cash_flow'")
+    elif reporting_scope == "spending":
+        conditions.append(
+            "(a.spending_enabled = 1 "
+            "OR t.spending_override = 'include' "
+            "OR mr.spending_override = 'include')"
+        )
+    if spending_only:
+        conditions.append(f"({SPEND_SQL}) > 0")
     if category:
         conditions.append(f"{EFFECTIVE_CATEGORY_SQL} = ?")
         params.append(category)
@@ -843,11 +872,13 @@ def transaction_list(
     rows = connection.execute(
         f"""
         SELECT t.*, a.name AS account_name, a.mask, a.type AS account_type,
+               a.cash_flow_role, a.spending_enabled,
                c.owner_name,
                {EFFECTIVE_CATEGORY_SQL} AS effective_category,
                r.flow_type AS category_flow_type,
                mr.id AS merchant_rule_id,
-               mr.flow_type AS merchant_rule_flow_type
+               mr.flow_type AS merchant_rule_flow_type,
+               mr.spending_override AS merchant_rule_spending_override
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         JOIN connections c ON c.id = a.connection_id
@@ -861,6 +892,9 @@ def transaction_list(
     results = [dict(row) for row in rows]
     for row in results:
         row["flow_type"] = effective_cash_flow_type(
+            {**row, "category": row["effective_category"]}
+        )
+        row["spending_included"] = included_in_spending(
             {**row, "category": row["effective_category"]}
         )
     return results

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Trends · {{ app_name }}{% endblock %}
 {% block eyebrow %}{{ long_term.coverage_label }}{% endblock %}
-{% block heading %}Long-term spending trends{% endblock %}
+{% block heading %}Spending trends{% endblock %}
 
 {% block content %}
 {% set metrics = long_term.metrics %}
@@ -39,7 +39,7 @@
   <div class="panel-header trend-chart-header">
     <div>
       <h2>Monthly spending and moving averages</h2>
-      <p>Current month is projected; the oldest partial month is excluded from averages · click any point to see categories</p>
+      <p>Uses only accounts enabled for spending analysis; bank cash flow stays separate · click any point to see categories</p>
     </div>
     <div class="series-controls" aria-label="Moving average lines">
       <label><input id="absolute-spend-toggle" type="checkbox" checked><span class="series-swatch monthly-total"></span>Monthly total</label>
@@ -84,7 +84,7 @@
     window.location.href = `/categories?month=${monthKeys[index]}${scopeQuery}`;
   }
   function openTransactions(index, category) {
-    window.location.href = `/transactions?month=${monthKeys[index]}&category=${encodeURIComponent(category)}${scopeQuery}`;
+    window.location.href = `/transactions?purpose=spending&month=${monthKeys[index]}&category=${encodeURIComponent(category)}${scopeQuery}`;
   }
 
   const monthlyDatasets = [{

@@ -7,7 +7,7 @@
 <section class="panel">
   <div class="panel-header transaction-header">
     <div>
-      <h2>{{ transactions|length }} result{{ "" if transactions|length == 1 else "s" }}</h2>
+      <h2>{{ transactions|length }} {{ "spending" if reporting_scope == "spending" else ("cash-flow" if reporting_scope == "cash_flow" else "transaction") }} result{{ "" if transactions|length == 1 else "s" }}</h2>
       <p>
         {% if date_from or date_to %}Showing {{ date_from or "the beginning" }} through {{ date_to or "today" }}
         {% else %}Showing your complete available transaction history{% endif %}
@@ -27,6 +27,13 @@
         {% for category in category_options %}<option value="{{ category }}" {{ "selected" if category == selected_category }}>{{ category }}</option>{% endfor %}
       </select>
     </label>
+    <label>Purpose
+      <select name="purpose">
+        <option value="spending" {{ "selected" if reporting_scope == "spending" }}>Spending analysis</option>
+        <option value="cash_flow" {{ "selected" if reporting_scope == "cash_flow" }}>Bank cash flow</option>
+        <option value="all" {{ "selected" if reporting_scope == "all" }}>All transactions</option>
+      </select>
+    </label>
     <label>View
       <select name="view">
         <option value="active" {{ "selected" if transaction_view == "active" }}>Active transactions</option>
@@ -35,7 +42,7 @@
       </select>
     </label>
     <button class="button compact" type="submit">Apply filters</button>
-    {% if date_from or date_to or search_query or selected_category or transaction_view != "active" %}<a class="text-link clear-link" href="/transactions?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">Clear table filters</a>{% endif %}
+    {% if date_from or date_to or search_query or selected_category or transaction_view != "active" or reporting_scope != "spending" %}<a class="text-link clear-link" href="/transactions?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">Clear table filters</a>{% endif %}
   </form>
 
   <form id="bulk-transaction-form" class="bulk-action-bar" method="post" action="/api/transactions/bulk">
@@ -47,6 +54,7 @@
     <input type="hidden" name="return_q" value="{{ search_query }}">
     <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
+    <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
     <span><strong id="selected-count">0</strong> selected</span>
     <div class="bulk-fields">
       <select id="bulk-category" name="category_choice" aria-label="Change category">
@@ -64,6 +72,11 @@
         <option value="">Automatic</option>
         {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
       </select>
+      <select name="spending_override" aria-label="Change spending treatment">
+        <option value="__no_change__">Spending: no change</option>
+        <option value="">Automatic from account</option>
+        {% for value, label in spending_overrides.items() %}<option value="{{ value }}">{{ label }} in spending</option>{% endfor %}
+      </select>
       <select name="inclusion" aria-label="Change inclusion">
         <option value="__no_change__">Inclusion: no change</option>
         <option value="include">Include</option>
@@ -77,7 +90,7 @@
 
   <div class="table-wrap transaction-table-wrap">
     <table>
-      <thead><tr><th class="select-column"><input id="select-all-transactions" type="checkbox" aria-label="Select every visible transaction"></th><th>Date</th><th>Merchant</th><th>Category</th><th>Cash flow</th><th>Account</th><th>Status</th><th class="currency">Amount</th><th>Review</th></tr></thead>
+      <thead><tr><th class="select-column"><input id="select-all-transactions" type="checkbox" aria-label="Select every visible transaction"></th><th>Date</th><th>Merchant</th><th>Category</th><th>Cash flow</th><th>Spending</th><th>Account</th><th>Status</th><th class="currency">Amount</th><th>Review</th></tr></thead>
       <tbody>
         {% for transaction in transactions %}
           <tr class="{{ 'muted-row' if transaction.excluded and transaction_view != 'excluded' }}">
@@ -88,7 +101,8 @@
               {% if transaction.merchant and transaction.description != transaction.merchant %}<div class="transaction-sub">{{ transaction.description }}</div>{% endif %}
             </td>
             <td><span class="pill">{{ transaction.effective_category }}</span></td>
-            <td><span class="pill">{{ flow_types[transaction.flow_type] }}</span></td>
+            <td>{% if transaction.cash_flow_role == "cash_flow" %}<span class="pill">{{ flow_types[transaction.flow_type] }}</span>{% else %}<span class="transaction-sub">Not used</span>{% endif %}</td>
+            <td>{% if transaction.spending_included %}<span class="pill">Included</span>{% elif transaction.spending_enabled or transaction.spending_override or transaction.merchant_rule_spending_override %}<span class="transaction-sub">Not spending</span>{% else %}<span class="transaction-sub">Not used</span>{% endif %}</td>
             <td>{{ transaction.owner_name }} · {{ transaction.account_name }}<div class="transaction-sub">····{{ transaction.mask }}</div></td>
             <td>
               {% if transaction.excluded %}<span class="pill excluded">Excluded</span>
@@ -104,13 +118,14 @@
                 data-name="{{ transaction.merchant or transaction.description }}"
                 data-override="{{ transaction.category_override or '' }}"
                 data-flow-type="{{ transaction.flow_type }}"
+                data-spending-override="{{ transaction.spending_override or '' }}"
                 data-recurring-rule="{{ 1 if transaction.merchant_rule_id else 0 }}"
                 data-excluded="{{ transaction.excluded }}"
               >Review</button>
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="9" class="empty">No transactions match these filters.</td></tr>
+          <tr><td colspan="10" class="empty">No transactions match these filters.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -131,6 +146,7 @@
     <input type="hidden" name="return_q" value="{{ search_query }}">
     <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
+    <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
     <label>Category
       <select id="review-category" name="category_choice">
         <option value="">Use Plaid category</option>
@@ -149,9 +165,15 @@
         {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
       </select>
     </label>
-    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category and treatment for matching transactions on this account</label>
+    <label>Spending analysis
+      <select id="review-spending-override" name="spending_override">
+        <option value="">Automatic from account purpose</option>
+        {% for value, label in spending_overrides.items() %}<option value="{{ value }}">{{ label }} in spending</option>{% endfor %}
+      </select>
+    </label>
+    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category, cash-flow treatment, and spending treatment for matching transactions on this account</label>
     <p class="transaction-sub">This applies to existing and future matches. Clear it and save to remove an existing recurring rule.</p>
-    <label class="check-label"><input id="review-excluded" type="checkbox" name="excluded"> Exclude from all cash-flow calculations</label>
+    <label class="check-label"><input id="review-excluded" type="checkbox" name="excluded"> Exclude from all reporting</label>
     <button class="button primary" type="submit">Save changes</button>
   </form>
 </dialog>
@@ -167,6 +189,7 @@
   const reviewNewCategoryFlowLabel = document.querySelector("#review-new-category-flow-label");
   const reviewNewCategoryFlow = document.querySelector("#review-new-category-flow");
   const reviewFlowOverride = document.querySelector("#review-flow-override");
+  const reviewSpendingOverride = document.querySelector("#review-spending-override");
   const reviewRememberMatch = document.querySelector("#review-remember-match");
   const reviewExcluded = document.querySelector("#review-excluded");
   const bulkCategory = document.querySelector("#bulk-category");
@@ -216,6 +239,7 @@
       reviewCategory.value = button.dataset.override;
       reviewNewCategory.value = "";
       reviewFlowOverride.value = button.dataset.flowType;
+      reviewSpendingOverride.value = button.dataset.spendingOverride;
       reviewRememberMatch.checked = button.dataset.recurringRule === "1";
       reviewExcluded.checked = button.dataset.excluded === "1";
       showReviewNewCategory();

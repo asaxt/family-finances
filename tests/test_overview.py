@@ -67,14 +67,14 @@ class OverviewTests(unittest.TestCase):
         self.assertIn(b"Projected calendar month", overview.data)
         self.assertNotIn(b"vs prior average", overview.data)
         self.assertIn(b"Savings snapshot", overview.data)
-        self.assertIn(b"Cash flow", overview.data)
+        self.assertIn(b"Bank cash flow", overview.data)
         self.assertLess(
             overview.data.index(b"Earned income"),
-            overview.data.index(b"Total spend"),
+            overview.data.index(b"Net cash flow"),
         )
         self.assertLess(
-            overview.data.index(b"Total spend"),
             overview.data.index(b"Net cash flow"),
+            overview.data.index(b"Tracked spending"),
         )
         self.assertEqual(overview.data.count(b'<article class="metric-card'), 8)
 
@@ -91,10 +91,11 @@ class OverviewTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO accounts (
-                    id, connection_id, institution, name, mask, type, subtype
+                    id, connection_id, institution, name, mask, type, subtype,
+                    spending_enabled
                 ) VALUES (
                     'checking', 1, 'Example Bank', 'Checking', '1234',
-                    'depository', 'checking'
+                    'depository', 'checking', 1
                 )
                 """
             )
@@ -184,6 +185,23 @@ class OverviewTests(unittest.TestCase):
                 self.assertEqual(rejected.status_code, 302)
                 self.assertIn("error=lookback", rejected.location)
                 self.assertEqual(self.application.overview_lookback_days(), 45)
+
+    def test_manual_savings_reminder_does_not_require_linked_account_fields(self):
+        with self.application.db() as connection:
+            connection.execute(
+                """
+                INSERT INTO manual_accounts (
+                    institution, name, owner_name, classification,
+                    reminder_enabled
+                ) VALUES (
+                    'Example', 'Retirement', 'Household', 'pre_tax', 1
+                )
+                """
+            )
+
+        overview = self.client.get("/")
+        self.assertEqual(overview.status_code, 200)
+        self.assertIn(b"Savings balances need an update", overview.data)
 
 
 if __name__ == "__main__":
