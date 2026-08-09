@@ -34,7 +34,10 @@ Plaid or any financial institution.
 - Household and individual-account spending views
 - Monthly trends, year-over-year comparisons, and moving averages
 - Category and merchant exploration down to individual transactions
-- Cash-flow views that separate earned income, other money in, money out, and transfers
+- Separate account purposes for bank cash flow and spending analysis, with a
+  combined option for debit-card or single-account workflows
+- Credit-card transactions retained for spending, category, and trend analysis
+  without contributing to money-in, money-out, or net-cash-flow totals
 - Full-history transaction cleanup with reusable categories and bulk editing
 - Multiple named Plaid connections with combined household totals
 - Cached account balances refreshed during Plaid syncs

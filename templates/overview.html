@@ -8,7 +8,7 @@
 
 <section class="overview-section">
   <div class="section-heading">
-    <div><h2>Money coming in</h2><p>Included inflows over the past {{ lookback_days }} days</p></div>
+    <div><h2>Bank cash flow</h2><p>Money moving through designated checking and savings accounts over the past {{ lookback_days }} days</p></div>
     <a class="text-link" href="{{ url_for('cash_flow', person=connection_id, account=account_id) }}">View cash flow →</a>
   </div>
   <div class="metric-grid overview-money-in-metrics">
@@ -23,21 +23,26 @@
       <span class="metric-note">Reimbursements and other non-earned inflows</span>
     </article>
     <article class="metric-card">
-      <span class="metric-label">Total money in</span>
-      <div class="metric-value">{{ cash_flow.total_inflows|money }}</div>
-      <span class="metric-note">Earned income plus other money in</span>
+      <span class="metric-label">Money out</span>
+      <div class="metric-value">{{ cash_flow.spending|money }}</div>
+      <span class="metric-note">Outgoing bank transactions classified as money out</span>
+    </article>
+    <article class="metric-card">
+      <span class="metric-label">Net cash flow</span>
+      <div class="metric-value {{ 'down' if cash_flow.net >= 0 else 'up' }}">{{ cash_flow.net|money }}</div>
+      <span class="metric-note">Money in minus money out; transfers remain neutral</span>
     </article>
   </div>
 </section>
 
 <section class="overview-section">
   <div class="section-heading">
-    <div><h2>Money out</h2><p>Only transactions classified as money out count as spending</p></div>
+    <div><h2>Spending activity</h2><p>Purchases from accounts enabled for spending analysis; separate from bank cash flow</p></div>
     <a class="text-link" href="{{ url_for('trends', person=connection_id, account=account_id) }}">Explore trends →</a>
   </div>
   <div class="metric-grid">
     <article class="metric-card hero">
-      <span class="metric-label">Total spend · {{ lookback_days }} days</span>
+      <span class="metric-label">Tracked spending · {{ lookback_days }} days</span>
       <div class="metric-value">{{ summary.total|money }}</div>
       <span class="metric-note">{{ summary.date_from }}–{{ summary.date_to }} · {{ summary.card_totals|length }} account{{ "" if summary.card_totals|length == 1 else "s" }}</span>
     </article>
@@ -59,14 +64,6 @@
       <span class="metric-note">{{ summary.current_month_total|money }} through day {{ summary.current_month_elapsed_days }} of {{ summary.current_month_label }}</span>
     </article>
   </div>
-</section>
-
-<section class="overview-net-cash-flow">
-  <article class="metric-card">
-    <span class="metric-label">Net cash flow</span>
-    <div class="metric-value {{ 'down' if cash_flow.net >= 0 else 'up' }}">{{ cash_flow.net|money }}</div>
-    <span class="metric-note">Money in minus money out; transfers remain neutral</span>
-  </article>
 </section>
 
 {% if savings %}
@@ -122,24 +119,23 @@
 
 <section class="panel recent-panel">
   <div class="panel-header">
-    <div><h2>Recent activity</h2><p>The latest transactions in this {{ lookback_days }}-day view</p></div>
-    <a class="text-link" href="{{ url_for('transactions', date_from=summary.date_from, date_to=summary.date_to, person=connection_id, account=account_id) }}">See every transaction →</a>
+    <div><h2>Recent spending</h2><p>Purchases included in spending analysis, not bank cash-flow entries</p></div>
+    <a class="text-link" href="{{ url_for('transactions', date_from=summary.date_from, date_to=summary.date_to, person=connection_id, account=account_id, purpose='spending') }}">See spending transactions →</a>
   </div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th>Cash flow</th><th>Account</th><th class="currency">Amount</th></tr></thead>
+      <thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th>Account</th><th class="currency">Amount</th></tr></thead>
       <tbody>
         {% for transaction in recent %}
           <tr>
             <td>{{ transaction.transacted_at }}</td>
             <td><span class="transaction-name">{{ transaction.merchant or transaction.description }}</span>{% if transaction.pending %}<span class="pill pending">Pending</span>{% endif %}</td>
             <td><span class="pill">{{ transaction.effective_category }}</span></td>
-            <td><span class="pill">{{ flow_types[transaction.flow_type] }}</span></td>
             <td>{{ transaction.owner_name }} · {{ transaction.account_name }} ····{{ transaction.mask }}</td>
             <td class="currency {{ 'credit' if transaction.amount < 0 }}">{% if transaction.amount < 0 %}+{{ (-transaction.amount)|money }}{% else %}{{ transaction.amount|money }}{% endif %}</td>
           </tr>
         {% else %}
-          <tr><td colspan="6" class="empty">No transactions found.</td></tr>
+          <tr><td colspan="5" class="empty">No spending transactions found.</td></tr>
         {% endfor %}
       </tbody>
     </table>

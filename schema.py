@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 8
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -92,10 +92,20 @@ VERSION_FIVE_COLUMNS = {
         "flow_type",
     },
 }
-EXPECTED_COLUMNS = {
+VERSION_SIX_COLUMNS = {
     name: columns
     for name, columns in VERSION_FIVE_COLUMNS.items()
     if name != "budgets"
+}
+VERSION_SEVEN_COLUMNS = {
+    **VERSION_SIX_COLUMNS,
+    "accounts": VERSION_SIX_COLUMNS["accounts"] | {"cash_flow_role"},
+}
+EXPECTED_COLUMNS = {
+    **VERSION_SEVEN_COLUMNS,
+    "accounts": VERSION_SEVEN_COLUMNS["accounts"] | {"spending_enabled"},
+    "transactions": VERSION_SEVEN_COLUMNS["transactions"] | {"spending_override"},
+    "merchant_rules": VERSION_SEVEN_COLUMNS["merchant_rules"] | {"spending_override"},
 }
 
 
@@ -165,7 +175,15 @@ def _validate_version_five(connection):
 
 
 def _validate_version_six(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 6)
+    _validate_columns(connection, VERSION_SIX_COLUMNS, 6)
+
+
+def _validate_version_seven(connection):
+    _validate_columns(connection, VERSION_SEVEN_COLUMNS, 7)
+
+
+def _validate_version_eight(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 8)
 
 
 def _migrate_zero_to_one(connection):
@@ -300,6 +318,50 @@ def _migrate_five_to_six(connection):
     connection.execute("DROP TABLE budgets")
 
 
+def _migrate_six_to_seven(connection):
+    connection.execute(
+        """
+        ALTER TABLE accounts ADD COLUMN cash_flow_role TEXT NOT NULL
+        DEFAULT 'other'
+        CHECK (cash_flow_role IN ('cash_flow', 'credit_card', 'other'))
+        """
+    )
+    connection.execute(
+        """
+        UPDATE accounts
+        SET cash_flow_role = CASE
+            WHEN type = 'depository' THEN 'cash_flow'
+            WHEN type = 'credit' THEN 'credit_card'
+            ELSE 'other'
+        END
+        """
+    )
+
+
+def _migrate_seven_to_eight(connection):
+    connection.execute(
+        """
+        ALTER TABLE accounts ADD COLUMN spending_enabled INTEGER NOT NULL
+        DEFAULT 0 CHECK (spending_enabled IN (0, 1))
+        """
+    )
+    connection.execute(
+        "UPDATE accounts SET spending_enabled = 1 WHERE cash_flow_role = 'credit_card'"
+    )
+    connection.execute(
+        """
+        ALTER TABLE transactions ADD COLUMN spending_override TEXT
+        CHECK (spending_override IN ('include', 'exclude'))
+        """
+    )
+    connection.execute(
+        """
+        ALTER TABLE merchant_rules ADD COLUMN spending_override TEXT
+        CHECK (spending_override IN ('include', 'exclude'))
+        """
+    )
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
@@ -308,6 +370,8 @@ VALIDATORS = {
     4: _validate_version_four,
     5: _validate_version_five,
     6: _validate_version_six,
+    7: _validate_version_seven,
+    8: _validate_version_eight,
 }
 MIGRATIONS = {
     0: _migrate_zero_to_one,
@@ -316,6 +380,8 @@ MIGRATIONS = {
     3: _migrate_three_to_four,
     4: _migrate_four_to_five,
     5: _migrate_five_to_six,
+    6: _migrate_six_to_seven,
+    7: _migrate_seven_to_eight,
 }
 
 
@@ -372,6 +438,12 @@ def create_schema(connection):
                 current_balance INTEGER,
                 available_balance INTEGER,
                 balance_updated_at TEXT,
+                cash_flow_role TEXT NOT NULL DEFAULT 'other' CHECK (
+                    cash_flow_role IN ('cash_flow', 'credit_card', 'other')
+                ),
+                spending_enabled INTEGER NOT NULL DEFAULT 0 CHECK (
+                    spending_enabled IN (0, 1)
+                ),
                 FOREIGN KEY (connection_id) REFERENCES connections(id)
             );
             CREATE TABLE transactions (
@@ -389,6 +461,9 @@ def create_schema(connection):
                     flow_override IN (
                         'earned_income', 'other_inflow', 'spending', 'transfer'
                     )
+                ),
+                spending_override TEXT CHECK (
+                    spending_override IN ('include', 'exclude')
                 ),
                 excluded INTEGER NOT NULL DEFAULT 0
             );
@@ -412,6 +487,9 @@ def create_schema(connection):
                     flow_type IN (
                         'earned_income', 'other_inflow', 'spending', 'transfer'
                     )
+                ),
+                spending_override TEXT CHECK (
+                    spending_override IN ('include', 'exclude')
                 ),
                 UNIQUE (account_id, match_type, match_value),
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE

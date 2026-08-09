@@ -20,8 +20,12 @@ class RollingOverviewAnalyticsTests(unittest.TestCase):
         self.connection.execute(
             """
             INSERT INTO accounts (
-                id, connection_id, institution, name, mask, type
-            ) VALUES ('card-1', 1, 'Example', 'Everyday Card', '1234', 'credit')
+                id, connection_id, institution, name, mask, type,
+                cash_flow_role, spending_enabled
+            ) VALUES (
+                'card-1', 1, 'Example', 'Everyday Card', '1234', 'credit',
+                'credit_card', 1
+            )
             """
         )
 

@@ -1,16 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Categories · {{ app_name }}{% endblock %}
 {% block eyebrow %}{{ month_label }}{% endblock %}
-{% block heading %}Where your money went{% endblock %}
+{% block heading %}Spending categories{% endblock %}
 
 {% block content %}
 <section class="panel">
-  <div class="panel-header"><div><h2>Spending mix</h2><p>Each category's share of {{ summary.total|money }}</p></div></div>
+  <div class="panel-header"><div><h2>Spending mix</h2><p>Only accounts enabled for spending analysis · each category's share of {{ summary.total|money }}</p></div></div>
   <div class="donut-layout">
     <div class="chart-medium"><canvas id="category-chart"></canvas></div>
     <div class="rank-list">
       {% for category in summary.categories[:6] %}
-        <a class="rank-row" href="/transactions?month={{ month }}&category={{ category.name|urlencode }}{{ person_query }}{{ account_query }}">
+        <a class="rank-row" href="/transactions?purpose=spending&month={{ month }}&category={{ category.name|urlencode }}{{ person_query }}{{ account_query }}">
           <span class="card-swatch" style="background: {{ ['#24634e', '#e7a944', '#6686c4', '#b76a79', '#70a58b', '#c19462'][loop.index0 % 6] }}"></span>
           <span class="rank-name">{{ category.name }}</span>
           <span class="rank-amount">{{ category.amount|money }}</span>
@@ -44,7 +44,7 @@
         {% endfor %}
       </div>
       <div class="category-actions">
-        <a class="text-link" href="/transactions?month={{ month }}&category={{ category.name|urlencode }}{{ person_query }}{{ account_query }}">Details →</a>
+        <a class="text-link" href="/transactions?purpose=spending&month={{ month }}&category={{ category.name|urlencode }}{{ person_query }}{{ account_query }}">Details →</a>
       </div>
     </article>
   {% else %}

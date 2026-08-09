@@ -90,6 +90,13 @@ FLOW_TYPES = {
     "spending": "Money out",
     "transfer": "Transfer",
 }
+ACCOUNT_PURPOSES = {
+    "cash_flow": "Bank cash flow only",
+    "spending": "Spending analysis only",
+    "both": "Cash flow and spending",
+    "other": "Neither",
+}
+SPENDING_OVERRIDES = {"include": "Include", "exclude": "Exclude"}
 app = Flask(__name__)
 LOGIN_ATTEMPTS = {}
 vault = EncryptedDatabase(VAULT_PATH)
@@ -748,12 +755,19 @@ def save_account(connection, account, connection_id, institution, checked_at):
     )
     subtype = getattr(account, "subtype", None)
     subtype = getattr(subtype, "value", subtype)
+    account_type = account.type.value
+    cash_flow_role = {
+        "depository": "cash_flow",
+        "credit": "credit_card",
+    }.get(account_type, "other")
+    spending_enabled = int(account_type == "credit")
     connection.execute(
         """
         INSERT INTO accounts (
             id, connection_id, institution, name, mask, type,
-            subtype, current_balance, available_balance, balance_updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            subtype, current_balance, available_balance, balance_updated_at,
+            cash_flow_role, spending_enabled
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             connection_id = excluded.connection_id,
             institution = excluded.institution,
@@ -771,11 +785,13 @@ def save_account(connection, account, connection_id, institution, checked_at):
             institution,
             account.name,
             account.mask,
-            account.type.value,
+            account_type,
             subtype,
             current_balance,
             available_balance,
             checked_at,
+            cash_flow_role,
+            spending_enabled,
         ),
     )
 
@@ -893,6 +909,17 @@ def page_context(active):
                 """
             )
         ]
+        for account in accounts:
+            account["reporting_purpose"] = (
+                "both"
+                if account["cash_flow_role"] == "cash_flow"
+                and account["spending_enabled"]
+                else (
+                    "cash_flow"
+                    if account["cash_flow_role"] == "cash_flow"
+                    else "spending" if account["spending_enabled"] else "other"
+                )
+            )
         profiles = [
             dict(row)
             for row in connection.execute(
@@ -954,6 +981,8 @@ def overview():
             date_from=context["summary"]["date_from"],
             date_to=context["summary"]["date_to"],
             limit=8,
+            reporting_scope="spending",
+            spending_only=True,
         )[:8]
     context["savings"] = (
         savings_data()
@@ -1009,6 +1038,11 @@ def overview():
 def cash_flow():
     context = page_context("cash_flow")
     context["flow_types"] = FLOW_TYPES
+    context["cash_flow_accounts"] = [
+        account
+        for account in context["accounts"]
+        if account["cash_flow_role"] == "cash_flow"
+    ]
     context["lookback_days"] = overview_lookback_days()
     context["max_lookback_days"] = MAX_OVERVIEW_LOOKBACK_DAYS
     context["cash_flow_error"] = request.args.get("error")
@@ -1063,6 +1097,9 @@ def transactions():
     )
     if transaction_view not in {"active", "excluded", "all"}:
         transaction_view = "active"
+    reporting_scope = request.args.get("purpose") or "spending"
+    if reporting_scope not in {"spending", "cash_flow", "all"}:
+        reporting_scope = "spending"
     date_from = request.args.get("date_from") or None
     date_to = request.args.get("date_to") or None
 
@@ -1101,6 +1138,7 @@ def transactions():
             excluded_only=transaction_view == "excluded",
             date_from=date_from,
             date_to=date_to,
+            reporting_scope=reporting_scope,
         )
         context["category_options"] = [
             row["name"]
@@ -1118,10 +1156,12 @@ def transactions():
             )
         ]
     context["flow_types"] = FLOW_TYPES
+    context["spending_overrides"] = SPENDING_OVERRIDES
     context.update(
         selected_category=category,
         search_query=query or "",
         transaction_view=transaction_view,
+        reporting_scope=reporting_scope,
         date_from=date_from or "",
         date_to=date_to or "",
     )
@@ -1146,10 +1186,59 @@ def settings_page():
         plaid_client_id=client_id,
         plaid_configured=bool(client_id and plaid_secret),
         plaid_product_status=plaid_product_status(),
+        account_purposes=ACCOUNT_PURPOSES,
         settings_saved=request.args.get("saved"),
         settings_error=request.args.get("error"),
     )
     return render_template("settings.html", **context)
+
+
+@app.post("/api/account-roles")
+def update_account_roles():
+    account_ids = request.form.getlist("account_id")
+    purposes = request.form.getlist("reporting_purpose")
+    if len(account_ids) != len(purposes) or any(
+        purpose not in ACCOUNT_PURPOSES for purpose in purposes
+    ):
+        return redirect(url_for("settings_page", error="account_roles"))
+
+    with db() as connection:
+        saved_accounts = {
+            row["id"]: row
+            for row in connection.execute("SELECT id, type FROM accounts")
+        }
+        if (
+            len(account_ids) != len(set(account_ids))
+            or set(account_ids) != set(saved_accounts)
+            or any(
+                saved_accounts[account_id]["type"] != "depository"
+                and purpose in {"cash_flow", "both"}
+                for account_id, purpose in zip(account_ids, purposes)
+            )
+        ):
+            return redirect(url_for("settings_page", error="account_roles"))
+        connection.executemany(
+            """
+            UPDATE accounts
+            SET cash_flow_role = ?, spending_enabled = ?
+            WHERE id = ?
+            """,
+            (
+                (
+                    "cash_flow"
+                    if purpose in {"cash_flow", "both"}
+                    else (
+                        "credit_card"
+                        if saved_accounts[account_id]["type"] == "credit"
+                        else "other"
+                    ),
+                    int(purpose in {"spending", "both"}),
+                    account_id,
+                )
+                for account_id, purpose in zip(account_ids, purposes)
+            ),
+        )
+    return redirect(url_for("settings_page", saved="account_roles"))
 
 
 def currency_to_cents(raw_amount):
@@ -1587,6 +1676,9 @@ def update_transaction(transaction_id):
     flow_override = request.form.get("flow_override", "")
     if flow_override not in FLOW_TYPES:
         return transaction_cleanup_redirect()
+    spending_override = request.form.get("spending_override", "")
+    if spending_override not in {"", *SPENDING_OVERRIDES}:
+        return transaction_cleanup_redirect()
     excluded = int(request.form.get("excluded") == "on")
     with db() as connection:
         transaction = connection.execute(
@@ -1623,11 +1715,13 @@ def update_transaction(transaction_id):
             connection.execute(
                 """
                 INSERT INTO merchant_rules (
-                    account_id, match_type, match_value, category, flow_type
-                ) VALUES (?, ?, ?, ?, ?)
+                    account_id, match_type, match_value, category, flow_type,
+                    spending_override
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
                     category = excluded.category,
-                    flow_type = excluded.flow_type
+                    flow_type = excluded.flow_type,
+                    spending_override = excluded.spending_override
                 """,
                 (
                     transaction["account_id"],
@@ -1635,6 +1729,7 @@ def update_transaction(transaction_id):
                     match_value,
                     recurring_category,
                     flow_override,
+                    spending_override or None,
                 ),
             )
         elif existing_rule:
@@ -1645,10 +1740,17 @@ def update_transaction(transaction_id):
         connection.execute(
             """
             UPDATE transactions
-            SET category_override = ?, flow_override = ?, excluded = ?
+            SET category_override = ?, flow_override = ?, spending_override = ?,
+                excluded = ?
             WHERE id = ?
             """,
-            (category, flow_override, excluded, transaction_id),
+            (
+                category,
+                flow_override,
+                spending_override or None,
+                excluded,
+                transaction_id,
+            ),
         )
     return transaction_cleanup_redirect()
 
@@ -1662,8 +1764,17 @@ def bulk_update_transactions():
             category = "__no_change__"
             if action == "apply":
                 flow_override = request.form.get("flow_override", "__no_change__")
+                spending_override = request.form.get(
+                    "spending_override", "__no_change__"
+                )
                 inclusion = request.form.get("inclusion", "__no_change__")
                 if flow_override not in {"__no_change__", "", *FLOW_TYPES}:
+                    return transaction_cleanup_redirect()
+                if spending_override not in {
+                    "__no_change__",
+                    "",
+                    *SPENDING_OVERRIDES,
+                }:
                     return transaction_cleanup_redirect()
                 if inclusion not in {"__no_change__", "include", "exclude"}:
                     return transaction_cleanup_redirect()
@@ -1694,6 +1805,9 @@ def bulk_update_transactions():
                 if flow_override != "__no_change__":
                     assignments.append("flow_override = ?")
                     values.append(flow_override or None)
+                if spending_override != "__no_change__":
+                    assignments.append("spending_override = ?")
+                    values.append(spending_override or None)
                 if inclusion != "__no_change__":
                     assignments.append("excluded = ?")
                     values.append(int(inclusion == "exclude"))
@@ -1717,6 +1831,7 @@ def transaction_cleanup_redirect():
             date_to=request.form.get("date_to") or None,
             q=request.form.get("return_q") or None,
             category=request.form.get("return_category") or None,
+            purpose=request.form.get("return_purpose") or None,
             view=transaction_view if transaction_view != "active" else None,
         )
     )

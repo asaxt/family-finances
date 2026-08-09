@@ -215,6 +215,15 @@ input:focus, select:focus { border-color: var(--forest-2); box-shadow: 0 0 0 3px
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 28px; }
 .settings-form { display: grid; gap: 15px; }
 .settings-form .button { justify-self: start; }
+.account-role-panel { grid-column: 1 / -1; }
+.account-role-list { display: grid; }
+.account-role-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 280px); align-items: center; gap: 16px; padding: 13px 0; border-bottom: 1px solid var(--line); }
+.account-role-row:first-child { padding-top: 0; }
+.account-role-row:last-child { border-bottom: 0; }
+.account-role-row strong, .account-role-row small { display: block; }
+.account-role-row small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+.account-role-row label { display: block; }
+.account-role-row select { width: 100%; }
 .security-note { margin: 4px 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .pill.configured { color: #24634e; background: var(--mint); }
 .product-checked-at { margin: -7px 0 13px; color: var(--muted); font-size: 11px; }
@@ -231,6 +240,8 @@ input:focus, select:focus { border-color: var(--forest-2); box-shadow: 0 0 0 3px
 .cash-flow-secondary { grid-template-columns: minmax(0, 1.4fr) minmax(280px, .6fr); }
 .cash-flow-metrics { grid-template-columns: repeat(3, 1fr); }
 .cash-flow-review-note { margin: 14px 0 0; }
+.cash-flow-scope-note { margin: 0 0 16px; color: var(--muted); font-size: 12px; }
+.cash-flow-scope-note a { color: var(--forest-2); font-weight: 700; }
 .cash-flow-edit { display: flex; align-items: center; gap: 6px; }
 .cash-flow-edit select { min-width: 150px; }
 
@@ -345,6 +356,7 @@ tr:last-child td { border-bottom: 0; }
   .form-footer { align-items: flex-start; flex-direction: column; }
   .goal-footer, .goal-form { align-items: flex-start; flex-direction: column; }
   .manual-account-form { grid-template-columns: 1fr; }
+  .account-role-row { grid-template-columns: 1fr; gap: 9px; }
   .donut-layout { grid-template-columns: 1fr; }
   .transaction-header { align-items: flex-start; flex-direction: column; }
   .data-status { display: none; }

@@ -77,7 +77,7 @@ class AppSetupTests(unittest.TestCase):
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
         with self.application.db() as connection:
-            self.assertEqual(schema_version(connection), 6)
+            self.assertEqual(schema_version(connection), 8)
             initial_goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
@@ -104,7 +104,8 @@ class AppSetupTests(unittest.TestCase):
             )
             checking = connection.execute(
                 """
-                SELECT subtype, current_balance, available_balance
+                SELECT subtype, current_balance, available_balance,
+                       cash_flow_role, spending_enabled
                 FROM accounts WHERE id = 'checking'
                 """
             ).fetchone()
@@ -138,7 +139,10 @@ class AppSetupTests(unittest.TestCase):
                 (date.today().isoformat(),),
             )
         self.assertEqual(initial_goal, "1000000")
-        self.assertEqual(tuple(checking), ("checking", 125050, 120025))
+        self.assertEqual(
+            tuple(checking),
+            ("checking", 125050, 120025, "cash_flow", 0),
+        )
         self.assertEqual(peer_payment_category, "Venmo")
         overview_with_cash = self.client.get("/")
         self.assertIn(b"Current cash balances", overview_with_cash.data)
@@ -161,12 +165,13 @@ class AppSetupTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(flow_override, "earned_income")
 
-        transactions_page = self.client.get("/transactions")
+        transactions_page = self.client.get("/transactions?purpose=all")
         self.assertIn(
             b'value="other_inflow" selected>Other money in',
             transactions_page.data,
         )
         self.assertIn(b"<th>Cash flow</th>", transactions_page.data)
+        self.assertIn(b"<th>Spending</th>", transactions_page.data)
         self.assertIn(b'data-flow-type="other_inflow"', transactions_page.data)
         self.assertNotIn(
             b"Automatic from category and direction",
@@ -203,7 +208,7 @@ class AppSetupTests(unittest.TestCase):
         self.assertEqual(tuple(transaction), ("Payback", "other_inflow", 0))
         self.assertEqual(rule, "other_inflow")
 
-        transactions_page = self.client.get("/transactions")
+        transactions_page = self.client.get("/transactions?purpose=all")
         self.client.post(
             "/api/transaction/deposit",
             data={
@@ -224,7 +229,7 @@ class AppSetupTests(unittest.TestCase):
         self.assertEqual(category, "Payback")
         self.assertEqual(matching_rules, 1)
 
-        transactions_page = self.client.get("/transactions")
+        transactions_page = self.client.get("/transactions?purpose=all")
         self.assertEqual(
             self.client.post(
                 "/api/transactions/bulk",
@@ -288,6 +293,40 @@ class AppSetupTests(unittest.TestCase):
         self.assertEqual(goal, "250000000")
         self.assertEqual(self.application.display_name(), "My Money")
 
+        settings_page = self.client.get("/settings")
+        self.assertIn(b"Account reporting roles", settings_page.data)
+        self.assertIn(b"Spending analysis only", settings_page.data)
+        saved_roles = self.client.post(
+            "/api/account-roles",
+            data={
+                "csrf_token": self.csrf_token(settings_page),
+                "account_id": "checking",
+                "reporting_purpose": "both",
+            },
+        )
+        self.assertEqual(saved_roles.status_code, 302)
+        self.assertIn("saved=account_roles", saved_roles.location)
+        with self.application.db() as connection:
+            role = connection.execute(
+                """
+                SELECT cash_flow_role, spending_enabled
+                FROM accounts WHERE id = 'checking'
+                """
+            ).fetchone()
+        self.assertEqual(tuple(role), ("cash_flow", 1))
+
+        settings_page = self.client.get("/settings")
+        rejected_roles = self.client.post(
+            "/api/account-roles",
+            data={
+                "csrf_token": self.csrf_token(settings_page),
+                "account_id": "checking",
+                "reporting_purpose": "not-a-purpose",
+            },
+        )
+        self.assertEqual(rejected_roles.status_code, 302)
+        self.assertIn("error=account_roles", rejected_roles.location)
+
         encrypted = self.application.VAULT_PATH.read_bytes()
         self.assertNotIn(b"test-production-secret", encrypted)
         self.assertNotIn(b"test-client-id", encrypted)
@@ -348,7 +387,7 @@ class AppSetupTests(unittest.TestCase):
                 (("reviewed",), ("existing-match",)),
             )
 
-        page = self.client.get("/transactions")
+        page = self.client.get("/transactions?purpose=all")
         self.client.post(
             "/api/transaction/reviewed",
             data={
@@ -357,6 +396,8 @@ class AppSetupTests(unittest.TestCase):
                 "new_category": "Transfer Out",
                 "new_category_flow_type": "transfer",
                 "flow_override": "transfer",
+                "spending_override": "include",
+                "return_purpose": "all",
                 "remember_match": "on",
             },
         )
@@ -383,7 +424,11 @@ class AppSetupTests(unittest.TestCase):
         for transaction_id in ("existing-match", "future-match"):
             self.assertEqual(rows[transaction_id]["effective_category"], "Transfer Out")
             self.assertEqual(rows[transaction_id]["flow_type"], "transfer")
-        self.assertIn(b'data-recurring-rule="1"', self.client.get("/transactions").data)
+            self.assertTrue(rows[transaction_id]["spending_included"])
+        self.assertIn(
+            b'data-recurring-rule="1"',
+            self.client.get("/transactions?purpose=all").data,
+        )
         self.assertNotIn(
             b"Recurring Payment",
             self.application.VAULT_PATH.read_bytes(),
@@ -402,13 +447,15 @@ class AppSetupTests(unittest.TestCase):
             }["future-match"]
         self.assertEqual(overridden["flow_type"], "spending")
 
-        page = self.client.get("/transactions")
+        page = self.client.get("/transactions?purpose=all")
         self.client.post(
             "/api/transaction/reviewed",
             data={
                 "csrf_token": self.csrf_token(page),
                 "category_choice": "Transfer Out",
                 "flow_override": "transfer",
+                "spending_override": "",
+                "return_purpose": "all",
             },
         )
         with self.application.db() as connection:
@@ -422,6 +469,7 @@ class AppSetupTests(unittest.TestCase):
             }["existing-match"]
         self.assertEqual(reverted["effective_category"], "Loan Payments")
         self.assertEqual(reverted["flow_type"], "spending")
+        self.assertFalse(reverted["spending_included"])
 
 
 if __name__ == "__main__":
