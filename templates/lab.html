@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Lab scenarios · {{ app_name }}{% endblock %}
+{% block eyebrow %}Synthetic experiment controls{% endblock %}
+{% block heading %}Lab scenarios{% endblock %}
+
+{% block content %}
+{% if lab_saved %}<p class="form-message success lab-page-message">Loaded {{ lab_scenarios[lab_saved].name }} with fresh synthetic accounts and transactions.</p>{% endif %}
+{% if lab_error == "scenario" %}<p class="form-message error lab-page-message">Choose a valid scenario.</p>{% endif %}
+{% if lab_error == "confirmation" %}<p class="form-message error lab-page-message">Confirm that the current lab edits can be replaced.</p>{% endif %}
+
+<section class="lab-summary panel">
+  <div class="panel-header">
+    <div>
+      <h2>Current synthetic profile</h2>
+      {% if current_scenario %}
+      <p>{{ lab_scenarios[current_scenario].name }} · {{ lab_scenarios[current_scenario].description }}</p>
+      {% else %}
+      <p>No synthetic profile has been loaded yet.</p>
+      {% endif %}
+    </div>
+    {% if current_scenario %}<span class="pill configured">Active</span>{% endif %}
+  </div>
+  <div class="lab-expectation-grid">
+    <div><strong>Bank cash flow</strong><p>Checking and savings activity can affect money in, money out, and net cash flow.</p></div>
+    <div><strong>Spending habits</strong><p>Credit-card purchases appear in categories and trends without changing bank cash flow.</p></div>
+    <div><strong>Card payments</strong><p>The bank-side payment is money out. The card-side offset is neither spending nor a refund.</p></div>
+  </div>
+</section>
+
+<section class="content-grid lab-grid">
+  <article class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Choose a setup to test</h2>
+        <p>Each load replaces only this lab vault's synthetic records.</p>
+      </div>
+    </div>
+    <form class="settings-form" method="post" action="/api/lab-scenario">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>
+        <span>Synthetic account and feed profile</span>
+        <select name="scenario" required>
+          {% for key, scenario in lab_scenarios.items() %}
+          <option value="{{ key }}" {{ "selected" if key == current_scenario }}>{{ scenario.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="check-label lab-confirmation">
+        <input type="checkbox" name="confirm_reset" value="yes" required>
+        Replace the current lab transactions, account settings, and learned rules.
+      </label>
+      <p class="security-note">Stable and development vaults are not read, copied, or modified. Plaid remains disabled on port 4244.</p>
+      <button class="button primary" type="submit">Load fresh scenario</button>
+    </form>
+  </article>
+
+  <article class="panel">
+    <div class="panel-header"><div><h2>Payment-matching challenge</h2><p>Included whenever a card and funding account are present.</p></div></div>
+    <div class="insight-list">
+      <div class="insight"><span class="insight-icon">✓</span><span><strong>Clearly labeled pair</strong><br>Both feeds identify the offset as a card payment.</span></div>
+      <div class="insight"><span class="insight-icon">?</span><span><strong>Ambiguous pair</strong><br>The bank side says card payment while the card side says only “automatic payment.”</span></div>
+      <div class="insight"><span class="insight-icon">↩</span><span><strong>True card refund</strong><br>A separate merchant refund tests that payment credits and refunds remain distinct.</span></div>
+    </div>
+  </article>
+</section>
+
+<section class="overview-section">
+  <div class="section-heading"><div><h2>Available profiles</h2><p>Use the same profile when comparing categorization engines.</p></div></div>
+  <div class="lab-profile-grid">
+    {% for key, scenario in lab_scenarios.items() %}
+    <article class="panel lab-profile-card {{ 'active' if key == current_scenario }}">
+      <h3>{{ scenario.name }}</h3>
+      <p>{{ scenario.description }}</p>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

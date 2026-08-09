@@ -25,6 +25,7 @@ from plaid.model.products import Products
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from lab_scenarios import LAB_SCENARIOS, load_lab_scenario
 from schema import SchemaError, prepare_encrypted_database
 from vault import (
     EncryptedDatabase,
@@ -67,8 +68,15 @@ def local_port():
 
 
 APP_MODE = os.environ.get("FAMILY_FINANCES_MODE", "stable").strip().lower()
+if APP_MODE not in {"stable", "development", "lab"}:
+    raise RuntimeError("FAMILY_FINANCES_MODE must be stable, development, or lab.")
 DEVELOPMENT_MODE = APP_MODE == "development"
-PLAID_DISABLED = DEVELOPMENT_MODE or environment_flag("FAMILY_FINANCES_DISABLE_PLAID")
+LAB_MODE = APP_MODE == "lab"
+PLAID_DISABLED = (
+    DEVELOPMENT_MODE
+    or LAB_MODE
+    or environment_flag("FAMILY_FINANCES_DISABLE_PLAID")
+)
 APP_PORT = local_port()
 DATA_ROOT = Path(
     os.environ.get("FAMILY_FINANCES_DATA_DIR")
@@ -134,7 +142,11 @@ def display_name():
 auth_config = load_auth_config()
 app.config.update(
     SECRET_KEY=auth_config.get("secret_key") or secrets.token_hex(32),
-    SESSION_COOKIE_NAME="family_finances_development" if DEVELOPMENT_MODE else "session",
+    SESSION_COOKIE_NAME=(
+        "family_finances_development"
+        if DEVELOPMENT_MODE
+        else "family_finances_lab" if LAB_MODE else "session"
+    ),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
@@ -167,6 +179,7 @@ def template_branding():
     return {
         "app_name": display_name(),
         "development_mode": DEVELOPMENT_MODE,
+        "lab_mode": LAB_MODE,
         "plaid_disabled": PLAID_DISABLED,
     }
 
@@ -274,7 +287,7 @@ def protect_responses(response):
 def health():
     return jsonify(
         ok=True,
-        mode="development" if DEVELOPMENT_MODE else "stable",
+        mode=APP_MODE,
         plaid_enabled=not PLAID_DISABLED,
     )
 
@@ -1191,6 +1204,35 @@ def settings_page():
         settings_error=request.args.get("error"),
     )
     return render_template("settings.html", **context)
+
+
+@app.get("/lab")
+def lab_page():
+    if not LAB_MODE:
+        abort(404)
+    context = page_context("lab")
+    current_scenario = setting("lab_scenario")
+    context.update(
+        lab_scenarios=LAB_SCENARIOS,
+        current_scenario=current_scenario,
+        lab_saved=request.args.get("loaded"),
+        lab_error=request.args.get("error"),
+    )
+    return render_template("lab.html", **context)
+
+
+@app.post("/api/lab-scenario")
+def update_lab_scenario():
+    if not LAB_MODE:
+        abort(404)
+    scenario_key = request.form.get("scenario", "")
+    if scenario_key not in LAB_SCENARIOS:
+        return redirect(url_for("lab_page", error="scenario"))
+    if request.form.get("confirm_reset") != "yes":
+        return redirect(url_for("lab_page", error="confirmation"))
+    with db() as connection:
+        load_lab_scenario(connection, scenario_key)
+    return redirect(url_for("lab_page", loaded=scenario_key))
 
 
 @app.post("/api/account-roles")

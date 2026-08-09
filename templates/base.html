@@ -13,7 +13,7 @@
   <aside class="sidebar">
     <a class="brand" href="/">
       <span class="brand-mark">{{ app_name[0]|upper }}</span>
-      <span>{{ app_name }}{% if development_mode %}<small class="environment-badge">Development</small>{% endif %}</span>
+      <span>{{ app_name }}{% if development_mode %}<small class="environment-badge">Development</small>{% elif lab_mode %}<small class="environment-badge">Synthetic lab</small>{% endif %}</span>
     </a>
     <nav class="nav">
       <a class="{{ 'active' if active == 'overview' }}" href="/?month={{ month }}{{ person_query }}{{ account_query }}">
@@ -37,6 +37,11 @@
       <a class="{{ 'active' if active == 'settings' }}" href="/settings">
         <span>⚙</span> Settings
       </a>
+      {% if lab_mode %}
+      <a class="{{ 'active' if active == 'lab' }}" href="/lab">
+        <span>⚗</span> Lab scenarios
+      </a>
+      {% endif %}
     </nav>
     <div class="sidebar-footer">
       <div class="sidebar-privacy">
@@ -66,7 +71,7 @@
       </div>
     </header>
 
-    {% if active not in ["savings", "settings"] %}
+    {% if active not in ["savings", "settings", "lab"] %}
     <section class="filterbar">
       <form method="{{ 'post' if active in ['overview', 'cash_flow'] else 'get' }}" class="filter-form"{% if active in ["overview", "cash_flow"] %} action="{{ url_for('update_overview_lookback') }}"{% endif %}>
         {% if active in ["overview", "cash_flow"] %}
