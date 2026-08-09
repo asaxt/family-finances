@@ -217,15 +217,6 @@ def spending_summary(connection, month, account_id=None, connection_id=None):
         [month, *account_params],
     ).fetchone()
 
-    budget_rows = connection.execute(
-        "SELECT category, amount FROM budgets WHERE month = ?", (month,)
-    ).fetchall()
-    budgets = {row["category"]: row["amount"] for row in budget_rows}
-    budget_total = sum(budgets.values())
-    budget_spent = sum(
-        row["amount"] for row in categories if row["name"] in budgets
-    )
-
     insights = []
     if categories and total:
         top = categories[0]
@@ -265,9 +256,6 @@ def spending_summary(connection, month, account_id=None, connection_id=None):
         "merchants": [dict(row) for row in merchants],
         "card_totals": [dict(row) for row in card_totals],
         "largest": dict(largest) if largest else None,
-        "budgets": budgets,
-        "budget_total": budget_total,
-        "budget_spent": budget_spent,
         "insights": insights,
     }
 
@@ -779,27 +767,27 @@ def category_details(connection, month, account_id=None, connection_id=None):
     account_sql, account_params = scope_filter(account_id, connection_id)
     details = []
     for category in summary["categories"]:
-        merchants = connection.execute(
+        recent_transactions = connection.execute(
             f"""
             SELECT COALESCE(NULLIF(t.merchant, ''), t.description) AS name,
-                   SUM({SPEND_SQL}) AS amount,
-                   SUM({SPEND_COUNT_SQL}) AS transaction_count
+                   t.transacted_at,
+                   {SPEND_SQL} AS amount
             FROM transactions t
             JOIN accounts a ON a.id = t.account_id
             {CATEGORY_RULE_JOIN}
             WHERE t.pending = 0 AND t.excluded = 0
               AND substr(t.transacted_at, 1, 7) = ?
               AND {EFFECTIVE_CATEGORY_SQL} = ?
+              AND {SPEND_SQL} > 0
               {account_sql}
-            GROUP BY COALESCE(NULLIF(t.merchant, ''), t.description)
-            HAVING SUM({SPEND_SQL}) > 0
-            ORDER BY amount DESC
+            ORDER BY t.transacted_at DESC, ABS(t.amount) DESC
             LIMIT 5
             """,
             [month, category["name"], *account_params],
         ).fetchall()
-        category["merchants"] = [dict(row) for row in merchants]
-        category["budget"] = summary["budgets"].get(category["name"], 0)
+        category["recent_transactions"] = [
+            dict(row) for row in recent_transactions
+        ]
         details.append(category)
     return details
 

@@ -4,6 +4,7 @@ import re
 import sys
 import tempfile
 import unittest
+from datetime import date
 
 
 class OverviewTests(unittest.TestCase):
@@ -71,7 +72,80 @@ class OverviewTests(unittest.TestCase):
             overview.data.index(b"Earned income"),
             overview.data.index(b"Total spend"),
         )
+        self.assertLess(
+            overview.data.index(b"Total spend"),
+            overview.data.index(b"Net cash flow"),
+        )
         self.assertEqual(overview.data.count(b'<article class="metric-card'), 8)
+
+    def test_dashboard_layout_cleanup_and_recent_category_transactions(self):
+        month = date.today().strftime("%Y-%m")
+        with self.application.db() as connection:
+            connection.execute(
+                """
+                INSERT INTO connections (
+                    id, owner_name, institution, access_token
+                ) VALUES (1, 'Household', 'Example Bank', 'fake-token')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO accounts (
+                    id, connection_id, institution, name, mask, type, subtype
+                ) VALUES (
+                    'checking', 1, 'Example Bank', 'Checking', '1234',
+                    'depository', 'checking'
+                )
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, merchant,
+                    pending, transacted_at, category, excluded
+                ) VALUES (?, 'checking', ?, 'USD', ?, ?, 0, ?, 'Dining', 0)
+                """,
+                [
+                    (
+                        f"purchase-{day}",
+                        day * 100,
+                        f"Purchase {day}",
+                        f"Merchant {day}",
+                        f"{month}-{day:02d}",
+                    )
+                    for day in range(1, 7)
+                ],
+            )
+
+        cash_flow = self.client.get("/cash-flow").get_data(as_text=True)
+        top_metrics = cash_flow.split(
+            '<section class="metric-grid cash-flow-metrics">', 1
+        )[1].split("</section>", 1)[0]
+        self.assertEqual(
+            re.findall(r'<span class="metric-label">([^<]+)</span>', top_metrics),
+            ["Total money in · 30 days", "Money out", "Net cash flow"],
+        )
+        self.assertEqual(top_metrics.count('<article class="metric-card'), 3)
+
+        trends = self.client.get("/trends").get_data(as_text=True)
+        self.assertIn("Monthly spending and moving averages", trends)
+        self.assertIn("Category trend", trends)
+        for removed in (
+            "Year-over-year change",
+            "How to read this",
+            "Largest category drivers",
+        ):
+            self.assertNotIn(removed, trends)
+
+        categories = self.client.get(
+            f"/categories?month={month}"
+        ).get_data(as_text=True)
+        self.assertIn("Recent transactions", categories)
+        self.assertIn("Merchant 6", categories)
+        self.assertIn("Merchant 2", categories)
+        self.assertNotIn("Merchant 1", categories)
+        self.assertNotIn("Budget snapshot", categories)
+        self.assertNotIn("/api/budget", categories)
 
     def test_valid_lookback_is_encrypted_and_invalid_values_are_rejected(self):
         overview = self.client.get("/")
