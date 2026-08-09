@@ -11,7 +11,7 @@
     <div><h2>Money coming in</h2><p>Included inflows over the past {{ lookback_days }} days</p></div>
     <a class="text-link" href="{{ url_for('cash_flow', person=connection_id, account=account_id) }}">View cash flow →</a>
   </div>
-  <div class="metric-grid">
+  <div class="metric-grid overview-money-in-metrics">
     <article class="metric-card hero">
       <span class="metric-label">Earned income</span>
       <div class="metric-value">{{ cash_flow.income|money }}</div>
@@ -26,11 +26,6 @@
       <span class="metric-label">Total money in</span>
       <div class="metric-value">{{ cash_flow.total_inflows|money }}</div>
       <span class="metric-note">Earned income plus other money in</span>
-    </article>
-    <article class="metric-card">
-      <span class="metric-label">Net cash flow</span>
-      <div class="metric-value {{ 'down' if cash_flow.net >= 0 else 'up' }}">{{ cash_flow.net|money }}</div>
-      <span class="metric-note">Money in minus money out; transfers remain neutral</span>
     </article>
   </div>
 </section>
@@ -64,6 +59,14 @@
       <span class="metric-note">{{ summary.current_month_total|money }} through day {{ summary.current_month_elapsed_days }} of {{ summary.current_month_label }}</span>
     </article>
   </div>
+</section>
+
+<section class="overview-net-cash-flow">
+  <article class="metric-card">
+    <span class="metric-label">Net cash flow</span>
+    <div class="metric-value {{ 'down' if cash_flow.net >= 0 else 'up' }}">{{ cash_flow.net|money }}</div>
+    <span class="metric-note">Money in minus money out; transfers remain neutral</span>
+  </article>
 </section>
 
 {% if savings %}

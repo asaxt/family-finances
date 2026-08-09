@@ -51,56 +51,18 @@
   <div class="chart-tall"><canvas id="monthly-trend-chart"></canvas></div>
 </section>
 
-<section class="content-grid trend-secondary-grid">
-  <article class="panel">
-    <div class="panel-header">
-      <div><h2>Year-over-year change</h2><p>How each month compares with the same month one year earlier</p></div>
-    </div>
-    <div class="chart-medium"><canvas id="yoy-chart"></canvas></div>
-  </article>
-  <article class="panel trend-guide">
-    <div class="panel-header"><div><h2>How to read this</h2><p>Signals that smooth out one-off purchases</p></div></div>
-    <div class="insight-list">
-      <div class="insight"><span class="insight-icon">3</span><span><strong>3 months</strong> reacts quickly and shows whether spending has recently accelerated.</span></div>
-      <div class="insight"><span class="insight-icon">12</span><span><strong>12 months</strong> smooths seasonality and is the clearest household baseline.</span></div>
-      <div class="insight"><span class="insight-icon">24</span><span><strong>24 months</strong> is the longest available baseline; more points will appear as history grows.</span></div>
-      <div class="insight"><span class="insight-icon">↘</span><span>For spending, a negative year-over-year change usually means costs came down.</span></div>
-    </div>
-  </article>
-</section>
-
-<section class="content-grid category-trend-grid">
-  <article class="panel">
-    <div class="panel-header">
-      <div><h2>Category trend</h2><p>Follow one spending category over time, then open its transactions</p></div>
-      <label class="select-label">Category
-        <select id="category-trend-select">
-          {% for category in long_term.category_series %}
-            <option value="{{ category.name }}">{{ category.name }}</option>
-          {% endfor %}
-        </select>
-      </label>
-    </div>
-    <div class="chart-large"><canvas id="category-trend-chart"></canvas></div>
-  </article>
-  <article class="panel">
-    <div class="panel-header"><div><h2>Largest category drivers</h2><p>Trailing 12-month spending</p></div></div>
-    <div class="rank-list category-driver-list">
-      {% for category in long_term.category_series[:7] %}
-        <button class="rank-row category-picker" type="button" data-category="{{ category.name }}">
-          <span class="rank-number">{{ "%02d"|format(loop.index) }}</span>
-          <span>
-            <span class="rank-name">{{ category.name }}</span>
-            <span class="rank-meta">
-              3-mo avg {{ category.three_month_average|money }}
-              {% if category.yoy_pct is not none %} · {{ "%+.0f"|format(category.yoy_pct) }}% YoY{% endif %}
-            </span>
-          </span>
-          <span class="rank-amount">{{ category.trailing_12|money }}</span>
-        </button>
-      {% endfor %}
-    </div>
-  </article>
+<section class="panel trend-panel">
+  <div class="panel-header">
+    <div><h2>Category trend</h2><p>Follow one spending category over time, then open its transactions</p></div>
+    <label class="select-label">Category
+      <select id="category-trend-select">
+        {% for category in long_term.category_series %}
+          <option value="{{ category.name }}">{{ category.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  <div class="chart-large"><canvas id="category-trend-chart"></canvas></div>
 </section>
 {% else %}
 <section class="panel empty">Connect and sync transactions to build long-term trends.</section>
@@ -194,34 +156,6 @@
     monthlyChart.update();
   });
 
-  const yoyValues = monthPoints.map(point => point.yoy_pct);
-  new Chart(document.querySelector("#yoy-chart"), {
-    type: "line",
-    data: {labels, datasets: [{
-      label: "Year-over-year change",
-      data: yoyValues,
-      borderColor: context => (context.raw ?? 0) > 0 ? "#d86d73" : "#3b9870",
-      backgroundColor: "#24634e12",
-      borderWidth: 2.5,
-      tension: .25,
-      fill: {target: "origin", above: "#d86d7315", below: "#3b987015"},
-      pointRadius: 4,
-      pointBackgroundColor: yoyValues.map(value => value > 0 ? "#d86d73" : "#3b9870"),
-      spanGaps: false
-    }]},
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      onClick: (_, elements) => { if (elements.length) openCategories(elements[0].index); },
-      onHover: (event, elements) => event.native.target.style.cursor = elements.length ? "pointer" : "default",
-      plugins: {legend: {display: false}, tooltip: {callbacks: {label: item => `${item.raw > 0 ? "+" : ""}${item.raw.toFixed(1)}% vs last year`}}},
-      scales: {
-        x: {grid: {display: false}, ticks: {maxTicksLimit: 7}},
-        y: {border: {display: false}, grid: {color: context => context.tick.value === 0 ? "#9aa49f" : "#edf0ed"}, ticks: {callback: value => `${value > 0 ? "+" : ""}${value}%`}}
-      }
-    }
-  });
-
   const categorySelect = document.querySelector("#category-trend-select");
   const categoryChart = new Chart(document.querySelector("#category-trend-chart"), {
     type: "line",
@@ -247,10 +181,8 @@
     categoryChart.data.datasets[0].label = name;
     categoryChart.data.datasets[0].data = category.values.map(value => value / 100);
     categoryChart.update();
-    document.querySelectorAll(".category-picker").forEach(button => button.classList.toggle("selected", button.dataset.category === name));
   }
   categorySelect.addEventListener("change", event => showCategory(event.target.value));
-  document.querySelectorAll(".category-picker").forEach(button => button.addEventListener("click", () => showCategory(button.dataset.category)));
   if (categorySeries.length) showCategory(categorySeries[0].name);
 </script>
 {% endif %}

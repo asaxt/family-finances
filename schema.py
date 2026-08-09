@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -81,7 +81,7 @@ VERSION_TWO_COLUMNS = {
     "transactions": VERSION_ZERO_COLUMNS["transactions"] | {"flow_override"},
     "category_rules": {"name", "flow_type"},
 }
-EXPECTED_COLUMNS = {
+VERSION_FIVE_COLUMNS = {
     **VERSION_TWO_COLUMNS,
     "merchant_rules": {
         "id",
@@ -91,6 +91,11 @@ EXPECTED_COLUMNS = {
         "category",
         "flow_type",
     },
+}
+EXPECTED_COLUMNS = {
+    name: columns
+    for name, columns in VERSION_FIVE_COLUMNS.items()
+    if name != "budgets"
 }
 
 
@@ -156,7 +161,11 @@ def _validate_version_four(connection):
 
 
 def _validate_version_five(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 5)
+    _validate_columns(connection, VERSION_FIVE_COLUMNS, 5)
+
+
+def _validate_version_six(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 6)
 
 
 def _migrate_zero_to_one(connection):
@@ -287,6 +296,10 @@ def _migrate_four_to_five(connection):
     )
 
 
+def _migrate_five_to_six(connection):
+    connection.execute("DROP TABLE budgets")
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
@@ -294,6 +307,7 @@ VALIDATORS = {
     3: _validate_version_three,
     4: _validate_version_four,
     5: _validate_version_five,
+    6: _validate_version_six,
 }
 MIGRATIONS = {
     0: _migrate_zero_to_one,
@@ -301,6 +315,7 @@ MIGRATIONS = {
     2: _migrate_two_to_three,
     3: _migrate_three_to_four,
     4: _migrate_four_to_five,
+    5: _migrate_five_to_six,
 }
 
 
@@ -400,12 +415,6 @@ def create_schema(connection):
                 ),
                 UNIQUE (account_id, match_type, match_value),
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-            );
-            CREATE TABLE budgets (
-                month TEXT NOT NULL,
-                category TEXT NOT NULL,
-                amount INTEGER NOT NULL,
-                PRIMARY KEY (month, category)
             );
             CREATE TABLE manual_accounts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

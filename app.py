@@ -1533,35 +1533,6 @@ def link_exit():
     return jsonify(ok=True)
 
 
-@app.post("/api/budget")
-def save_budget():
-    month = request.form["month"]
-    category = request.form["category"].strip()
-    amount = round(float(request.form["amount"] or 0) * 100)
-    with db() as connection:
-        if amount > 0:
-            connection.execute(
-                """
-                INSERT INTO budgets (month, category, amount) VALUES (?, ?, ?)
-                ON CONFLICT(month, category) DO UPDATE SET amount = excluded.amount
-                """,
-                (month, category, amount),
-            )
-        else:
-            connection.execute(
-                "DELETE FROM budgets WHERE month = ? AND category = ?",
-                (month, category),
-            )
-    return redirect(
-        url_for(
-            "categories",
-            month=month,
-            account=request.form.get("account") or None,
-            person=request.form.get("person") or None,
-        )
-    )
-
-
 def normalized_category(value):
     return " ".join(value.split())[:80] or None
 
