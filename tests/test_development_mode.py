@@ -57,6 +57,7 @@ class DevelopmentModeTests(unittest.TestCase):
         health = self.client.get("/health").get_json()
         self.assertEqual(health["mode"], "development")
         self.assertFalse(health["plaid_enabled"])
+        self.assertIsNone(health["plaid_environment"])
 
         setup_page = self.client.get("/setup")
         self.assertIn(b"Development", setup_page.data)

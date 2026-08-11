@@ -13,7 +13,7 @@
   <aside class="sidebar">
     <a class="brand" href="/">
       <span class="brand-mark">{{ app_name[0]|upper }}</span>
-      <span>{{ app_name }}{% if development_mode %}<small class="environment-badge">Development</small>{% elif lab_mode %}<small class="environment-badge">Synthetic lab</small>{% endif %}</span>
+      <span>{{ app_name }}{% if development_mode %}<small class="environment-badge">Development</small>{% elif lab_mode %}<small class="environment-badge">Plaid sandbox</small>{% endif %}</span>
     </a>
     <nav class="nav">
       <a class="{{ 'active' if active == 'overview' }}" href="/?month={{ month }}{{ person_query }}{{ account_query }}">
@@ -39,7 +39,7 @@
       </a>
       {% if lab_mode %}
       <a class="{{ 'active' if active == 'lab' }}" href="/lab">
-        <span>⚗</span> Lab scenarios
+        <span>⚗</span> Sandbox lab
       </a>
       {% endif %}
     </nav>
@@ -66,7 +66,11 @@
           <a class="button primary" href="#record-balances">Record balances</a>
         {% elif active != "settings" and not plaid_disabled %}
           <button class="button secondary" id="sync-button"><span>↻</span> Sync</button>
+          {% if lab_mode %}
+          <a class="button primary" href="/lab">Create Sandbox setup</a>
+          {% else %}
           <button class="button primary" id="connect-button">{{ "Add bank connection" if connected else "Connect a bank" }}</button>
+          {% endif %}
         {% endif %}
       </div>
     </header>
@@ -143,6 +147,7 @@
     {% block content %}{% endblock %}
   </main>
 
+  {% if not lab_mode %}
   <dialog id="connection-dialog" class="connection-dialog">
     <div class="dialog-header">
       <div><p class="eyebrow">Household connections</p><h2>Add a bank connection</h2></div>
@@ -168,6 +173,7 @@
       </div>
     {% endif %}
   </dialog>
+  {% endif %}
 
   <script>
     const csrfToken = {{ csrf_token()|tojson }};
@@ -205,6 +211,7 @@
       });
     }
 
+    {% if not lab_mode %}
     const connectionDialog = document.querySelector("#connection-dialog");
     const connectButton = document.querySelector("#connect-button");
     if (connectButton) {
@@ -300,6 +307,7 @@
     document.querySelectorAll(".reconnect-button").forEach(button => {
       button.addEventListener("click", () => launchPlaid(button.dataset.owner, Number(button.dataset.connection)));
     });
+    {% endif %}
   </script>
   {% block scripts %}{% endblock %}
 </body>

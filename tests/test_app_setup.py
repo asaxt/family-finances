@@ -30,6 +30,7 @@ class AppSetupTests(unittest.TestCase):
         self.application.app.config["TESTING"] = True
         self.client = self.application.app.test_client()
         self.assertEqual(self.application.app.config["SESSION_COOKIE_NAME"], "session")
+        self.assertEqual(self.application.PLAID_HOST, "https://production.plaid.com")
 
     def tearDown(self):
         if self.application.vault.unlocked:
@@ -76,6 +77,20 @@ class AppSetupTests(unittest.TestCase):
 
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
+        self.assertEqual(
+            self.client.post(
+                "/api/lab-reset",
+                data={"csrf_token": token, "confirm_reset": "yes"},
+            ).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/lab-connect",
+                data={"csrf_token": token, "profile": "checking"},
+            ).status_code,
+            404,
+        )
         with self.application.db() as connection:
             self.assertEqual(schema_version(connection), 8)
             initial_goal = connection.execute(

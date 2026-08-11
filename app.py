@@ -22,10 +22,15 @@ from plaid.model.link_token_create_request import LinkTokenCreateRequest
 from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
 from plaid.model.link_token_transactions import LinkTokenTransactions
 from plaid.model.products import Products
+from plaid.model.sandbox_public_token_create_request import (
+    SandboxPublicTokenCreateRequest,
+)
+from plaid.model.sandbox_public_token_create_request_options import (
+    SandboxPublicTokenCreateRequestOptions,
+)
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from lab_scenarios import LAB_SCENARIOS, load_lab_scenario
 from schema import SchemaError, prepare_encrypted_database
 from vault import (
     EncryptedDatabase,
@@ -74,9 +79,10 @@ DEVELOPMENT_MODE = APP_MODE == "development"
 LAB_MODE = APP_MODE == "lab"
 PLAID_DISABLED = (
     DEVELOPMENT_MODE
-    or LAB_MODE
     or environment_flag("FAMILY_FINANCES_DISABLE_PLAID")
 )
+PLAID_ENVIRONMENT = "sandbox" if LAB_MODE else "production"
+PLAID_HOST = f"https://{PLAID_ENVIRONMENT}.plaid.com"
 APP_PORT = local_port()
 DATA_ROOT = Path(
     os.environ.get("FAMILY_FINANCES_DATA_DIR")
@@ -85,6 +91,7 @@ DATA_ROOT = Path(
 VAULT_PATH = DATA_ROOT / "family-finances.vault"
 AUTH_PATH = DATA_ROOT / ".auth.json"
 DEFAULT_APP_NAME = "Family Finances"
+LAB_APP_NAME = "Family Finances Lab"
 VAULT_IDLE_SECONDS = 12 * 60 * 60
 SAVINGS_CLASSIFICATIONS = {
     "pre_tax": "Pre-tax",
@@ -92,6 +99,322 @@ SAVINGS_CLASSIFICATIONS = {
     "taxable": "Taxable",
 }
 EXPECTED_PLAID_PRODUCTS = {"transactions"}
+SANDBOX_INSTITUTIONS = {
+    "platypus": {
+        "name": "First Platypus Bank",
+        "institution_id": "ins_109508",
+    },
+    "gingham": {
+        "name": "First Gingham Credit Union",
+        "institution_id": "ins_109509",
+    },
+    "tattersall": {
+        "name": "Tattersall Federal Credit Union",
+        "institution_id": "ins_109510",
+    },
+    "tartan": {
+        "name": "Tartan Bank",
+        "institution_id": "ins_109511",
+    },
+}
+SANDBOX_ACCOUNT_PROFILES = {
+    "checking": {
+        "name": "Checking only",
+        "description": "One checking account for cash flow and debit purchases.",
+        "accounts": [
+            {
+                "role": "checking_primary",
+                "type": "depository",
+                "subtype": "checking",
+            }
+        ],
+    },
+    "savings": {
+        "name": "Savings only",
+        "description": "One savings account with no checking or card feed.",
+        "accounts": [
+            {
+                "role": "savings_primary",
+                "type": "depository",
+                "subtype": "savings",
+            }
+        ],
+    },
+    "checking_savings": {
+        "name": "Checking + savings",
+        "description": "Bank cash flow plus an internal savings destination.",
+        "accounts": [
+            {
+                "role": "checking_primary",
+                "type": "depository",
+                "subtype": "checking",
+            },
+            {
+                "role": "savings_primary",
+                "type": "depository",
+                "subtype": "savings",
+            },
+        ],
+    },
+    "credit": {
+        "name": "Credit card only",
+        "description": "Card spending without the bank account used to pay it.",
+        "accounts": [
+            {
+                "role": "credit_primary",
+                "type": "credit",
+                "subtype": "credit card",
+            }
+        ],
+    },
+    "checking_credit": {
+        "name": "Checking + credit card",
+        "description": "Cash flow and card spending with matching card payments.",
+        "accounts": [
+            {
+                "role": "checking_primary",
+                "type": "depository",
+                "subtype": "checking",
+            },
+            {
+                "role": "credit_primary",
+                "type": "credit",
+                "subtype": "credit card",
+            },
+        ],
+    },
+    "checking_savings_credit": {
+        "name": "Checking + savings + credit card",
+        "description": "One feed containing bank cash flow, savings, and card spending.",
+        "accounts": [
+            {
+                "role": "checking_primary",
+                "type": "depository",
+                "subtype": "checking",
+            },
+            {
+                "role": "savings_primary",
+                "type": "depository",
+                "subtype": "savings",
+            },
+            {
+                "role": "credit_primary",
+                "type": "credit",
+                "subtype": "credit card",
+            },
+        ],
+    },
+    "two_checking_savings": {
+        "name": "Two checking + savings",
+        "description": "A household with separate checking accounts and shared savings.",
+        "accounts": [
+            {
+                "role": "checking_primary",
+                "type": "depository",
+                "subtype": "checking",
+            },
+            {
+                "role": "checking_secondary",
+                "type": "depository",
+                "subtype": "checking",
+            },
+            {
+                "role": "savings_primary",
+                "type": "depository",
+                "subtype": "savings",
+            },
+        ],
+    },
+    "checking_two_credit": {
+        "name": "Checking + two credit cards",
+        "description": "One payment account serving two separate cards.",
+        "accounts": [
+            {
+                "role": "checking_primary",
+                "type": "depository",
+                "subtype": "checking",
+            },
+            {
+                "role": "credit_primary",
+                "type": "credit",
+                "subtype": "credit card",
+            },
+            {
+                "role": "credit_secondary",
+                "type": "credit",
+                "subtype": "credit card",
+            },
+        ],
+    },
+    "checking_credit_loan": {
+        "name": "Checking + card + mortgage",
+        "description": "Cash flow and card spending alongside a non-transaction loan account.",
+        "accounts": [
+            {
+                "role": "checking_primary",
+                "type": "depository",
+                "subtype": "checking",
+            },
+            {
+                "role": "credit_primary",
+                "type": "credit",
+                "subtype": "credit card",
+            },
+            {
+                "role": "loan_primary",
+                "type": "loan",
+                "subtype": "mortgage",
+            },
+        ],
+    },
+    "full_household": {
+        "name": "Full household",
+        "description": "Two checking accounts, savings, two cards, and a mortgage.",
+        "accounts": [
+            {
+                "role": "checking_primary",
+                "type": "depository",
+                "subtype": "checking",
+            },
+            {
+                "role": "checking_secondary",
+                "type": "depository",
+                "subtype": "checking",
+            },
+            {
+                "role": "savings_primary",
+                "type": "depository",
+                "subtype": "savings",
+            },
+            {
+                "role": "credit_primary",
+                "type": "credit",
+                "subtype": "credit card",
+            },
+            {
+                "role": "credit_secondary",
+                "type": "credit",
+                "subtype": "credit card",
+            },
+            {
+                "role": "loan_primary",
+                "type": "loan",
+                "subtype": "mortgage",
+            },
+        ],
+    },
+}
+SANDBOX_TRANSACTION_PROFILES = {
+    "plaid_generated": {
+        "name": "Plaid-generated activity",
+        "description": "Let Plaid generate the normal Sandbox transaction history.",
+    },
+    "cash_flow": {
+        "name": "Income and bank spending",
+        "description": "Paycheck, housing, utilities, direct checking, and debit purchases.",
+    },
+    "transfers": {
+        "name": "Checking and savings transfers",
+        "description": "Equal and opposite internal transfers plus savings interest.",
+    },
+    "card_activity": {
+        "name": "Card purchases, payment, and refund",
+        "description": "Card spending, both sides of a card payment, and a true refund.",
+    },
+    "pending": {
+        "name": "Pending activity",
+        "description": "Posted and pending bank and card purchases for sync testing.",
+    },
+    "category_edges": {
+        "name": "Categorization edge cases",
+        "description": "Peer payments, subscriptions, marketplaces, and vague merchants.",
+    },
+    "comprehensive": {
+        "name": "Comprehensive household",
+        "description": "Combines cash flow, transfers, cards, pending items, and edge cases.",
+    },
+}
+
+
+def sandbox_transaction(today, days_ago, amount, description, pending=False):
+    transacted_on = today - timedelta(days=days_ago)
+    posted_on = today + timedelta(days=1) if pending else transacted_on
+    return {
+        "date_transacted": transacted_on.isoformat(),
+        "date_posted": posted_on.isoformat(),
+        "amount": amount,
+        "description": description,
+        "currency": "USD",
+    }
+
+
+def build_sandbox_accounts(account_profile_key, transaction_profile_key, today=None):
+    profile = SANDBOX_ACCOUNT_PROFILES[account_profile_key]
+    if transaction_profile_key not in SANDBOX_TRANSACTION_PROFILES:
+        raise KeyError(transaction_profile_key)
+    today = today or date.today()
+    accounts = []
+    accounts_by_role = {}
+    for account_definition in profile["accounts"]:
+        account = {
+            "type": account_definition["type"],
+            "subtype": account_definition["subtype"],
+        }
+        if transaction_profile_key != "plaid_generated":
+            account["transactions"] = []
+        accounts.append(account)
+        accounts_by_role[account_definition["role"]] = account
+
+    def add(role, days_ago, amount, description, pending=False):
+        account = accounts_by_role.get(role)
+        if account is not None:
+            account["transactions"].append(
+                sandbox_transaction(
+                    today, days_ago, amount, description, pending=pending
+                )
+            )
+
+    selected = (
+        {"cash_flow", "transfers", "card_activity", "pending", "category_edges"}
+        if transaction_profile_key == "comprehensive"
+        else {transaction_profile_key}
+    )
+    if "cash_flow" in selected:
+        add("checking_primary", 24, -3200.00, "PAYROLL DIRECT DEPOSIT")
+        add("checking_primary", 21, 1650.00, "MONTHLY RENT PAYMENT")
+        add("checking_primary", 16, 142.60, "CITY ELECTRIC AUTOPAY")
+        add("checking_primary", 9, 86.45, "VISA DEBIT NEIGHBORHOOD MARKET")
+        add("checking_primary", 3, 6.75, "VISA DEBIT CORNER COFFEE")
+        add("checking_secondary", 18, -2100.00, "EMPLOYER ACH PAYROLL")
+        add("checking_secondary", 6, 74.20, "CHECK 1042 CHILDCARE")
+    if "transfers" in selected:
+        add("checking_primary", 14, 600.00, "ONLINE TRANSFER TO SAVINGS")
+        add("savings_primary", 14, -600.00, "ONLINE TRANSFER FROM CHECKING")
+        add("savings_primary", 2, -4.25, "MONTHLY SAVINGS INTEREST")
+    if "card_activity" in selected:
+        add("credit_primary", 20, 122.46, "FRESH FOODS MARKET")
+        add("credit_primary", 13, 58.30, "CEDAR STREET RESTAURANT")
+        add("checking_primary", 8, 850.00, "CREDIT CARD AUTOPAY")
+        add("credit_primary", 8, -850.00, "AUTOMATIC PAYMENT - THANK YOU")
+        add("credit_primary", 4, -34.20, "FRESH FOODS MARKET REFUND")
+        add("credit_secondary", 17, 219.99, "HOME SUPPLY STORE")
+        add("checking_primary", 7, 320.00, "SECOND CARD PAYMENT")
+        add("credit_secondary", 7, -320.00, "ONLINE PAYMENT RECEIVED")
+    if "pending" in selected:
+        add("checking_primary", 5, 47.80, "POSTED DEBIT PURCHASE")
+        add("checking_primary", 0, 65.25, "PENDING DEBIT PURCHASE", pending=True)
+        add("credit_primary", 4, 28.40, "POSTED CARD PURCHASE")
+        add("credit_primary", 0, 41.80, "PENDING CARD PURCHASE", pending=True)
+    if "category_edges" in selected:
+        add("checking_primary", 12, 85.00, "VENMO PAYMENT 4831")
+        add("checking_primary", 11, -120.00, "ZELLE FROM ALEX")
+        add("checking_secondary", 10, 18.45, "SQ *MORNING GLORY")
+        add("credit_primary", 9, 67.18, "AMZN Mktp US*4K9P2")
+        add("credit_primary", 6, 14.99, "APPLE.COM/BILL")
+        add("credit_secondary", 5, 39.95, "PAYPAL *ONLINESTORE")
+    return accounts
+
+
 FLOW_TYPES = {
     "earned_income": "Earned income",
     "other_inflow": "Other money in",
@@ -135,6 +458,8 @@ def save_auth_config(config):
 
 
 def display_name():
+    if LAB_MODE:
+        return LAB_APP_NAME
     value = str(load_auth_config().get("app_name", DEFAULT_APP_NAME)).strip()
     return value[:40] or DEFAULT_APP_NAME
 
@@ -181,6 +506,8 @@ def template_branding():
         "development_mode": DEVELOPMENT_MODE,
         "lab_mode": LAB_MODE,
         "plaid_disabled": PLAID_DISABLED,
+        "plaid_environment": PLAID_ENVIRONMENT,
+        "plaid_environment_label": PLAID_ENVIRONMENT.title(),
     }
 
 
@@ -289,6 +616,7 @@ def health():
         ok=True,
         mode=APP_MODE,
         plaid_enabled=not PLAID_DISABLED,
+        plaid_environment=(PLAID_ENVIRONMENT if not PLAID_DISABLED else None),
     )
 
 
@@ -394,7 +722,7 @@ def plaid_client():
         raise RuntimeError("Plaid is disabled in this local environment.")
     client_id, plaid_secret = plaid_credentials()
     configuration = Configuration(
-        host="https://production.plaid.com",
+        host=PLAID_HOST,
         api_key={
             "clientId": client_id,
             "secret": plaid_secret,
@@ -424,6 +752,23 @@ def save_setting(key, value):
             """,
             (key, value),
         )
+
+
+def plaid_error_details(error):
+    try:
+        payload = json.loads(getattr(error, "body", "") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    return {
+        "error_type": str(payload.get("error_type") or type(error).__name__)[:80],
+        "error_code": str(payload.get("error_code") or "UNKNOWN")[:80],
+        "error_message": str(
+            payload.get("display_message")
+            or payload.get("error_message")
+            or "Plaid did not provide an error message."
+        )[:300],
+        "request_id": str(payload.get("request_id") or "")[:80],
+    }
 
 
 def overview_lookback_days():
@@ -899,6 +1244,32 @@ def sync_all_connections():
     return imported, errors
 
 
+def sync_lab_connection_until_ready(connection_id, attempts=6, delay_seconds=2):
+    imported = 0
+    update_status = "NOT_READY"
+    for attempt in range(attempts):
+        with db() as connection:
+            item = dict(
+                connection.execute(
+                    "SELECT * FROM connections WHERE id = ?", (connection_id,)
+                ).fetchone()
+            )
+        imported += sync_connection(item)
+        with db() as connection:
+            update_status = connection.execute(
+                "SELECT transactions_update_status FROM connections WHERE id = ?",
+                (connection_id,),
+            ).fetchone()[0]
+        if update_status in {
+            "INITIAL_UPDATE_COMPLETE",
+            "HISTORICAL_UPDATE_COMPLETE",
+        }:
+            break
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return imported, update_status
+
+
 def page_context(active):
     month = request.args.get("month") or datetime.now().strftime("%Y-%m")
     try:
@@ -1211,28 +1582,169 @@ def lab_page():
     if not LAB_MODE:
         abort(404)
     context = page_context("lab")
-    current_scenario = setting("lab_scenario")
+    with db() as connection:
+        context["lab_counts"] = {
+            "connections": connection.execute(
+                "SELECT COUNT(*) FROM connections"
+            ).fetchone()[0],
+            "accounts": connection.execute(
+                "SELECT COUNT(*) FROM accounts"
+            ).fetchone()[0],
+            "transactions": connection.execute(
+                "SELECT COUNT(*) FROM transactions"
+            ).fetchone()[0],
+        }
+    client_id, plaid_secret = plaid_credentials()
+    try:
+        last_plaid_error = json.loads(setting("lab_plaid_error") or "null")
+    except (TypeError, json.JSONDecodeError):
+        last_plaid_error = None
+    created_account = SANDBOX_ACCOUNT_PROFILES.get(request.args.get("created"))
+    created_transactions = SANDBOX_TRANSACTION_PROFILES.get(
+        request.args.get("transactions")
+    )
+    created_institution = SANDBOX_INSTITUTIONS.get(
+        request.args.get("institution")
+    )
+    lab_created = None
+    if created_account and created_transactions and created_institution:
+        lab_created = {
+            "account": created_account["name"],
+            "transactions": created_transactions["name"],
+            "institution": created_institution["name"],
+        }
     context.update(
-        lab_scenarios=LAB_SCENARIOS,
-        current_scenario=current_scenario,
-        lab_saved=request.args.get("loaded"),
+        sandbox_institutions=SANDBOX_INSTITUTIONS,
+        sandbox_account_profiles=SANDBOX_ACCOUNT_PROFILES,
+        sandbox_transaction_profiles=SANDBOX_TRANSACTION_PROFILES,
+        plaid_configured=bool(client_id and plaid_secret),
+        lab_created=lab_created,
+        lab_imported=request.args.get("imported", "0"),
+        lab_sync_pending=request.args.get("sync") == "pending",
+        lab_history_initial=request.args.get("sync") == "initial",
+        lab_reset=request.args.get("reset") == "1",
         lab_error=request.args.get("error"),
+        last_plaid_error=last_plaid_error,
     )
     return render_template("lab.html", **context)
 
 
-@app.post("/api/lab-scenario")
-def update_lab_scenario():
+@app.post("/api/lab-reset")
+def reset_lab_data():
     if not LAB_MODE:
         abort(404)
-    scenario_key = request.form.get("scenario", "")
-    if scenario_key not in LAB_SCENARIOS:
-        return redirect(url_for("lab_page", error="scenario"))
     if request.form.get("confirm_reset") != "yes":
         return redirect(url_for("lab_page", error="confirmation"))
     with db() as connection:
-        load_lab_scenario(connection, scenario_key)
-    return redirect(url_for("lab_page", loaded=scenario_key))
+        connection.execute("DELETE FROM savings_snapshots")
+        connection.execute("DELETE FROM manual_accounts")
+        connection.execute("DELETE FROM merchant_rules")
+        connection.execute("DELETE FROM transactions")
+        connection.execute("DELETE FROM category_rules")
+        connection.execute("DELETE FROM accounts")
+        connection.execute("DELETE FROM connections")
+        connection.execute(
+            "DELETE FROM settings WHERE key IN "
+            "('lab_scenario', 'plaid_product_audit', 'lab_plaid_error')"
+        )
+        connection.execute(
+            "DELETE FROM sqlite_sequence WHERE name IN "
+            "('connections', 'merchant_rules', 'manual_accounts', 'savings_snapshots')"
+        )
+    return redirect(url_for("lab_page", reset="1"))
+
+
+@app.post("/api/lab-connect")
+def connect_lab_sandbox_profile():
+    if not LAB_MODE:
+        abort(404)
+    institution_key = request.form.get("institution", "")
+    account_profile_key = request.form.get("account_profile", "")
+    transaction_profile_key = request.form.get("transaction_profile", "")
+    institution = SANDBOX_INSTITUTIONS.get(institution_key)
+    account_profile = SANDBOX_ACCOUNT_PROFILES.get(account_profile_key)
+    transaction_profile = SANDBOX_TRANSACTION_PROFILES.get(transaction_profile_key)
+    if not institution or not account_profile or not transaction_profile:
+        return redirect(url_for("lab_page", error="profile"))
+    client_id, plaid_secret = plaid_credentials()
+    if not client_id or not plaid_secret:
+        return redirect(url_for("lab_page", error="plaid"))
+    owner_name = (request.form.get("owner_name") or "Lab user").strip()[:40]
+    if not owner_name:
+        owner_name = "Lab user"
+    custom_user = json.dumps(
+        {
+            "seed": (
+                f"family-finances-{institution_key}-{account_profile_key}-"
+                f"{transaction_profile_key}"
+            ),
+            "override_accounts": build_sandbox_accounts(
+                account_profile_key, transaction_profile_key
+            ),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    try:
+        client = plaid_client()
+        token = client.sandbox_public_token_create(
+            SandboxPublicTokenCreateRequest(
+                institution_id=institution["institution_id"],
+                initial_products=[Products("transactions")],
+                options=SandboxPublicTokenCreateRequestOptions(
+                    override_username="user_custom",
+                    override_password=custom_user,
+                ),
+            )
+        ).public_token
+        connection_id = save_plaid_connection(
+            token,
+            owner_name,
+            institution["name"],
+            client=client,
+        )
+    except Exception as error:
+        details = plaid_error_details(error)
+        save_setting("lab_plaid_error", json.dumps(details, separators=(",", ":")))
+        app.logger.warning(
+            "Plaid Sandbox profile creation failed: %s %s request=%s",
+            details["error_type"],
+            details["error_code"],
+            details["request_id"] or "unavailable",
+        )
+        return redirect(url_for("lab_page", error="plaid_create"))
+    with db() as connection:
+        connection.execute("DELETE FROM settings WHERE key = 'lab_plaid_error'")
+    try:
+        imported, update_status = sync_lab_connection_until_ready(connection_id)
+    except Exception as error:
+        app.logger.warning(
+            "Initial Plaid Sandbox sync is pending: %s", type(error).__name__
+        )
+        return redirect(
+            url_for(
+                "lab_page",
+                created=account_profile_key,
+                transactions=transaction_profile_key,
+                institution=institution_key,
+                sync="pending",
+            )
+        )
+    sync_state = None
+    if update_status == "INITIAL_UPDATE_COMPLETE":
+        sync_state = "initial"
+    elif update_status != "HISTORICAL_UPDATE_COMPLETE":
+        sync_state = "pending"
+    return redirect(
+        url_for(
+            "lab_page",
+            created=account_profile_key,
+            transactions=transaction_profile_key,
+            institution=institution_key,
+            imported=imported,
+            **({"sync": sync_state} if sync_state else {}),
+        )
+    )
 
 
 @app.post("/api/account-roles")
@@ -1464,6 +1976,8 @@ def update_plaid_settings():
                 "INSERT OR REPLACE INTO settings (key, value) VALUES ('plaid_secret', ?)",
                 (new_secret,),
             )
+        if LAB_MODE:
+            connection.execute("DELETE FROM settings WHERE key = 'lab_plaid_error'")
     return redirect(url_for("settings_page", saved="plaid"))
 
 
@@ -1536,12 +2050,17 @@ def update_password():
 
 @app.post("/api/link-token")
 def create_link_token():
+    if LAB_MODE:
+        abort(404)
     if PLAID_DISABLED:
         return jsonify(error="Plaid is disabled in this local environment."), 403
     client_id, plaid_secret = plaid_credentials()
     if not client_id or not plaid_secret:
         return jsonify(
-            error="Add your Plaid Client ID and Production secret in Settings."
+            error=(
+                f"Add your Plaid Client ID and {PLAID_ENVIRONMENT.title()} "
+                "secret in Settings."
+            )
         ), 400
 
     payload = request.get_json(silent=True) or {}
@@ -1570,12 +2089,26 @@ def create_link_token():
 
 @app.post("/api/exchange-token")
 def exchange_token():
+    if LAB_MODE:
+        abort(404)
     if PLAID_DISABLED:
         return jsonify(error="Plaid is disabled in this local environment."), 403
     payload = request.get_json(force=True)
     public_token = payload["public_token"]
     owner_name = (payload.get("owner_name") or "Household member").strip()[:40]
-    client = plaid_client()
+    try:
+        connection_id = save_plaid_connection(
+            public_token,
+            owner_name,
+            payload.get("institution_name", "Financial institution"),
+        )
+    except ValueError as error:
+        return jsonify(error=str(error)), 409
+    return jsonify(ok=True, connection_id=connection_id)
+
+
+def save_plaid_connection(public_token, owner_name, institution, *, client=None):
+    client = client or plaid_client()
     exchange = client.item_public_token_exchange(
         ItemPublicTokenExchangeRequest(public_token=public_token)
     )
@@ -1583,7 +2116,6 @@ def exchange_token():
     accounts = client.accounts_get(
         AccountsGetRequest(access_token=exchange.access_token)
     ).accounts
-    institution = payload.get("institution_name", "Financial institution")
     with db() as connection:
         try:
             cursor = connection.execute(
@@ -1600,7 +2132,7 @@ def exchange_token():
                 ),
             )
         except sqlite3.IntegrityError:
-            return jsonify(error="This bank connection is already connected."), 409
+            raise ValueError("This bank connection is already connected.")
         connection_id = cursor.lastrowid
         for account in accounts:
             save_account(
@@ -1610,7 +2142,7 @@ def exchange_token():
                 institution,
                 checked_at,
             )
-    return jsonify(ok=True, connection_id=connection_id)
+    return connection_id
 
 
 @app.post("/api/sync")

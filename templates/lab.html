@@ -1,29 +1,37 @@
 {% extends "base.html" %}
-{% block title %}Lab scenarios · {{ app_name }}{% endblock %}
-{% block eyebrow %}Synthetic experiment controls{% endblock %}
-{% block heading %}Lab scenarios{% endblock %}
+{% block title %}Sandbox lab · {{ app_name }}{% endblock %}
+{% block eyebrow %}Plaid test environment{% endblock %}
+{% block heading %}Sandbox lab{% endblock %}
 
 {% block content %}
-{% if lab_saved %}<p class="form-message success lab-page-message">Loaded {{ lab_scenarios[lab_saved].name }} with fresh synthetic accounts and transactions.</p>{% endif %}
-{% if lab_error == "scenario" %}<p class="form-message error lab-page-message">Choose a valid scenario.</p>{% endif %}
-{% if lab_error == "confirmation" %}<p class="form-message error lab-page-message">Confirm that the current lab edits can be replaced.</p>{% endif %}
+{% if lab_created %}<p class="form-message success lab-page-message">Created {{ lab_created.account }} at {{ lab_created.institution }} using {{ lab_created.transactions|lower }} and imported {{ lab_imported }} transaction update{{ "" if lab_imported == "1" else "s" }} without opening Link.</p>{% endif %}
+{% if lab_sync_pending %}<p class="form-message development lab-page-message">Plaid is still preparing this profile's transaction history. Wait a few seconds, then use Sync.</p>{% endif %}
+{% if lab_history_initial %}<p class="form-message development lab-page-message">Recent transaction history is ready. Plaid is still preparing older history; use Sync again shortly.</p>{% endif %}
+{% if lab_reset %}<p class="form-message success lab-page-message">Lab accounts, transactions, savings entries, and learned rules were cleared. Your encrypted Plaid Sandbox credentials were kept.</p>{% endif %}
+{% if lab_error == "confirmation" %}<p class="form-message error lab-page-message">Confirm that the current lab data can be cleared.</p>{% endif %}
+{% if lab_error == "profile" %}<p class="form-message error lab-page-message">Choose a valid Sandbox institution, account setup, and transaction pattern.</p>{% endif %}
+{% if lab_error == "plaid" %}<p class="form-message error lab-page-message">Save your Plaid Client ID and Sandbox secret before creating a profile.</p>{% endif %}
+{% if lab_error == "plaid_create" %}<p class="form-message error lab-page-message">Plaid could not create or import that Sandbox profile. No stable or development data was changed.</p>{% endif %}
+{% if lab_error == "plaid_create" and last_plaid_error %}
+<div class="panel lab-error-details">
+  <strong>{{ last_plaid_error.error_code }}</strong>
+  <p>{{ last_plaid_error.error_message }}</p>
+  {% if last_plaid_error.request_id %}<small>Plaid request ID: {{ last_plaid_error.request_id }}</small>{% endif %}
+</div>
+{% endif %}
 
 <section class="lab-summary panel">
   <div class="panel-header">
     <div>
-      <h2>Current synthetic profile</h2>
-      {% if current_scenario %}
-      <p>{{ lab_scenarios[current_scenario].name }} · {{ lab_scenarios[current_scenario].description }}</p>
-      {% else %}
-      <p>No synthetic profile has been loaded yet.</p>
-      {% endif %}
+      <h2>Plaid Sandbox is active</h2>
+      <p>This checkout creates test Items through sandbox.plaid.com and stores results only in the isolated lab vault on port 4244. Plaid Link is not used.</p>
     </div>
-    {% if current_scenario %}<span class="pill configured">Active</span>{% endif %}
+    <span class="pill configured">Sandbox</span>
   </div>
   <div class="lab-expectation-grid">
-    <div><strong>Bank cash flow</strong><p>Checking and savings activity can affect money in, money out, and net cash flow.</p></div>
-    <div><strong>Spending habits</strong><p>Credit-card purchases appear in categories and trends without changing bank cash flow.</p></div>
-    <div><strong>Card payments</strong><p>The bank-side payment is money out. The card-side offset is neither spending nor a refund.</p></div>
+    <div><strong>{{ lab_counts.connections }} connection{{ "" if lab_counts.connections == 1 else "s" }}</strong><p>Each created profile becomes a separate Plaid Sandbox Item.</p></div>
+    <div><strong>{{ lab_counts.accounts }} account{{ "" if lab_counts.accounts == 1 else "s" }}</strong><p>Test single-account, multi-bank, multi-card, savings, and loan setups.</p></div>
+    <div><strong>{{ lab_counts.transactions }} transaction{{ "" if lab_counts.transactions == 1 else "s" }}</strong><p>Imported categories and descriptions come from Plaid's Sandbox feeds.</p></div>
   </div>
 </section>
 
@@ -31,48 +39,87 @@
   <article class="panel">
     <div class="panel-header">
       <div>
-        <h2>Choose a setup to test</h2>
-        <p>Each load replaces only this lab vault's synthetic records.</p>
+        <h2>Create a Sandbox setup</h2>
+        <p>Plaid creates the Item and returns its normal account and transaction feed without opening Link.</p>
       </div>
     </div>
-    <form class="settings-form" method="post" action="/api/lab-scenario">
+    <form class="settings-form" method="post" action="/api/lab-connect">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <label>
-        <span>Synthetic account and feed profile</span>
-        <select name="scenario" required>
-          {% for key, scenario in lab_scenarios.items() %}
-          <option value="{{ key }}" {{ "selected" if key == current_scenario }}>{{ scenario.name }}</option>
+        <span>Sandbox institution</span>
+        <select name="institution" required>
+          {% for key, institution in sandbox_institutions.items() %}
+          <option value="{{ key }}">{{ institution.name }}</option>
           {% endfor %}
         </select>
       </label>
-      <label class="check-label lab-confirmation">
-        <input type="checkbox" name="confirm_reset" value="yes" required>
-        Replace the current lab transactions, account settings, and learned rules.
+      <label>
+        <span>Account setup</span>
+        <select name="account_profile" required>
+          {% for key, profile in sandbox_account_profiles.items() %}
+          <option value="{{ key }}">{{ profile.name }}</option>
+          {% endfor %}
+        </select>
       </label>
-      <p class="security-note">Stable and development vaults are not read, copied, or modified. Plaid remains disabled on port 4244.</p>
-      <button class="button primary" type="submit">Load fresh scenario</button>
+      <label>
+        <span>Transaction pattern</span>
+        <select name="transaction_profile" required>
+          {% for key, profile in sandbox_transaction_profiles.items() %}
+          <option value="{{ key }}">{{ profile.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>Test household label</span>
+        <input name="owner_name" maxlength="40" value="Lab user" required>
+      </label>
+      <p class="security-note">Exact transaction patterns are applied only to matching account types. For example, a card-only setup omits checking-side card payments. Plaid-generated activity lets Plaid supply its normal sample history instead.</p>
+      <p class="security-note">Uses Plaid's Sandbox-only <code>/sandbox/public_token/create</code> endpoint. No bank username, password, or Link interaction is needed.</p>
+      <div class="lab-actions">
+        <a class="button secondary" href="/settings">{{ "Review settings" if plaid_configured else "Add Sandbox credentials" }}</a>
+        <button class="button primary" type="submit" {{ "" if plaid_configured else "disabled" }}>Create and import profile</button>
+      </div>
     </form>
   </article>
 
   <article class="panel">
-    <div class="panel-header"><div><h2>Payment-matching challenge</h2><p>Included whenever a card and funding account are present.</p></div></div>
+    <div class="panel-header"><div><h2>Transaction patterns to compare</h2><p>Use a fresh reset between experiments for a clean comparison.</p></div></div>
     <div class="insight-list">
-      <div class="insight"><span class="insight-icon">✓</span><span><strong>Clearly labeled pair</strong><br>Both feeds identify the offset as a card payment.</span></div>
-      <div class="insight"><span class="insight-icon">?</span><span><strong>Ambiguous pair</strong><br>The bank side says card payment while the card side says only “automatic payment.”</span></div>
-      <div class="insight"><span class="insight-icon">↩</span><span><strong>True card refund</strong><br>A separate merchant refund tests that payment credits and refunds remain distinct.</span></div>
+      {% for key, profile in sandbox_transaction_profiles.items() %}
+      <div class="insight"><span class="insight-icon">{{ loop.index }}</span><span><strong>{{ profile.name }}</strong><br>{{ profile.description }}</span></div>
+      {% endfor %}
     </div>
   </article>
 </section>
 
 <section class="overview-section">
-  <div class="section-heading"><div><h2>Available profiles</h2><p>Use the same profile when comparing categorization engines.</p></div></div>
-  <div class="lab-profile-grid">
-    {% for key, scenario in lab_scenarios.items() %}
-    <article class="panel lab-profile-card {{ 'active' if key == current_scenario }}">
-      <h3>{{ scenario.name }}</h3>
-      <p>{{ scenario.description }}</p>
-    </article>
-    {% endfor %}
-  </div>
+  <article class="panel">
+    <div class="panel-header"><div><h2>Available account setups</h2><p>Every setup can be paired with any institution and transaction pattern above.</p></div></div>
+    <div class="lab-option-grid">
+      {% for key, profile in sandbox_account_profiles.items() %}
+      <div><strong>{{ profile.name }}</strong><p>{{ profile.description }}</p></div>
+      {% endfor %}
+    </div>
+  </article>
+</section>
+
+<section class="overview-section">
+  <article class="panel lab-reset-panel">
+    <div class="panel-header">
+      <div>
+        <h2>Reset to an empty lab</h2>
+        <p>Clears only the lab's imported Sandbox data and local overrides. Stable and development data are never read or changed.</p>
+      </div>
+    </div>
+    <form class="settings-form" method="post" action="/api/lab-reset">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label class="check-label lab-confirmation">
+        <input type="checkbox" name="confirm_reset" value="yes" required>
+        Clear all lab connections, accounts, transactions, savings entries, and learned category rules.
+      </label>
+      <p class="security-note">Your app password and encrypted Plaid Sandbox Client ID and secret are retained so you can begin the next experiment immediately.</p>
+      <button class="button danger" type="submit">Reset lab data</button>
+    </form>
+  </article>
 </section>
 {% endblock %}

@@ -25,11 +25,16 @@ if [[ "${FAMILY_FINANCES_REFRESH_ON_LAUNCH:-0}" == "1" ]]; then
 fi
 
 /bin/launchctl remove "$launch_label" >/dev/null 2>&1 || true
-/bin/launchctl submit \
-  -l "$launch_label" \
-  -o "$log_file" \
-  -e "$log_file" \
-  -- "$project_dir/scripts/run_server.sh"
+for _ in {1..20}; do
+  if /bin/launchctl submit \
+    -l "$launch_label" \
+    -o "$log_file" \
+    -e "$log_file" \
+    -- "$project_dir/scripts/run_server.sh"; then
+    break
+  fi
+  /bin/sleep 0.1
+done
 
 for _ in {1..40}; do
   if /usr/bin/curl -fsS "$app_url/health" >/dev/null 2>&1; then
