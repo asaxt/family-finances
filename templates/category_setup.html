@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Category labels · {{ app_name }}{% endblock %}
+{% block eyebrow %}Your categorization system{% endblock %}
+{% block heading %}Category labels{% endblock %}
+
+{% block content %}
+<section class="panel category-setup-panel">
+  <div class="panel-header">
+    <div>
+      <h2>{{ "Review your starter labels" if not category_setup_complete else "Manage category labels" }}</h2>
+      <p>Rename, remove, or add category labels and choose how each one affects cash flow.</p>
+    </div>
+    {% if category_setup_complete %}<a class="button secondary" href="{{ url_for('settings_page') }}">Back to settings</a>{% endif %}
+  </div>
+  {% if category_error %}<p class="form-message error">{{ category_error }}</p>{% endif %}
+  <form class="category-setup-form" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <div class="category-editor-heading"><span>Category name</span><span>Cash-flow treatment</span><span></span></div>
+    <div id="category-editor-rows" class="category-editor-rows">
+      {% for row in category_rows %}
+      <div class="category-editor-row">
+        <input type="hidden" name="original_name" value="{{ row.original_name }}">
+        <input name="category_name" value="{{ row.name }}" maxlength="80" required aria-label="Category name" {{ "readonly" if row.required }}>
+        <select name="flow_type" aria-label="Cash-flow treatment for {{ row.name }}" {{ "disabled" if row.required }}>
+          {% for value, label in flow_types.items() %}<option value="{{ value }}" {{ "selected" if row.flow_type == value }}>{{ label }}</option>{% endfor %}
+        </select>
+        {% if row.required %}<input type="hidden" name="flow_type" value="transfer"><span class="transaction-sub">Required</span>
+        {% else %}<button class="text-button remove-category" type="button">Remove</button>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    <div class="category-editor-actions">
+      <button class="button secondary" id="add-category" type="button">Add category</button>
+      <button class="button primary" type="submit">{{ "Save and continue" if not category_setup_complete else "Save category labels" }}</button>
+    </div>
+  </form>
+</section>
+
+<template id="category-row-template">
+  <div class="category-editor-row">
+    <input type="hidden" name="original_name" value="">
+    <input name="category_name" maxlength="80" required aria-label="Category name" placeholder="New category">
+    <select name="flow_type" aria-label="Cash-flow treatment">
+      {% for value, label in flow_types.items() %}<option value="{{ value }}" {{ "selected" if value == "spending" }}>{{ label }}</option>{% endfor %}
+    </select>
+    <button class="text-button remove-category" type="button">Remove</button>
+  </div>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const categoryRows = document.querySelector("#category-editor-rows");
+  const categoryTemplate = document.querySelector("#category-row-template");
+
+  function bindCategoryRemoval(scope = document) {
+    scope.querySelectorAll(".remove-category").forEach(button => {
+      if (button.dataset.bound) return;
+      button.dataset.bound = "1";
+      button.addEventListener("click", () => button.closest(".category-editor-row").remove());
+    });
+  }
+
+  document.querySelector("#add-category").addEventListener("click", () => {
+    const row = categoryTemplate.content.cloneNode(true);
+    categoryRows.appendChild(row);
+    bindCategoryRemoval(categoryRows.lastElementChild);
+    categoryRows.lastElementChild.querySelector('[name="category_name"]').focus();
+  });
+  bindCategoryRemoval();
+</script>
+{% endblock %}

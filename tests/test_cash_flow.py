@@ -36,15 +36,15 @@ class CashFlowAnalyticsTests(unittest.TestCase):
             (
                 (
                     "card", 1, "Card Bank", "Credit Card", "1111", "credit",
-                    "credit card", "credit_card", 1,
+                    "credit card", "cash_flow", 1,
                 ),
                 (
                     "checking", 2, "Cash Bank", "Checking", "2222",
-                    "depository", "checking", "cash_flow", 0,
+                    "depository", "checking", "cash_flow", 1,
                 ),
                 (
                     "savings", 2, "Cash Bank", "Savings", "3333",
-                    "depository", "savings", "cash_flow", 0,
+                    "depository", "savings", "cash_flow", 1,
                 ),
             ),
         )
@@ -74,21 +74,16 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         )
 
     def test_income_spending_and_internal_transfers_remain_separate(self):
-        self.connection.execute(
-            "INSERT INTO category_rules (name, flow_type) VALUES ('Venmo', 'earned_income')"
-        )
         self.add("paycheck", "checking", -500_000, "Income", "2026-08-01")
         self.add("purchase", "card", 150_000, "Travel", "2026-08-02")
-        self.add("checking-to-savings", "checking", 100_000, "Transfer Out", "2026-08-03")
-        self.add("savings-from-checking", "savings", -100_000, "Transfer In", "2026-08-03")
-        self.add("card-payment-out", "checking", 150_000, "Loan Payments", "2026-08-04")
-        self.add("card-payment-in", "card", -150_000, "Loan Payments", "2026-08-04")
-        self.add("unclear-deposit", "checking", -20_000, "Other", "2026-08-05")
-        self.add("venmo-out", "checking", 5_000, "Transfer Out", "2026-08-06")
-        self.add("venmo-in", "checking", -7_000, "Venmo", "2026-08-07")
+        self.add("checking-to-savings", "checking", 100_000, "Transfer", "2026-08-03")
+        self.add("savings-from-checking", "savings", -100_000, "Transfer", "2026-08-03")
+        self.add("card-payment-out", "checking", 150_000, "Transfer", "2026-08-04")
+        self.add("card-payment-in", "card", -150_000, "Transfer", "2026-08-04")
         self.add("loan-payment", "checking", 8_000, "Loan Payments", "2026-08-08")
+        self.add("purchase-refund", "checking", -2_000, "Shopping", "2026-08-08")
         self.add("excluded-inflow", "checking", -99_000, "Income", "2026-08-09", excluded=1)
-        self.add("excluded-transfer", "checking", 99_000, "Transfer Out", "2026-08-10", excluded=1)
+        self.add("excluded-transfer", "checking", 99_000, "Transfer", "2026-08-10", excluded=1)
         self.add("older-income", "checking", -400_000, "Income", "2025-06-01")
 
         summary = cash_flow_summary(
@@ -98,35 +93,22 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["income"], 500_000)
-        self.assertEqual(summary["spending"], 163_000)
-        self.assertEqual(summary["other_inflows"], 27_000)
-        self.assertEqual(summary["transfers_in"], 100_000)
-        self.assertEqual(summary["transfers_out"], 100_000)
-        self.assertEqual(summary["net"], 364_000)
-        self.assertEqual(summary["savings_rate"], 72.8)
+        self.assertEqual(summary["spending"], 156_000)
+        self.assertEqual(summary["other_inflows"], 0)
+        self.assertEqual(summary["transfers_in"], 250_000)
+        self.assertEqual(summary["transfers_out"], 250_000)
+        self.assertEqual(summary["net"], 344_000)
+        self.assertEqual(summary["savings_rate"], 68.8)
         self.assertGreaterEqual(len(summary["months"]), 2)
 
         treatments = {
             row["id"]: row["flow_type"]
             for row in transaction_list(self.connection, include_excluded=True)
         }
-        self.assertEqual(treatments["venmo-in"], "other_inflow")
-        self.assertEqual(treatments["venmo-out"], "spending")
         self.assertEqual(treatments["checking-to-savings"], "transfer")
         self.assertEqual(treatments["paycheck"], "earned_income")
 
-        self.connection.execute(
-            "UPDATE transactions SET flow_override = 'earned_income' WHERE id = 'unclear-deposit'"
-        )
-        reviewed = cash_flow_summary(
-            self.connection,
-            lookback_days=30,
-            today=date(2026, 8, 15),
-        )
-        self.assertEqual(reviewed["income"], 520_000)
-        self.assertEqual(reviewed["other_inflows"], 7_000)
-
-    def test_category_rule_applies_until_transaction_override_wins(self):
+    def test_category_mapping_ignores_old_transaction_flow_override(self):
         self.connection.execute(
             "INSERT INTO category_rules (name, flow_type) VALUES ('Payback', 'other_inflow')"
         )
@@ -142,21 +124,13 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         overridden = cash_flow_summary(
             self.connection, lookback_days=30, today=date(2026, 8, 15)
         )
-        self.assertEqual(overridden["other_inflows"], 0)
-        self.assertEqual(overridden["transfers_in"], 12_000)
+        self.assertEqual(overridden["other_inflows"], 12_000)
+        self.assertEqual(overridden["transfers_in"], 0)
 
     def test_spending_pages_share_cash_flow_classification(self):
         self.add("earlier-purchase", "card", 1_000, "Dining", "2026-07-01")
         self.add("purchase", "card", 2_500, "Dining", "2026-08-04")
-        self.add("transfer", "checking", 500_000, "Transfer Out", "2026-08-05")
-        self.add(
-            "reviewed-transfer",
-            "checking",
-            600_000,
-            "General",
-            "2026-08-06",
-            override="transfer",
-        )
+        self.add("transfer", "checking", 500_000, "Transfer", "2026-08-05")
         self.add("income", "checking", -100_000, "Income", "2026-08-07")
         self.add(
             "excluded-purchase",
@@ -179,7 +153,7 @@ class CashFlowAnalyticsTests(unittest.TestCase):
 
         self.assertEqual(monthly["total"], 2_500)
         self.assertEqual(rolling["total"], 2_500)
-        self.assertEqual(cash_flow["spending"], 0)
+        self.assertEqual(cash_flow["spending"], 2_500)
         august_daily_total = sum(
             row["amount"]
             for row in daily_trends(self.connection)
@@ -193,7 +167,7 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         spending_ids = {
             row["id"]
             for row in transaction_list(
-                self.connection, reporting_scope="spending"
+                self.connection, reporting_scope="spending", spending_only=True
             )
         }
         cash_flow_ids = {
@@ -205,9 +179,9 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         self.assertIn("purchase", spending_ids)
         self.assertNotIn("income", spending_ids)
         self.assertIn("income", cash_flow_ids)
-        self.assertNotIn("purchase", cash_flow_ids)
+        self.assertIn("purchase", cash_flow_ids)
 
-    def test_bank_purchase_can_be_added_to_spending_without_changing_cash_flow(self):
+    def test_included_account_contributes_to_cash_flow_and_spending(self):
         self.add("debit-purchase", "checking", 3_000, "Dining", "2026-08-04")
 
         cash_flow = cash_flow_summary(
@@ -215,34 +189,50 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         )
         spending = spending_summary(self.connection, "2026-08")
         self.assertEqual(cash_flow["spending"], 3_000)
-        self.assertEqual(spending["total"], 0)
+        self.assertEqual(spending["total"], 3_000)
 
         self.connection.execute(
             """
-            UPDATE transactions SET spending_override = 'include'
-            WHERE id = 'debit-purchase'
+            UPDATE accounts
+            SET cash_flow_role = 'other', spending_enabled = 0
+            WHERE id = 'checking'
             """
         )
         spending = spending_summary(self.connection, "2026-08")
         cash_flow = cash_flow_summary(
             self.connection, lookback_days=30, today=date(2026, 8, 15)
         )
-        self.assertEqual(spending["total"], 3_000)
-        self.assertEqual(cash_flow["spending"], 3_000)
+        self.assertEqual(spending["total"], 0)
+        self.assertEqual(cash_flow["spending"], 0)
 
-    def test_account_scoped_merchant_rules_apply_until_transaction_override(self):
-        self.connection.execute(
-            """
-            INSERT INTO merchant_rules (
-                account_id, match_type, match_value, category, flow_type
-            ) VALUES ('checking', 'merchant', 'Recurring Payment', 'Transfer Out', 'transfer')
-            """
+    def test_equal_opposite_uncategorized_transactions_are_transfers(self):
+        self.add("payment-out", "checking", 75_000, "Uncategorized", "2026-08-04")
+        self.add("payment-in", "card", -75_000, "Uncategorized", "2026-08-06")
+        self.add("unmatched", "card", 2_500, "Uncategorized", "2026-08-07")
+
+        transactions = {
+            row["id"]: row for row in transaction_list(self.connection)
+        }
+        summary = cash_flow_summary(
+            self.connection, lookback_days=30, today=date(2026, 8, 15)
         )
+
+        self.assertEqual(transactions["payment-out"]["effective_category"], "Transfer")
+        self.assertEqual(transactions["payment-in"]["effective_category"], "Transfer")
+        self.assertEqual(transactions["payment-out"]["flow_type"], "transfer")
+        self.assertEqual(transactions["payment-in"]["flow_type"], "transfer")
+        self.assertEqual(transactions["unmatched"]["effective_category"], "Uncategorized")
+        self.assertIsNone(transactions["unmatched"]["flow_type"])
+        self.assertEqual(summary["transfers_in"], 75_000)
+        self.assertEqual(summary["transfers_out"], 75_000)
+        self.assertEqual(summary["spending"], 0)
+
+    def test_account_scoped_exact_description_rules_apply_to_recurring_transactions(self):
         self.connection.execute(
             """
             INSERT INTO merchant_rules (
                 account_id, match_type, match_value, category, flow_type
-            ) VALUES ('checking', 'description', 'Fallback Payment', 'Transfer Out', 'transfer')
+            ) VALUES ('checking', 'description', 'Payment detail', 'Transfer', NULL)
             """
         )
         self.connection.execute(
@@ -263,7 +253,7 @@ class CashFlowAnalyticsTests(unittest.TestCase):
                 pending, transacted_at, category, excluded
             ) VALUES
                 ('description-match', 'checking', 80000, 'USD',
-                 'Fallback Payment', NULL, 0, '2026-08-06', 'Loan Payments', 0),
+                 'Payment detail', NULL, 0, '2026-08-06', 'Loan Payments', 0),
                 ('different-account', 'card', 1200, 'USD', 'Payment detail',
                  'Recurring Payment', 0, '2026-08-07', 'General', 0)
             """
@@ -273,7 +263,7 @@ class CashFlowAnalyticsTests(unittest.TestCase):
             row["id"]: row for row in transaction_list(self.connection)
         }
         matched = transactions["matched"]
-        self.assertEqual(matched["effective_category"], "Transfer Out")
+        self.assertEqual(matched["effective_category"], "Transfer")
         self.assertEqual(matched["flow_type"], "transfer")
         self.assertIsNotNone(matched["merchant_rule_id"])
         self.assertEqual(transactions["description-match"]["flow_type"], "transfer")
@@ -297,6 +287,48 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         }["matched"]
         self.assertEqual(overridden["effective_category"], "Housing")
         self.assertEqual(overridden["flow_type"], "spending")
+
+    def test_refunds_passively_reduce_money_out_and_spending(self):
+        self.add("card-purchase", "card", 10_000, "Shopping", "2026-08-03")
+        self.add("card-refund", "card", -3_000, "Shopping", "2026-08-04")
+        self.add("bank-purchase", "checking", 5_000, "Shopping", "2026-08-03")
+        self.add("bank-refund", "checking", -1_000, "Shopping", "2026-08-04")
+
+        spending = spending_summary(self.connection, "2026-08")
+        cash_flow = cash_flow_summary(
+            self.connection, lookback_days=30, today=date(2026, 8, 15)
+        )
+        spending_rows = transaction_list(
+            self.connection, reporting_scope="spending", spending_only=True
+        )
+
+        self.assertEqual(spending["total"], 11_000)
+        self.assertEqual(cash_flow["spending"], 11_000)
+        self.assertEqual(
+            {row["id"] for row in spending_rows},
+            {"card-purchase", "card-refund", "bank-purchase", "bank-refund"},
+        )
+
+    def test_default_category_cash_flow_mappings(self):
+        self.add("income", "checking", -100_000, "Income", "2026-08-01")
+        self.add(
+            "loan", "checking", -50_000, "Loan Disbursements", "2026-08-02"
+        )
+        self.add(
+            "reimbursement",
+            "checking",
+            -20_000,
+            "Reimbursed Work Travel",
+            "2026-08-03",
+        )
+        self.add("ordinary", "checking", 4_000, "Other", "2026-08-04")
+
+        summary = cash_flow_summary(
+            self.connection, lookback_days=30, today=date(2026, 8, 15)
+        )
+        self.assertEqual(summary["income"], 100_000)
+        self.assertEqual(summary["other_inflows"], 70_000)
+        self.assertEqual(summary["spending"], 4_000)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ import json
 import calendar
 import secrets
 import sqlite3
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -47,6 +48,14 @@ from analytics import (
     spending_summary,
     transaction_list,
 )
+from llm_evaluation import (
+    apply_categorized_suggestions,
+    classify_evaluation_rows,
+    create_recurring_category_rules,
+    evaluation_batches,
+    evaluation_result,
+    prepare_evaluation,
+)
 
 
 ROOT = Path(__file__).parent
@@ -84,6 +93,26 @@ SAVINGS_CLASSIFICATIONS = {
     "taxable": "Taxable",
 }
 EXPECTED_PLAID_PRODUCTS = {"transactions"}
+DEVELOPMENT_CLASSIFICATION_MODE = "category_mapping_v1"
+DEVELOPMENT_RESET_MARKER = "development_blank_slate_v3"
+LOCAL_AI_SETTING = "local_ai_enabled_v1"
+OLLAMA_RESULT_SETTING = "local_ai_result_v1"
+OLLAMA_EVALUATION_LOCK = threading.Lock()
+CATEGORY_SETUP_SETTING = "category_setup_completed_v1"
+CATEGORY_SUGGESTIONS = (
+    "Grocery",
+    "Eating Out",
+    "Travel",
+    "Pets",
+    "Clothes",
+    "Gifts",
+    "Charity",
+    "Skiing",
+    "Sailing",
+    "Healthcare",
+    "Rent/Mortgage/Utilities",
+    "Transportation",
+)
 FLOW_TYPES = {
     "earned_income": "Earned income",
     "other_inflow": "Other money in",
@@ -91,12 +120,9 @@ FLOW_TYPES = {
     "transfer": "Transfer",
 }
 ACCOUNT_PURPOSES = {
-    "cash_flow": "Bank cash flow only",
-    "spending": "Spending analysis only",
-    "both": "Cash flow and spending",
-    "other": "Neither",
+    "include": "Include in reporting",
+    "ignore": "Ignore",
 }
-SPENDING_OVERRIDES = {"include": "Include", "exclude": "Exclude"}
 app = Flask(__name__)
 LOGIN_ATTEMPTS = {}
 vault = EncryptedDatabase(VAULT_PATH)
@@ -182,7 +208,86 @@ def unlock_data(password):
     data_key = unlock_key(password, key_record)
     vault.unlock(data_key)
     prepare_encrypted_database(vault, data_key, AUTH_PATH)
+    prepare_development_blank_slate()
+    reconcile_saved_model_rules()
     vault_last_activity = time.monotonic()
+
+
+def prepare_development_blank_slate():
+    if not DEVELOPMENT_MODE:
+        return False
+    with vault.connection() as connection:
+        marker = connection.execute(
+            "SELECT value FROM settings WHERE key = ?",
+            (DEVELOPMENT_RESET_MARKER,),
+        ).fetchone()
+        if marker and marker[0] == "1":
+            return False
+        category_names = {
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT category FROM transactions
+                UNION SELECT category_override FROM transactions
+                UNION SELECT category FROM merchant_rules
+                UNION SELECT name FROM category_rules
+                """
+            )
+            if row[0]
+        }
+        normalized_categories = set()
+        for name in category_names:
+            if name.casefold() in {"venmo", "uncategorized"}:
+                continue
+            normalized_categories.add(
+                "Transfer"
+                if name.casefold() in {"transfer in", "transfer out"}
+                else name
+            )
+        connection.execute(
+            """
+            UPDATE transactions
+            SET category = 'Uncategorized', category_override = NULL,
+                category_override_source = NULL,
+                flow_override = NULL, spending_override = NULL, excluded = 0
+            """
+        )
+        connection.execute("DELETE FROM merchant_rules")
+        connection.execute("DELETE FROM category_rules")
+        connection.execute(
+            """
+            UPDATE accounts
+            SET cash_flow_role = CASE
+                    WHEN type IN ('depository', 'credit') THEN 'cash_flow'
+                    ELSE 'other'
+                END,
+                spending_enabled = CASE
+                    WHEN type IN ('depository', 'credit') THEN 1
+                    ELSE 0
+                END
+            """
+        )
+        connection.execute(
+            "DELETE FROM settings WHERE key = ?", (OLLAMA_RESULT_SETTING,)
+        )
+        connection.executemany(
+            "INSERT INTO category_rules (name, flow_type) VALUES (?, ?)",
+            (
+                (name, default_category_flow_type(name))
+                for name in sorted(normalized_categories, key=str.casefold)
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (
+                ("classification_mode", DEVELOPMENT_CLASSIFICATION_MODE),
+                (DEVELOPMENT_RESET_MARKER, "1"),
+            ),
+        )
+    return True
 
 
 def lock_data():
@@ -315,11 +420,12 @@ def setup():
             app.secret_key = config["secret_key"]
             vault.unlock(data_key)
             prepare_encrypted_database(vault, data_key, AUTH_PATH)
+            prepare_development_blank_slate()
             vault_last_activity = time.monotonic()
             session.clear()
             session["authenticated"] = True
             session.permanent = True
-            return redirect(url_for("overview"))
+            return redirect(url_for("category_setup"))
     return render_template("setup.html", error=error)
 
 
@@ -411,6 +517,51 @@ def save_setting(key, value):
             """,
             (key, value),
         )
+
+
+def local_ai_enabled(connection=None):
+    if connection is None:
+        with db() as saved_connection:
+            return local_ai_enabled(saved_connection)
+    row = connection.execute(
+        "SELECT value FROM settings WHERE key = ?", (LOCAL_AI_SETTING,)
+    ).fetchone()
+    return bool(row and row["value"] == "1")
+
+
+def load_ollama_result(connection):
+    row = connection.execute(
+        "SELECT value FROM settings WHERE key = ?", (OLLAMA_RESULT_SETTING,)
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["value"])
+    except json.JSONDecodeError:
+        return None
+
+
+def save_ollama_result(connection, result):
+    connection.execute(
+        """
+        INSERT INTO settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (OLLAMA_RESULT_SETTING, json.dumps(result, separators=(",", ":"))),
+    )
+
+
+def reconcile_saved_model_rules():
+    with vault.connection() as connection:
+        if not local_ai_enabled(connection):
+            return 0
+        result = load_ollama_result(connection)
+        if not result:
+            return 0
+        rule_count = create_recurring_category_rules(connection, result)
+        if rule_count:
+            save_ollama_result(connection, result)
+        return rule_count
 
 
 def overview_lookback_days():
@@ -697,12 +848,7 @@ def connection_rows():
 
 
 def save_transaction(connection, transaction):
-    category = "Other"
-    transaction_name = f"{transaction.merchant_name or ''} {transaction.name}".lower()
-    if "venmo" in transaction_name:
-        category = "Venmo"
-    elif transaction.personal_finance_category:
-        category = transaction.personal_finance_category.primary.replace("_", " ").title()
+    category = "Uncategorized"
     connection.execute(
         """
         INSERT INTO transactions (
@@ -756,11 +902,9 @@ def save_account(connection, account, connection_id, institution, checked_at):
     subtype = getattr(account, "subtype", None)
     subtype = getattr(subtype, "value", subtype)
     account_type = account.type.value
-    cash_flow_role = {
-        "depository": "cash_flow",
-        "credit": "credit_card",
-    }.get(account_type, "other")
-    spending_enabled = int(account_type == "credit")
+    included_by_default = account_type in {"depository", "credit"}
+    cash_flow_role = "cash_flow" if included_by_default else "other"
+    spending_enabled = int(included_by_default)
     connection.execute(
         """
         INSERT INTO accounts (
@@ -911,14 +1055,10 @@ def page_context(active):
         ]
         for account in accounts:
             account["reporting_purpose"] = (
-                "both"
+                "include"
                 if account["cash_flow_role"] == "cash_flow"
                 and account["spending_enabled"]
-                else (
-                    "cash_flow"
-                    if account["cash_flow_role"] == "cash_flow"
-                    else "spending" if account["spending_enabled"] else "other"
-                )
+                else "ignore"
             )
         profiles = [
             dict(row)
@@ -1091,15 +1231,35 @@ def categories():
 def transactions():
     context = page_context("transactions")
     category = request.args.get("category") or None
+    excluded_categories = list(
+        dict.fromkeys(
+            value.strip()
+            for value in request.args.getlist("exclude_category")
+            if value.strip()
+        )
+    )
     query = request.args.get("q") or None
+    sort = request.args.get("sort") or "date_desc"
+    if sort not in {
+        "date_desc",
+        "date_asc",
+        "amount_desc",
+        "amount_asc",
+        "merchant_asc",
+        "merchant_desc",
+        "category_asc",
+        "account_asc",
+    }:
+        sort = "date_desc"
     transaction_view = request.args.get("view") or (
         "all" if request.args.get("excluded") == "1" else "active"
     )
     if transaction_view not in {"active", "excluded", "all"}:
         transaction_view = "active"
-    reporting_scope = request.args.get("purpose") or "spending"
+    default_scope = "all" if DEVELOPMENT_MODE else "spending"
+    reporting_scope = request.args.get("purpose") or default_scope
     if reporting_scope not in {"spending", "cash_flow", "all"}:
-        reporting_scope = "spending"
+        reporting_scope = default_scope
     date_from = request.args.get("date_from") or None
     date_to = request.args.get("date_to") or None
 
@@ -1139,6 +1299,8 @@ def transactions():
             date_from=date_from,
             date_to=date_to,
             reporting_scope=reporting_scope,
+            excluded_categories=excluded_categories,
+            sort=sort,
         )
         context["category_options"] = [
             row["name"]
@@ -1155,8 +1317,16 @@ def transactions():
                 """
             )
         ]
+        context["local_ai_enabled"] = local_ai_enabled(connection)
+        ollama_result = (
+            load_ollama_result(connection) if context["local_ai_enabled"] else None
+        )
+        context["has_ollama_result"] = bool(ollama_result)
+        context["ollama_result_status"] = (
+            ollama_result.get("status") if ollama_result else None
+        )
+        context["category_setup_complete"] = category_setup_is_complete(connection)
     context["flow_types"] = FLOW_TYPES
-    context["spending_overrides"] = SPENDING_OVERRIDES
     context.update(
         selected_category=category,
         search_query=query or "",
@@ -1164,6 +1334,20 @@ def transactions():
         reporting_scope=reporting_scope,
         date_from=date_from or "",
         date_to=date_to or "",
+        excluded_categories=excluded_categories,
+        transaction_sort=sort,
+        table_filters_active=bool(
+            date_from
+            or date_to
+            or query
+            or category
+            or excluded_categories
+            or transaction_view != "active"
+            or reporting_scope != default_scope
+            or sort != "date_desc"
+            or context["account_id"]
+            or context["connection_id"]
+        ),
     )
     return render_template("transactions.html", **context)
 
@@ -1182,6 +1366,12 @@ def savings():
 def settings_page():
     context = page_context("settings")
     client_id, plaid_secret = plaid_credentials()
+    with db() as connection:
+        category_count = connection.execute(
+            "SELECT COUNT(*) FROM category_rules"
+        ).fetchone()[0]
+        category_setup_complete = category_setup_is_complete(connection)
+        local_ai = local_ai_enabled(connection)
     context.update(
         plaid_client_id=client_id,
         plaid_configured=bool(client_id and plaid_secret),
@@ -1189,8 +1379,18 @@ def settings_page():
         account_purposes=ACCOUNT_PURPOSES,
         settings_saved=request.args.get("saved"),
         settings_error=request.args.get("error"),
+        category_count=category_count,
+        category_setup_complete=category_setup_complete,
+        local_ai_enabled=local_ai,
     )
     return render_template("settings.html", **context)
+
+
+@app.post("/api/local-ai")
+def update_local_ai():
+    enabled = request.form.get("enabled") == "on"
+    save_setting(LOCAL_AI_SETTING, "1" if enabled else "0")
+    return redirect(url_for("settings_page", saved="local_ai"))
 
 
 @app.post("/api/account-roles")
@@ -1210,11 +1410,6 @@ def update_account_roles():
         if (
             len(account_ids) != len(set(account_ids))
             or set(account_ids) != set(saved_accounts)
-            or any(
-                saved_accounts[account_id]["type"] != "depository"
-                and purpose in {"cash_flow", "both"}
-                for account_id, purpose in zip(account_ids, purposes)
-            )
         ):
             return redirect(url_for("settings_page", error="account_roles"))
         connection.executemany(
@@ -1225,14 +1420,8 @@ def update_account_roles():
             """,
             (
                 (
-                    "cash_flow"
-                    if purpose in {"cash_flow", "both"}
-                    else (
-                        "credit_card"
-                        if saved_accounts[account_id]["type"] == "credit"
-                        else "other"
-                    ),
-                    int(purpose in {"spending", "both"}),
+                    "cash_flow" if purpose == "include" else "other",
+                    int(purpose == "include"),
                     account_id,
                 )
                 for account_id, purpose in zip(account_ids, purposes)
@@ -1329,25 +1518,6 @@ def update_overview_lookback():
         return redirect(url_for(destination, **redirect_arguments))
     save_setting("overview_lookback_days", str(lookback_days))
     return redirect(url_for(destination, **redirect_arguments))
-
-
-@app.post("/api/cash-flow/<transaction_id>")
-def update_cash_flow_type(transaction_id):
-    flow_type = request.form.get("flow_type", "")
-    if flow_type not in {"", "excluded", *FLOW_TYPES}:
-        return redirect(url_for("cash_flow", error="classification"))
-    with db() as connection:
-        if flow_type == "excluded":
-            connection.execute(
-                "UPDATE transactions SET flow_override = NULL, excluded = 1 WHERE id = ?",
-                (transaction_id,),
-            )
-        else:
-            connection.execute(
-                "UPDATE transactions SET flow_override = ?, excluded = 0 WHERE id = ?",
-                (flow_type or None, transaction_id),
-            )
-    return redirect(url_for("cash_flow"))
 
 
 def manual_account_values():
@@ -1626,6 +1796,205 @@ def normalized_category(value):
     return " ".join(value.split())[:80] or None
 
 
+def default_category_flow_type(name):
+    normalized = name.casefold()
+    if normalized == "income":
+        return "earned_income"
+    if normalized in {"loan disbursements", "reimbursed work travel"}:
+        return "other_inflow"
+    if normalized == "transfer":
+        return "transfer"
+    return "spending"
+
+
+def category_setup_is_complete(connection):
+    row = connection.execute(
+        "SELECT value FROM settings WHERE key = ?",
+        (CATEGORY_SETUP_SETTING,),
+    ).fetchone()
+    return bool(row and row["value"] == "1")
+
+
+def category_setup_rows(connection):
+    complete = category_setup_is_complete(connection)
+    rows = [
+        {
+            "original_name": row["name"],
+            "name": row["name"],
+            "flow_type": row["flow_type"],
+            "required": row["name"].casefold() == "transfer",
+        }
+        for row in connection.execute(
+            "SELECT name, flow_type FROM category_rules ORDER BY name COLLATE NOCASE"
+        )
+    ]
+    if not complete:
+        existing = {row["name"].casefold() for row in rows}
+        rows.extend(
+            {
+                "original_name": "",
+                "name": name,
+                "flow_type": "spending",
+                "required": False,
+            }
+            for name in CATEGORY_SUGGESTIONS
+            if name.casefold() not in existing
+        )
+    return rows, complete
+
+
+def save_category_setup(connection, rows):
+    existing = {
+        row["name"].casefold(): row["name"]
+        for row in connection.execute("SELECT name FROM category_rules")
+    }
+    submitted = {
+        row["original_name"].casefold(): row["name"]
+        for row in rows
+        if row["original_name"]
+        and row["original_name"].casefold() in existing
+    }
+    staged = []
+    for key, original_name in existing.items():
+        replacement = submitted.get(key)
+        if replacement is None:
+            connection.execute(
+                "UPDATE transactions SET category_override = NULL, "
+                "category_override_source = NULL "
+                "WHERE category_override = ? COLLATE NOCASE",
+                (original_name,),
+            )
+            connection.execute(
+                "DELETE FROM merchant_rules WHERE category = ? COLLATE NOCASE",
+                (original_name,),
+            )
+        elif replacement != original_name:
+            temporary_name = f"__category_setup_{secrets.token_hex(8)}"
+            connection.execute(
+                "UPDATE transactions SET category_override = ? "
+                "WHERE category_override = ? COLLATE NOCASE",
+                (temporary_name, original_name),
+            )
+            connection.execute(
+                "UPDATE merchant_rules SET category = ? "
+                "WHERE category = ? COLLATE NOCASE",
+                (temporary_name, original_name),
+            )
+            staged.append((temporary_name, replacement))
+
+    connection.execute("DELETE FROM category_rules")
+    connection.executemany(
+        "INSERT INTO category_rules (name, flow_type) VALUES (?, ?)",
+        ((row["name"], row["flow_type"]) for row in rows),
+    )
+    for temporary_name, replacement in staged:
+        connection.execute(
+            "UPDATE transactions SET category_override = ? "
+            "WHERE category_override = ?",
+            (replacement, temporary_name),
+        )
+        connection.execute(
+            "UPDATE merchant_rules SET category = ? WHERE category = ?",
+            (replacement, temporary_name),
+        )
+    connection.execute(
+        """
+        INSERT INTO settings (key, value) VALUES (?, '1')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (CATEGORY_SETUP_SETTING,),
+    )
+    connection.execute(
+        "DELETE FROM settings WHERE key = ?", (OLLAMA_RESULT_SETTING,)
+    )
+
+
+@app.route("/category-setup", methods=["GET", "POST"])
+def category_setup():
+    next_url = safe_next_url(request.values.get("next"))
+    error = None
+    with db() as connection:
+        rows, complete = category_setup_rows(connection)
+        if request.method == "POST":
+            if OLLAMA_EVALUATION_LOCK.locked():
+                error = "Wait for local categorization to finish before changing labels."
+            else:
+                names = request.form.getlist("category_name")
+                flow_types = request.form.getlist("flow_type")
+                original_names = request.form.getlist("original_name")
+                submitted_rows = []
+                if not (
+                    len(names) == len(flow_types) == len(original_names)
+                ):
+                    error = "The category list could not be saved. Reload and try again."
+                else:
+                    for name, flow_type, original_name in zip(
+                        names, flow_types, original_names
+                    ):
+                        name = normalized_category(name)
+                        if not name:
+                            continue
+                        if flow_type not in FLOW_TYPES:
+                            error = "Choose a cash-flow treatment for every category."
+                            break
+                        submitted_rows.append(
+                            {
+                                "original_name": normalized_category(original_name) or "",
+                                "name": name,
+                                "flow_type": flow_type,
+                                "required": name.casefold() == "transfer",
+                            }
+                        )
+                if not error:
+                    names_by_key = {
+                        row["name"].casefold() for row in submitted_rows
+                    }
+                    if len(names_by_key) != len(submitted_rows):
+                        error = "Each category needs a unique name."
+                    transfer = next(
+                        (
+                            row
+                            for row in submitted_rows
+                            if row["name"].casefold() == "transfer"
+                        ),
+                        None,
+                    )
+                    if transfer:
+                        transfer["name"] = "Transfer"
+                        transfer["flow_type"] = "transfer"
+                        transfer["required"] = True
+                    else:
+                        original_transfer = next(
+                            (
+                                row["original_name"]
+                                for row in rows
+                                if row["name"].casefold() == "transfer"
+                            ),
+                            "",
+                        )
+                        submitted_rows.append(
+                            {
+                                "original_name": original_transfer,
+                                "name": "Transfer",
+                                "flow_type": "transfer",
+                                "required": True,
+                            }
+                        )
+                    save_category_setup(connection, submitted_rows)
+                    return redirect(next_url)
+                rows = submitted_rows or rows
+
+    context = page_context("settings")
+    context.update(
+        category_rows=rows,
+        category_setup_complete=complete,
+        flow_types=FLOW_TYPES,
+        next_url=next_url,
+        category_error=error,
+    )
+    return render_template("category_setup.html", **context)
+
+
 def canonical_category(connection, name):
     return connection.execute(
         """
@@ -1665,19 +2034,13 @@ def selected_category(connection, choice, new_name=None, new_flow_type=None):
 
 
 def recurring_match(transaction):
-    merchant = (transaction["merchant"] or "").strip()
-    if merchant:
-        return "merchant", merchant
     return "description", transaction["description"].strip()
 
 
 @app.post("/api/transaction/<transaction_id>")
 def update_transaction(transaction_id):
-    flow_override = request.form.get("flow_override", "")
-    if flow_override not in FLOW_TYPES:
-        return transaction_cleanup_redirect()
-    spending_override = request.form.get("spending_override", "")
-    if spending_override not in {"", *SPENDING_OVERRIDES}:
+    category_flow_type = request.form.get("category_flow_type", "")
+    if category_flow_type not in FLOW_TYPES:
         return transaction_cleanup_redirect()
     excluded = int(request.form.get("excluded") == "on")
     with db() as connection:
@@ -1695,10 +2058,18 @@ def update_transaction(transaction_id):
             connection,
             request.form.get("category_choice", ""),
             request.form.get("new_category"),
-            request.form.get("new_category_flow_type"),
+            category_flow_type,
         )
         if not valid:
             return transaction_cleanup_redirect()
+        if category:
+            connection.execute(
+                """
+                INSERT INTO category_rules (name, flow_type) VALUES (?, ?)
+                ON CONFLICT(name) DO UPDATE SET flow_type = excluded.flow_type
+                """,
+                (category, category_flow_type),
+            )
         match_type, match_value = recurring_match(transaction)
         existing_rule = connection.execute(
             """
@@ -1715,21 +2086,18 @@ def update_transaction(transaction_id):
             connection.execute(
                 """
                 INSERT INTO merchant_rules (
-                    account_id, match_type, match_value, category, flow_type,
-                    spending_override
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    account_id, match_type, match_value, category
+                ) VALUES (?, ?, ?, ?)
                 ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
                     category = excluded.category,
-                    flow_type = excluded.flow_type,
-                    spending_override = excluded.spending_override
+                    flow_type = NULL,
+                    spending_override = NULL
                 """,
                 (
                     transaction["account_id"],
                     match_type,
                     match_value,
                     recurring_category,
-                    flow_override,
-                    spending_override or None,
                 ),
             )
         elif existing_rule:
@@ -1740,14 +2108,16 @@ def update_transaction(transaction_id):
         connection.execute(
             """
             UPDATE transactions
-            SET category_override = ?, flow_override = ?, spending_override = ?,
+            SET category_override = ?, category_override_source = ?,
+                flow_override = ?, spending_override = ?,
                 excluded = ?
             WHERE id = ?
             """,
             (
                 category,
-                flow_override,
-                spending_override or None,
+                "user" if category else None,
+                None,
+                None,
                 excluded,
                 transaction_id,
             ),
@@ -1763,19 +2133,7 @@ def bulk_update_transactions():
         with db() as connection:
             category = "__no_change__"
             if action == "apply":
-                flow_override = request.form.get("flow_override", "__no_change__")
-                spending_override = request.form.get(
-                    "spending_override", "__no_change__"
-                )
                 inclusion = request.form.get("inclusion", "__no_change__")
-                if flow_override not in {"__no_change__", "", *FLOW_TYPES}:
-                    return transaction_cleanup_redirect()
-                if spending_override not in {
-                    "__no_change__",
-                    "",
-                    *SPENDING_OVERRIDES,
-                }:
-                    return transaction_cleanup_redirect()
                 if inclusion not in {"__no_change__", "include", "exclude"}:
                     return transaction_cleanup_redirect()
                 choice = request.form.get("category_choice", "__no_change__")
@@ -1802,12 +2160,11 @@ def bulk_update_transactions():
                 if category != "__no_change__":
                     assignments.append("category_override = ?")
                     values.append(category)
-                if flow_override != "__no_change__":
-                    assignments.append("flow_override = ?")
-                    values.append(flow_override or None)
-                if spending_override != "__no_change__":
-                    assignments.append("spending_override = ?")
-                    values.append(spending_override or None)
+                    assignments.append("category_override_source = ?")
+                    values.append("user" if category else None)
+                    assignments.extend(
+                        ["flow_override = NULL", "spending_override = NULL"]
+                    )
                 if inclusion != "__no_change__":
                     assignments.append("excluded = ?")
                     values.append(int(inclusion == "exclude"))
@@ -1831,10 +2188,171 @@ def transaction_cleanup_redirect():
             date_to=request.form.get("date_to") or None,
             q=request.form.get("return_q") or None,
             category=request.form.get("return_category") or None,
+            exclude_category=request.form.getlist("return_excluded_category"),
             purpose=request.form.get("return_purpose") or None,
             view=transaction_view if transaction_view != "active" else None,
+            sort=request.form.get("return_sort") or None,
         )
     )
+
+
+@app.post("/api/local-ai/evaluation")
+def evaluate_with_ollama():
+    if not local_ai_enabled():
+        return jsonify(error="Local AI assistance is turned off."), 403
+    payload = request.get_json(silent=True) or {}
+    categories = payload.get("categories") or []
+    model = str(payload.get("model") or "qwen3.8:27b").strip()
+    transaction_ids = payload.get("transaction_ids") or []
+    if not isinstance(transaction_ids, list) or any(
+        not isinstance(transaction_id, str) for transaction_id in transaction_ids
+    ):
+        return jsonify(error="Selected transactions were not valid."), 400
+    transaction_ids = list(
+        dict.fromkeys(
+            transaction_id.strip()
+            for transaction_id in transaction_ids
+            if transaction_id.strip()
+        )
+    )
+    if not OLLAMA_EVALUATION_LOCK.acquire(blocking=False):
+        return jsonify(
+            ok=True,
+            running=True,
+            report_url=url_for("ollama_evaluation_report"),
+        )
+    try:
+        try:
+            with db() as connection:
+                if not category_setup_is_complete(connection):
+                    return jsonify(
+                        error="Set up category labels before running local categorization.",
+                        setup_url=url_for(
+                            "category_setup", next=url_for("transactions")
+                        ),
+                    ), 409
+                if not categories:
+                    categories = [
+                        row[0]
+                        for row in connection.execute(
+                            """
+                            SELECT name FROM category_rules
+                            ORDER BY 1 COLLATE NOCASE
+                            """
+                        )
+                    ]
+                prepared = prepare_evaluation(
+                    connection,
+                    categories,
+                    model,
+                    transaction_ids=transaction_ids,
+                )
+        except ValueError as error:
+            if transaction_ids:
+                return jsonify(error=str(error)), 400
+            if str(error) == (
+                "No uncategorized posted transactions were found in the four "
+                "complete months."
+            ):
+                with db() as connection:
+                    if load_ollama_result(connection):
+                        return jsonify(
+                            ok=True,
+                            report_url=url_for("ollama_evaluation_report"),
+                        )
+            raise
+
+        started = time.monotonic()
+        details = []
+        applied = 0
+        result = evaluation_result(
+            prepared, details, 0, status="running"
+        )
+        with db() as connection:
+            save_ollama_result(connection, result)
+
+        try:
+            for rows in evaluation_batches(prepared):
+                batch_details = classify_evaluation_rows(prepared, rows)
+                next_details = [*details, *batch_details]
+                progress = evaluation_result(
+                    prepared,
+                    next_details,
+                    time.monotonic() - started,
+                    status="running",
+                    applied_transaction_count=applied,
+                )
+                with db() as connection:
+                    batch_result = {"details": batch_details}
+                    batch_applied = apply_categorized_suggestions(
+                        connection, batch_result
+                    )
+                    progress["applied_transaction_count"] += batch_applied
+                    save_ollama_result(connection, progress)
+                details = next_details
+                applied += batch_applied
+
+            result = evaluation_result(
+                prepared,
+                details,
+                time.monotonic() - started,
+                status="completed",
+                applied_transaction_count=applied,
+            )
+            with db() as connection:
+                create_recurring_category_rules(connection, result)
+                save_ollama_result(connection, result)
+        except Exception:
+            app.logger.exception("Local model categorization stopped early")
+            message = (
+                "The local model stopped before finishing. Completed groups "
+                "were saved; run local categorization again to continue."
+            )
+            result = evaluation_result(
+                prepared,
+                details,
+                time.monotonic() - started,
+                status="interrupted",
+                applied_transaction_count=applied,
+                error=message,
+            )
+            with db() as connection:
+                save_ollama_result(connection, result)
+            return jsonify(
+                ok=False,
+                error=message,
+                report_url=url_for("ollama_evaluation_report"),
+            )
+        return jsonify(ok=True, report_url=url_for("ollama_evaluation_report"))
+    except Exception as error:
+        app.logger.exception("Local model evaluation failed")
+        return jsonify(error=str(error)), 500
+    finally:
+        OLLAMA_EVALUATION_LOCK.release()
+
+
+@app.get("/local-ai/evaluation")
+def ollama_evaluation_report():
+    if not local_ai_enabled():
+        abort(404)
+    with db() as connection:
+        result = load_ollama_result(connection)
+        if (
+            result
+            and result.get("status") == "running"
+            and not OLLAMA_EVALUATION_LOCK.locked()
+        ):
+            result["status"] = "interrupted"
+            result["error"] = (
+                "The app restarted before this run finished. Completed groups "
+                "were saved; run local categorization again to continue."
+            )
+            save_ollama_result(connection, result)
+    if not result:
+        return redirect(url_for("transactions"))
+    context = page_context("transactions")
+    context.update(result=result, flow_types=FLOW_TYPES)
+    return render_template("llm_evaluation.html", **context)
 
 
 if __name__ == "__main__":

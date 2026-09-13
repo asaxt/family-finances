@@ -2,38 +2,51 @@ import calendar
 from datetime import date, datetime, timedelta
 
 
-EFFECTIVE_CATEGORY_SQL = "COALESCE(t.category_override, mr.category, t.category)"
+RAW_CATEGORY_SQL = "COALESCE(t.category_override, mr.category, t.category)"
+
+MATCHED_TRANSFER_SQL = f"""
+EXISTS (
+    SELECT 1
+    FROM transactions paired
+    JOIN accounts paired_account ON paired_account.id = paired.account_id
+    WHERE paired.id != t.id
+      AND paired.account_id != t.account_id
+      AND paired.amount = -t.amount
+      AND paired.pending = 0
+      AND paired_account.cash_flow_role = 'cash_flow'
+      AND paired_account.spending_enabled = 1
+      AND ABS(
+          JULIANDAY(paired.transacted_at) - JULIANDAY(t.transacted_at)
+      ) <= 5
+      AND LOWER(COALESCE(paired.category_override, paired.category)) IN (
+          'uncategorized', 'transfer'
+      )
+)
+"""
+
+EFFECTIVE_CATEGORY_SQL = f"""
+CASE
+    WHEN LOWER({RAW_CATEGORY_SQL}) = 'uncategorized'
+         AND ({MATCHED_TRANSFER_SQL}) THEN 'Transfer'
+    ELSE {RAW_CATEGORY_SQL}
+END
+"""
 
 EFFECTIVE_CASH_FLOW_SQL = f"""
 CASE
-    WHEN t.flow_override IS NOT NULL AND t.flow_override != ''
-        THEN t.flow_override
-    WHEN mr.flow_type IS NOT NULL THEN mr.flow_type
-    WHEN LOWER(COALESCE(t.merchant, '') || ' ' || t.description) LIKE '%venmo%'
-        THEN CASE WHEN t.amount < 0 THEN 'other_inflow' ELSE 'spending' END
     WHEN r.flow_type IS NOT NULL THEN r.flow_type
-    WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) LIKE 'transfer%'
-        THEN 'transfer'
-    WHEN a.type = 'credit'
-         AND LOWER({EFFECTIVE_CATEGORY_SQL}) = 'loan payments'
-        THEN 'transfer'
-    WHEN t.amount < 0
-        THEN CASE
-            WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) LIKE 'income%'
-                THEN 'earned_income'
-            ELSE 'other_inflow'
-        END
+    WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) = 'uncategorized' THEN NULL
+    WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) = 'income' THEN 'earned_income'
+    WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) IN (
+        'loan disbursements', 'reimbursed work travel'
+    ) THEN 'other_inflow'
+    WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) = 'transfer' THEN 'transfer'
     ELSE 'spending'
 END
 """
 
 SPEND_SQL = f"""
 CASE
-    WHEN t.amount <= 0 THEN 0
-    WHEN t.spending_override = 'exclude' THEN 0
-    WHEN t.spending_override = 'include' THEN t.amount
-    WHEN mr.spending_override = 'exclude' THEN 0
-    WHEN mr.spending_override = 'include' THEN t.amount
     WHEN a.spending_enabled = 1
          AND ({EFFECTIVE_CASH_FLOW_SQL}) = 'spending' THEN t.amount
     ELSE 0
@@ -41,24 +54,14 @@ END
 """
 
 SPEND_COUNT_SQL = f"""
-CASE WHEN ({SPEND_SQL}) > 0 THEN 1 ELSE 0 END
+CASE WHEN ({SPEND_SQL}) != 0 THEN 1 ELSE 0 END
 """
 
 CATEGORY_RULE_JOIN = f"""
 LEFT JOIN merchant_rules mr
   ON mr.account_id = t.account_id
- AND mr.match_type = CASE
-        WHEN NULLIF(TRIM(COALESCE(t.merchant, '')), '') IS NOT NULL
-            THEN 'merchant'
-        ELSE 'description'
-    END
- AND mr.match_value = TRIM(
-        CASE
-            WHEN NULLIF(TRIM(COALESCE(t.merchant, '')), '') IS NOT NULL
-                THEN t.merchant
-            ELSE t.description
-        END
-    ) COLLATE NOCASE
+ AND mr.match_type = 'description'
+ AND mr.match_value = TRIM(t.description) COLLATE NOCASE
 LEFT JOIN category_rules r
   ON r.name = {EFFECTIVE_CATEGORY_SQL} COLLATE NOCASE
 """
@@ -306,12 +309,12 @@ def rolling_spending_summary(
     current_rows = [
         row
         for row in rows
-        if row["date"] >= current_start.isoformat() and row["amount"] > 0
+        if row["date"] >= current_start.isoformat() and row["amount"] != 0
     ]
     prior_rows = [
         row
         for row in rows
-        if row["date"] <= prior_end.isoformat() and row["amount"] > 0
+        if row["date"] <= prior_end.isoformat() and row["amount"] != 0
     ]
     total = sum(row["amount"] for row in current_rows)
     prior_total = sum(row["amount"] for row in prior_rows)
@@ -368,7 +371,8 @@ def rolling_spending_summary(
         key=lambda row: row["amount"],
         reverse=True,
     )
-    largest_row = max(current_rows, key=lambda row: row["amount"], default=None)
+    purchases = [row for row in current_rows if row["amount"] > 0]
+    largest_row = max(purchases, key=lambda row: row["amount"], default=None)
     largest = (
         {
             "name": largest_row["merchant"],
@@ -438,33 +442,26 @@ def rolling_spending_summary(
 
 
 def effective_cash_flow_type(row):
-    if row["flow_override"]:
-        return row["flow_override"]
-    if row.get("merchant_rule_flow_type"):
-        return row["merchant_rule_flow_type"]
-    description = f"{row['merchant'] or ''} {row['description']}".lower()
-    if "venmo" in description:
-        return "other_inflow" if row["amount"] < 0 else "spending"
     if row["category_flow_type"]:
         return row["category_flow_type"]
     category = row["category"].lower()
-    if category.startswith("transfer"):
+    if category == "uncategorized":
+        return None
+    if category == "income":
+        return "earned_income"
+    if category in {"loan disbursements", "reimbursed work travel"}:
+        return "other_inflow"
+    if category == "transfer":
         return "transfer"
-    if row["account_type"] == "credit" and category == "loan payments":
-        return "transfer"
-    if row["amount"] < 0:
-        return "earned_income" if category.startswith("income") else "other_inflow"
     return "spending"
 
 
 def included_in_spending(row):
-    if row["amount"] <= 0:
-        return False
-    if row.get("spending_override"):
-        return row["spending_override"] == "include"
-    if row.get("merchant_rule_spending_override"):
-        return row["merchant_rule_spending_override"] == "include"
-    return bool(row.get("spending_enabled")) and effective_cash_flow_type(row) == "spending"
+    return (
+        row["amount"] != 0
+        and bool(row.get("spending_enabled"))
+        and effective_cash_flow_type(row) == "spending"
+    )
 
 
 def cash_flow_summary(
@@ -484,11 +481,10 @@ def cash_flow_summary(
         for row in connection.execute(
             f"""
             SELECT t.id, t.transacted_at AS date, t.amount, t.description,
-                   t.merchant, t.excluded, t.flow_override,
+                   t.merchant, t.excluded,
                    {EFFECTIVE_CATEGORY_SQL} AS category,
                    r.flow_type AS category_flow_type,
                    mr.id AS merchant_rule_id,
-                   mr.flow_type AS merchant_rule_flow_type,
                    a.type AS account_type, a.name AS account_name, a.mask,
                    c.owner_name, c.institution
             FROM transactions t
@@ -527,7 +523,7 @@ def cash_flow_summary(
             elif row["flow_type"] == "transfer":
                 key = "transfers_in" if row["amount"] < 0 else "transfers_out"
                 result[key] += abs(row["amount"])
-            elif row["flow_type"] == "spending" and row["amount"] > 0:
+            elif row["flow_type"] == "spending":
                 result["spending"] += row["amount"]
         result["total_inflows"] = result["income"] + result["other_inflows"]
         result["net"] = result["total_inflows"] - result["spending"]
@@ -585,7 +581,7 @@ def daily_trends(connection, account_id=None, connection_id=None):
         WHERE t.pending = 0 AND t.excluded = 0
           {account_sql}
         GROUP BY t.transacted_at, a.id, a.name, a.mask, c.owner_name
-        HAVING SUM({SPEND_SQL}) > 0
+        HAVING SUM({SPEND_SQL}) != 0
         ORDER BY t.transacted_at
         """,
         account_params,
@@ -605,7 +601,7 @@ def long_term_trends(connection, account_id=None, connection_id=None):
         WHERE t.pending = 0 AND t.excluded = 0
           {scope_sql}
         GROUP BY substr(t.transacted_at, 1, 7)
-        HAVING SUM({SPEND_SQL}) > 0
+        HAVING SUM({SPEND_SQL}) != 0
         ORDER BY month
         """,
         scope_params,
@@ -618,7 +614,7 @@ def long_term_trends(connection, account_id=None, connection_id=None):
         JOIN accounts a ON a.id = t.account_id
         {CATEGORY_RULE_JOIN}
         WHERE t.pending = 0 AND t.excluded = 0
-          AND ({SPEND_SQL}) > 0
+          AND ({SPEND_SQL}) != 0
           {scope_sql}
         """,
         scope_params,
@@ -795,7 +791,7 @@ def category_details(connection, month, account_id=None, connection_id=None):
             WHERE t.pending = 0 AND t.excluded = 0
               AND substr(t.transacted_at, 1, 7) = ?
               AND {EFFECTIVE_CATEGORY_SQL} = ?
-              AND {SPEND_SQL} > 0
+              AND {SPEND_SQL} != 0
               {account_sql}
             ORDER BY t.transacted_at DESC, ABS(t.amount) DESC
             LIMIT 5
@@ -823,6 +819,8 @@ def transaction_list(
     limit=None,
     reporting_scope="all",
     spending_only=False,
+    excluded_categories=None,
+    sort="date_desc",
 ):
     conditions = []
     params = []
@@ -844,16 +842,21 @@ def transaction_list(
     if reporting_scope == "cash_flow":
         conditions.append("a.cash_flow_role = 'cash_flow'")
     elif reporting_scope == "spending":
-        conditions.append(
-            "(a.spending_enabled = 1 "
-            "OR t.spending_override = 'include' "
-            "OR mr.spending_override = 'include')"
-        )
+        conditions.append("a.spending_enabled = 1")
     if spending_only:
-        conditions.append(f"({SPEND_SQL}) > 0")
+        conditions.append(f"({SPEND_SQL}) != 0")
     if category:
         conditions.append(f"{EFFECTIVE_CATEGORY_SQL} = ?")
         params.append(category)
+    excluded_categories = [
+        value.casefold() for value in (excluded_categories or []) if value
+    ]
+    if excluded_categories:
+        placeholders = ",".join("?" for _ in excluded_categories)
+        conditions.append(
+            f"LOWER({EFFECTIVE_CATEGORY_SQL}) NOT IN ({placeholders})"
+        )
+        params.extend(excluded_categories)
     if query:
         conditions.append(
             "(LOWER(t.description) LIKE ? OR LOWER(COALESCE(t.merchant, '')) LIKE ?)"
@@ -869,6 +872,27 @@ def transaction_list(
     if limit:
         params.append(limit)
 
+    order_sql = {
+        "date_desc": "t.transacted_at DESC, ABS(t.amount) DESC",
+        "date_asc": "t.transacted_at ASC, ABS(t.amount) DESC",
+        "amount_desc": "ABS(t.amount) DESC, t.transacted_at DESC",
+        "amount_asc": "ABS(t.amount) ASC, t.transacted_at DESC",
+        "merchant_asc": (
+            "LOWER(COALESCE(NULLIF(t.merchant, ''), t.description)) ASC, "
+            "t.transacted_at DESC"
+        ),
+        "merchant_desc": (
+            "LOWER(COALESCE(NULLIF(t.merchant, ''), t.description)) DESC, "
+            "t.transacted_at DESC"
+        ),
+        "category_asc": (
+            f"LOWER({EFFECTIVE_CATEGORY_SQL}) ASC, t.transacted_at DESC"
+        ),
+        "account_asc": (
+            "LOWER(c.owner_name) ASC, LOWER(a.name) ASC, t.transacted_at DESC"
+        ),
+    }.get(sort, "t.transacted_at DESC, ABS(t.amount) DESC")
+
     rows = connection.execute(
         f"""
         SELECT t.*, a.name AS account_name, a.mask, a.type AS account_type,
@@ -876,15 +900,13 @@ def transaction_list(
                c.owner_name,
                {EFFECTIVE_CATEGORY_SQL} AS effective_category,
                r.flow_type AS category_flow_type,
-               mr.id AS merchant_rule_id,
-               mr.flow_type AS merchant_rule_flow_type,
-               mr.spending_override AS merchant_rule_spending_override
+               mr.id AS merchant_rule_id
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         JOIN connections c ON c.id = a.connection_id
         {CATEGORY_RULE_JOIN}
         WHERE {where_sql}
-        ORDER BY t.transacted_at DESC, ABS(t.amount) DESC
+        ORDER BY {order_sql}
         {limit_sql}
         """,
         params,

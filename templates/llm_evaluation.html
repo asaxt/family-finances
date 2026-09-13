@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Local model evaluation{% endblock %}
+{% block eyebrow %}Development experiment{% endblock %}
+{% block heading %}Local model evaluation{% endblock %}
+{% block content %}
+<section class="panel">
+  <div class="panel-header">
+    <div>
+      <h2>{{ result.model }}</h2>
+      <p>{% if result.targeted %}Selected transactions{% else %}{{ result.date_from }}–{{ result.date_to }}{% endif %} · {{ result.sample_transaction_count }} exact-description groups covering {{ result.source_transaction_count }} transactions · {{ result.elapsed_seconds }} seconds</p>
+    </div>
+    <div><a class="button secondary" href="{{ url_for('transactions') }}">View transactions</a>
+      {% if result.status == "running" %}<span class="pill pending">{{ result.processed_group_count }} of {{ result.sample_transaction_count }} groups complete</span>
+      {% elif result.status == "interrupted" %}<span class="pill pending">Run paused</span>
+      {% else %}<span class="pill">{{ result.review_count }} group{{ "" if result.review_count == 1 else "s" }} need{{ "s" if result.review_count == 1 else "" }} review</span>{% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-header"><div><h2>Results</h2>
+    {% if result.status == "running" %}<p>The model is still working. Each completed batch is already saved, and you can safely leave this page.</p>
+    {% elif result.status == "interrupted" %}<p>{{ result.error }} {{ result.applied_transaction_count }} transaction{{ "" if result.applied_transaction_count == 1 else "s" }} remain categorized.</p>
+    {% else %}<p>{{ result.applied_transaction_count }} transaction{{ "" if result.applied_transaction_count == 1 else "s" }} categorized. Confidence 0 stays uncategorized; 1 is tentative; 2 is highly confident.</p>{% endif %}
+  </div></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Date</th><th>Transaction group</th><th>Account</th><th>Occurrences</th><th>Suggestion</th></tr></thead>
+      <tbody>
+        {% for item in result.details %}
+        <tr>
+          <td>{{ item.date }}</td>
+          <td><div class="transaction-name">{{ item.merchant or item.description }}</div>{% if item.merchant and item.description != item.merchant %}<div class="transaction-sub">{{ item.description }}</div>{% endif %}</td>
+          <td>{{ item.account_subtype or item.account_type }}</td>
+          <td>{{ item.occurrence_count }}<div class="transaction-sub">{{ item.first_date }}–{{ item.last_date }}</div></td>
+          <td>
+            {% if item.status == "categorized" %}<span class="pill">{{ item.category }}</span>{% if item.confidence is defined %} <span class="pill">Confidence {{ item.confidence }}</span>{% endif %}{% if item.applied_transaction_count %}<div class="transaction-sub">Applied to {{ item.applied_transaction_count }} transaction{{ "" if item.applied_transaction_count == 1 else "s" }}</div>{% else %}<div class="transaction-sub">Already categorized</div>{% endif %}{% if item.rule_match_count %}<div class="transaction-sub">Exact-description rule covers {{ item.rule_match_count }} matching record{{ "" if item.rule_match_count == 1 else "s" }}; individual user overrides remain exceptions.</div>{% endif %}
+            {% else %}<span class="pill pending">Uncategorized</span>{% if item.confidence is defined %} <span class="pill">Confidence {{ item.confidence }}</span>{% endif %}<div class="transaction-sub">{{ item.reason }}</div>{% endif %}
+          </td>
+        </tr>
+        {% else %}
+          <tr><td colspan="5" class="empty">The first batch is still being processed.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+{% if result.status == "running" %}<script>window.setTimeout(() => window.location.reload(), 15000);</script>{% endif %}
+{% endblock %}
