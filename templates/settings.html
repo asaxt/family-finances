@@ -24,14 +24,42 @@
     </form>
   </article>
 
+  <article class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Category labels</h2>
+        <p>Choose the labels available for transaction categorization.</p>
+      </div>
+      <span class="pill {{ 'configured' if category_setup_complete else 'pending' }}">{{ category_count }} saved</span>
+    </div>
+    <p class="security-note">Rename categories or change their deterministic cash-flow treatment at any time.</p>
+    <a class="button primary" href="{{ url_for('category_setup', next=url_for('settings_page')) }}">Manage category labels</a>
+  </article>
+
+  <article class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Local AI assistance</h2>
+        <p>Optionally use a model running on this computer to suggest transaction categories.</p>
+      </div>
+      <span class="pill {{ 'configured' if local_ai_enabled else 'pending' }}">{{ "On" if local_ai_enabled else "Off" }}</span>
+    </div>
+    <form class="settings-form" method="post" action="/api/local-ai">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label class="check-label"><input id="local-ai-enabled" type="checkbox" name="enabled" {{ "checked" if local_ai_enabled }}> Enable local AI categorization assistance</label>
+      <p class="security-note">When this is off, the app does not contact Ollama. Manual categories and saved rules continue to work normally.</p>
+      <button class="button primary" type="submit">Save AI setting</button>
+    </form>
+  </article>
+
   <article class="panel account-role-panel">
     <div class="panel-header">
       <div>
-        <h2>Account reporting roles</h2>
-        <p>Keep bank cash movement distinct from day-to-day spending analysis.</p>
+        <h2>Accounts included in reporting</h2>
+        <p>Included accounts contribute to both cash flow and category spending.</p>
       </div>
     </div>
-    {% if settings_error == "account_roles" %}<p class="form-message error">Account roles could not be saved. Reload the page and try again.</p>{% endif %}
+    {% if settings_error == "account_roles" %}<p class="form-message error">Included accounts could not be saved. Reload the page and try again.</p>{% endif %}
     {% if accounts %}
     <form class="settings-form" method="post" action="/api/account-roles">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -44,18 +72,18 @@
             <span class="sr-only">Reporting role for {{ account.name }}</span>
             <select name="reporting_purpose">
               {% for value, label in account_purposes.items() %}
-                {% if account.type == "depository" or value not in ["cash_flow", "both"] %}<option value="{{ value }}" {{ "selected" if account.reporting_purpose == value }}>{{ label }}</option>{% endif %}
+                <option value="{{ value }}" {{ "selected" if account.reporting_purpose == value }}>{{ label }}</option>
               {% endfor %}
             </select>
           </label>
         </div>
         {% endfor %}
       </div>
-      <p class="security-note">Bank cash flow only is the default for checking and savings. Spending analysis only is the default for credit cards. Choose both for a debit-card or single-account workflow; individual and recurring transaction settings can still handle exceptions.</p>
-      <button class="button primary" type="submit">Save account roles</button>
+      <p class="security-note">Credit-card purchases count when they happen. Matching payments between included accounts are transfers, so they do not count as additional spending.</p>
+      <button class="button primary" type="submit">Save included accounts</button>
     </form>
     {% else %}
-    <p class="security-note">Connect an institution before choosing account roles.</p>
+    <p class="security-note">Connect an institution before choosing included accounts.</p>
     {% endif %}
   </article>
 
@@ -181,5 +209,6 @@
 {% if settings_saved == "plaid_products" and plaid_product_status.has_warning %}<script>showNotice("Unexpected Plaid product access needs review.", "error");</script>{% endif %}
 {% if settings_saved == "plaid_products" and not plaid_product_status.has_warning %}<script>showNotice("Plaid product access matches Transactions only.");</script>{% endif %}
 {% if settings_saved == "app_name" %}<script>showNotice("App name updated.");</script>{% endif %}
-{% if settings_saved == "account_roles" %}<script>showNotice("Account reporting roles updated.");</script>{% endif %}
+{% if settings_saved == "account_roles" %}<script>showNotice("Included accounts updated.");</script>{% endif %}
+{% if settings_saved == "local_ai" %}<script>showNotice("Local AI setting updated.");</script>{% endif %}
 {% endblock %}

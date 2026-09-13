@@ -24,7 +24,7 @@ class RollingOverviewAnalyticsTests(unittest.TestCase):
                 cash_flow_role, spending_enabled
             ) VALUES (
                 'card-1', 1, 'Example', 'Everyday Card', '1234', 'credit',
-                'credit_card', 1
+                'cash_flow', 1
             )
             """
         )

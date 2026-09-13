@@ -22,7 +22,7 @@ class SchemaTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         try:
             schema.create_schema(connection)
-            self.assertEqual(schema.schema_version(connection), 8)
+            self.assertEqual(schema.schema_version(connection), 12)
             self.assertNotIn("budgets", schema.user_tables(connection))
             schema.validate_schema(connection)
             goal = connection.execute(
@@ -46,19 +46,316 @@ class SchemaTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_a_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         with database.connection() as connection:
-            connection.execute("PRAGMA user_version = 9")
+            connection.execute("PRAGMA user_version = 13")
         database.persist()
 
-        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 8"):
+        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 12"):
             schema.prepare_encrypted_database(database, key, auth_path)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
+
+    def test_version_nine_preserves_rules_and_allows_category_only_rules(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            schema.create_schema(connection)
+            connection.execute(
+                """
+                INSERT INTO connections (
+                    id, plaid_item_id, owner_name, institution, access_token,
+                    cursor, transactions_update_status, last_synced_at
+                ) VALUES (
+                    1, 'item-1', 'Household', 'Example Bank', 'test-token',
+                    'cursor-1', 'HISTORICAL_UPDATE_COMPLETE', '2026-08-31T12:00:00'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO accounts (
+                    id, connection_id, institution, name, type,
+                    cash_flow_role, spending_enabled
+                ) VALUES (
+                    'checking', 1, 'Example Bank', 'Checking', 'depository',
+                    'cash_flow', 1
+                )
+                """
+            )
+            connection.execute("DROP TABLE merchant_rules")
+            connection.execute(
+                """
+                CREATE TABLE merchant_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id TEXT NOT NULL,
+                    match_type TEXT NOT NULL CHECK (
+                        match_type IN ('merchant', 'description')
+                    ),
+                    match_value TEXT NOT NULL COLLATE NOCASE,
+                    category TEXT NOT NULL,
+                    flow_type TEXT NOT NULL CHECK (
+                        flow_type IN (
+                            'earned_income', 'other_inflow', 'spending', 'transfer'
+                        )
+                    ),
+                    spending_override TEXT CHECK (
+                        spending_override IN ('include', 'exclude')
+                    ),
+                    UNIQUE (account_id, match_type, match_value),
+                    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO merchant_rules (
+                    account_id, match_type, match_value, category, flow_type
+                ) VALUES ('checking', 'merchant', 'Existing', 'Transfers', 'transfer')
+                """
+            )
+            self.drop_version_eleven_column(connection)
+            connection.execute("PRAGMA user_version = 8")
+            connection.commit()
+
+            self.assertTrue(schema.migrate_schema(connection))
+            existing = connection.execute(
+                "SELECT category, flow_type FROM merchant_rules WHERE match_value = 'Existing'"
+            ).fetchone()
+            self.assertIsNone(existing)
+            connection.execute(
+                """
+                INSERT INTO merchant_rules (
+                    account_id, match_type, match_value, category, flow_type
+                ) VALUES ('checking', 'merchant', 'Example', 'Groceries', NULL)
+                """
+            )
+            category_only_flow = connection.execute(
+                "SELECT flow_type FROM merchant_rules WHERE match_value = 'Example'"
+            ).fetchone()[0]
+            self.assertIsNone(category_only_flow)
+            self.assertEqual(schema.schema_version(connection), 12)
+            schema.validate_schema(connection)
+        finally:
+            connection.close()
+
+    def test_version_ten_combines_transfer_labels_and_seeds_mappings(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            schema.create_schema(connection)
+            connection.execute(
+                """
+                INSERT INTO connections (id, owner_name, institution, access_token)
+                VALUES (1, 'Household', 'Example Bank', 'test-token')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO accounts (id, connection_id, institution, name, type)
+                VALUES ('checking', 1, 'Example Bank', 'Checking', 'depository')
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, pending,
+                    transacted_at, category, category_override
+                ) VALUES (?, 'checking', ?, 'USD', ?, 0, '2026-08-01', ?, ?)
+                """,
+                (
+                    ("out", 100, "Out", "Transfer Out", None),
+                    ("in", -100, "In", "Other", "Transfer In"),
+                ),
+            )
+            connection.execute(
+                "DELETE FROM category_rules WHERE name = 'Transfer' COLLATE NOCASE"
+            )
+            connection.execute(
+                "INSERT INTO category_rules VALUES ('Transfer Out', 'spending')"
+            )
+            self.drop_version_eleven_column(connection)
+            connection.execute("PRAGMA user_version = 9")
+            connection.commit()
+
+            self.assertTrue(schema.migrate_schema(connection))
+
+            categories = connection.execute(
+                "SELECT category, category_override FROM transactions ORDER BY id"
+            ).fetchall()
+            mappings = dict(connection.execute("SELECT name, flow_type FROM category_rules"))
+            self.assertEqual(
+                categories,
+                [("Uncategorized", None), ("Uncategorized", None)],
+            )
+            self.assertEqual(mappings["Income"], "earned_income")
+            self.assertEqual(mappings["Loan Disbursements"], "other_inflow")
+            self.assertEqual(mappings["Reimbursed Work Travel"], "other_inflow")
+            self.assertEqual(mappings["Transfer"], "transfer")
+            self.assertNotIn("Transfer Out", mappings)
+        finally:
+            connection.close()
+
+    def test_version_twelve_resets_existing_categorization(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            schema.create_schema(connection)
+            connection.execute(
+                """
+                INSERT INTO connections (id, owner_name, institution, access_token)
+                VALUES (1, 'Household', 'Example Bank', 'test-token')
+                """
+            )
+            connection.execute(
+                """
+                UPDATE connections
+                SET plaid_item_id = 'item-1', cursor = 'cursor-1',
+                    transactions_update_status = 'HISTORICAL_UPDATE_COMPLETE',
+                    last_synced_at = '2026-08-31T12:00:00'
+                WHERE id = 1
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO accounts (id, connection_id, institution, name, type)
+                VALUES ('checking', 1, 'Example Bank', 'Checking', 'depository')
+                """
+            )
+            connection.execute(
+                """
+                UPDATE accounts
+                SET cash_flow_role = 'credit_card', spending_enabled = 0
+                WHERE id = 'checking'
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, pending,
+                    transacted_at, category, category_override
+                ) VALUES (
+                    'older', 'checking', 1000, 'USD', 'SAMPLE CAFE', 0,
+                    '2024-01-01', 'Food And Drink', 'Groceries'
+                )
+                """
+            )
+            connection.execute(
+                """
+                UPDATE transactions
+                SET flow_override = 'spending', spending_override = 'include',
+                    excluded = 1
+                WHERE id = 'older'
+                """
+            )
+            connection.execute(
+                "INSERT INTO category_rules VALUES ('Groceries', 'spending')"
+            )
+            connection.execute(
+                """
+                INSERT INTO merchant_rules (
+                    account_id, match_type, match_value, category
+                ) VALUES ('checking', 'description', 'SAMPLE CAFE', 'Groceries')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO manual_accounts (
+                    id, institution, name, owner_name, classification,
+                    goal_eligible, reminder_enabled
+                ) VALUES (
+                    1, 'Retirement Provider', 'IRA', 'Household', 'post_tax', 1, 1
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO savings_snapshots (manual_account_id, amount, recorded_on)
+                VALUES (1, 123456, '2026-08-31')
+                """
+            )
+            connection.executemany(
+                "INSERT INTO settings (key, value) VALUES (?, ?)",
+                (
+                    ("overview_lookback_days", "45"),
+                    ("local_ai_enabled_v1", "1"),
+                    ("local_ai_result_v1", "saved-result"),
+                ),
+            )
+            self.drop_version_eleven_column(connection)
+            connection.execute("PRAGMA user_version = 10")
+            connection.commit()
+
+            self.assertTrue(schema.migrate_schema(connection))
+
+            transaction = connection.execute(
+                """
+                SELECT category, category_override, category_override_source,
+                       flow_override, spending_override, excluded
+                FROM transactions
+                WHERE id = 'older'
+                """
+            ).fetchone()
+            self.assertEqual(
+                tuple(transaction),
+                ("Uncategorized", None, None, None, None, 0),
+            )
+            plaid_connection = connection.execute(
+                """
+                SELECT plaid_item_id, access_token, cursor,
+                       transactions_update_status, last_synced_at
+                FROM connections WHERE id = 1
+                """
+            ).fetchone()
+            self.assertEqual(
+                tuple(plaid_connection),
+                (
+                    "item-1",
+                    "test-token",
+                    "cursor-1",
+                    "HISTORICAL_UPDATE_COMPLETE",
+                    "2026-08-31T12:00:00",
+                ),
+            )
+            account = connection.execute(
+                """
+                SELECT cash_flow_role, spending_enabled
+                FROM accounts WHERE id = 'checking'
+                """
+            ).fetchone()
+            self.assertEqual(tuple(account), ("cash_flow", 1))
+            savings = connection.execute(
+                """
+                SELECT a.name, a.classification, a.goal_eligible,
+                       s.amount, s.recorded_on
+                FROM manual_accounts a
+                JOIN savings_snapshots s ON s.manual_account_id = a.id
+                """
+            ).fetchone()
+            self.assertEqual(
+                tuple(savings),
+                ("IRA", "post_tax", 1, 123456, "2026-08-31"),
+            )
+            settings = dict(connection.execute("SELECT key, value FROM settings"))
+            self.assertEqual(settings["savings_goal_cents"], "1000000")
+            self.assertEqual(settings["overview_lookback_days"], "45")
+            self.assertEqual(settings["local_ai_enabled_v1"], "1")
+            self.assertNotIn("local_ai_result_v1", settings)
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT flow_type FROM category_rules WHERE name = 'Groceries'"
+                ).fetchone()[0],
+                "spending",
+            )
+            self.assertEqual(schema.schema_version(connection), 12)
+            schema.validate_schema(connection)
+        finally:
+            connection.close()
 
     def test_successful_migration_deletes_encrypted_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         changed = schema.prepare_encrypted_database(database, key, auth_path)
         self.assertTrue(changed)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 8)
+            self.assertEqual(schema.schema_version(connection), 12)
             account_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(accounts)")
             }
@@ -114,10 +411,10 @@ class SchemaTests(unittest.TestCase):
                     "SELECT id, flow_override, excluded FROM transactions"
                 )
             }
-        self.assertEqual(rows["income"], ("earned_income", 0))
-        self.assertEqual(rows["refund"], ("other_inflow", 0))
-        self.assertEqual(rows["payment"], ("transfer", 0))
-        self.assertEqual(rows["ignored"], (None, 1))
+        self.assertEqual(rows["income"], (None, 0))
+        self.assertEqual(rows["refund"], (None, 0))
+        self.assertEqual(rows["payment"], (None, 0))
+        self.assertEqual(rows["ignored"], (None, 0))
 
     def test_version_two_normalizes_venmo_categories_and_treatments(self):
         database, key, auth_path = self.encrypted_schema_zero()
@@ -171,11 +468,11 @@ class SchemaTests(unittest.TestCase):
             venmo_rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 8)
-        self.assertEqual(rows["venmo-in"], ("Venmo", None))
-        self.assertEqual(rows["venmo-out"], ("Venmo", None))
-        self.assertEqual(rows["bank-transfer"], (None, "transfer"))
-        self.assertEqual(rows["reviewed"], ("Venmo", None))
+            self.assertEqual(schema.schema_version(connection), 12)
+        self.assertEqual(rows["venmo-in"], (None, None))
+        self.assertEqual(rows["venmo-out"], (None, None))
+        self.assertEqual(rows["bank-transfer"], (None, None))
+        self.assertEqual(rows["reviewed"], (None, None))
         self.assertIsNone(venmo_rule)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -225,8 +522,8 @@ class SchemaTests(unittest.TestCase):
             rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 8)
-        self.assertEqual(tuple(transaction), ("Venmo", None))
+            self.assertEqual(schema.schema_version(connection), 12)
+        self.assertEqual(tuple(transaction), (None, None))
         self.assertIsNone(rule)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -248,7 +545,7 @@ class SchemaTests(unittest.TestCase):
                 row[1]
                 for row in connection.execute("PRAGMA table_info(merchant_rules)")
             }
-            self.assertEqual(schema.schema_version(connection), 8)
+            self.assertEqual(schema.schema_version(connection), 12)
         self.assertEqual(columns, schema.EXPECTED_COLUMNS["merchant_rules"])
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -265,7 +562,7 @@ class SchemaTests(unittest.TestCase):
 
         schema.prepare_encrypted_database(database, key, auth_path)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 8)
+            self.assertEqual(schema.schema_version(connection), 12)
             self.assertNotIn("budgets", schema.user_tables(connection))
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -303,11 +600,11 @@ class SchemaTests(unittest.TestCase):
                     "SELECT id, cash_flow_role FROM accounts ORDER BY id"
                 ).fetchall()
             )
-            self.assertEqual(schema.schema_version(connection), 8)
+            self.assertEqual(schema.schema_version(connection), 12)
         self.assertEqual(
             roles,
             {
-                "card": "credit_card",
+                "card": "cash_flow",
                 "checking": "cash_flow",
                 "investment": "other",
             },
@@ -348,9 +645,9 @@ class SchemaTests(unittest.TestCase):
                     "SELECT id, cash_flow_role, spending_enabled FROM accounts"
                 )
             }
-            self.assertEqual(schema.schema_version(connection), 8)
-        self.assertEqual(settings["checking"], ("cash_flow", 0))
-        self.assertEqual(settings["card"], ("credit_card", 1))
+            self.assertEqual(schema.schema_version(connection), 12)
+        self.assertEqual(settings["checking"], ("cash_flow", 1))
+        self.assertEqual(settings["card"], ("cash_flow", 1))
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
     def test_failed_migration_restores_original_and_keeps_backup(self):
@@ -424,12 +721,19 @@ class SchemaTests(unittest.TestCase):
 
     @staticmethod
     def drop_version_eight_columns(connection, merchant_rules=True):
+        SchemaTests.drop_version_eleven_column(connection)
         connection.execute("ALTER TABLE accounts DROP COLUMN spending_enabled")
         connection.execute("ALTER TABLE transactions DROP COLUMN spending_override")
         if merchant_rules:
             connection.execute(
                 "ALTER TABLE merchant_rules DROP COLUMN spending_override"
             )
+
+    @staticmethod
+    def drop_version_eleven_column(connection):
+        connection.execute(
+            "ALTER TABLE transactions DROP COLUMN category_override_source"
+        )
 
 
 if __name__ == "__main__":

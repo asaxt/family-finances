@@ -11,39 +11,18 @@
       <p>
         {% if date_from or date_to %}Showing {{ date_from or "the beginning" }} through {{ date_to or "today" }}
         {% else %}Showing your complete available transaction history{% endif %}
+        · <a class="text-link" href="{{ url_for('category_setup', next=url_for('transactions')) }}">Edit category labels</a>
       </p>
     </div>
-    <span class="pill">{{ profiles|length }} household member{{ "" if profiles|length == 1 else "s" }}</span>
+    <div>
+      {% if not category_setup_complete %}<a class="button primary" href="{{ url_for('category_setup', next=url_for('transactions')) }}">Set up categories</a>
+      {% elif local_ai_enabled and ollama_result_status == "running" %}<a class="button primary" href="{{ url_for('ollama_evaluation_report') }}">View categorization progress</a>
+      {% elif local_ai_enabled %}<button class="button primary" id="run-local-categorization" type="button">Categorize all uncategorized</button>{% endif %}
+      {% if local_ai_enabled and has_ollama_result and ollama_result_status != "running" %}<a class="button secondary" href="{{ url_for('ollama_evaluation_report') }}">View last results</a>{% endif %}
+      <span class="pill">{{ profiles|length }} household member{{ "" if profiles|length == 1 else "s" }}</span>
+    </div>
   </div>
-  <form class="transaction-tools transaction-filterbar" method="get">
-    <input type="hidden" name="account" value="{{ account_id or '' }}">
-    <input type="hidden" name="person" value="{{ connection_id or '' }}">
-    <label>From<input type="date" name="date_from" value="{{ date_from }}"></label>
-    <label>To<input type="date" name="date_to" value="{{ date_to }}"></label>
-    <label>Search<input class="search-input" type="search" name="q" value="{{ search_query }}" placeholder="Merchant or description"></label>
-    <label>Category
-      <select name="category">
-        <option value="">All categories</option>
-        {% for category in category_options %}<option value="{{ category }}" {{ "selected" if category == selected_category }}>{{ category }}</option>{% endfor %}
-      </select>
-    </label>
-    <label>Purpose
-      <select name="purpose">
-        <option value="spending" {{ "selected" if reporting_scope == "spending" }}>Spending analysis</option>
-        <option value="cash_flow" {{ "selected" if reporting_scope == "cash_flow" }}>Bank cash flow</option>
-        <option value="all" {{ "selected" if reporting_scope == "all" }}>All transactions</option>
-      </select>
-    </label>
-    <label>View
-      <select name="view">
-        <option value="active" {{ "selected" if transaction_view == "active" }}>Active transactions</option>
-        <option value="excluded" {{ "selected" if transaction_view == "excluded" }}>Excluded only</option>
-        <option value="all" {{ "selected" if transaction_view == "all" }}>Active and excluded</option>
-      </select>
-    </label>
-    <button class="button compact" type="submit">Apply filters</button>
-    {% if date_from or date_to or search_query or selected_category or transaction_view != "active" or reporting_scope != "spending" %}<a class="text-link clear-link" href="/transactions?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">Clear table filters</a>{% endif %}
-  </form>
+  {% if table_filters_active %}<div class="table-filter-status"><span class="pill">Filters or custom sorting active</span><a class="text-link" href="{{ url_for('transactions') }}">Clear table filters</a></div>{% endif %}
 
   <form id="bulk-transaction-form" class="bulk-action-bar" method="post" action="/api/transactions/bulk">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -53,29 +32,21 @@
     <input type="hidden" name="date_to" value="{{ date_to }}">
     <input type="hidden" name="return_q" value="{{ search_query }}">
     <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
+    {% for category in excluded_categories %}<input type="hidden" name="return_excluded_category" value="{{ category }}">{% endfor %}
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
     <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
+    <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
     <span><strong id="selected-count">0</strong> selected</span>
     <div class="bulk-fields">
       <select id="bulk-category" name="category_choice" aria-label="Change category">
         <option value="__no_change__">Category: no change</option>
-        <option value="">Use Plaid category</option>
+        <option value="">Uncategorized</option>
         {% for category in category_options %}<option value="{{ category }}">{{ category }}</option>{% endfor %}
         <option value="__new__">Create new category…</option>
       </select>
       <input id="bulk-new-category" name="new_category" maxlength="80" placeholder="New category" aria-label="New category name" hidden>
       <select id="bulk-new-category-flow" name="new_category_flow_type" aria-label="New category treatment" hidden>
-        {% for value, label in flow_types.items() %}<option value="{{ value }}" {{ "selected" if value == "other_inflow" }}>{{ label }}</option>{% endfor %}
-      </select>
-      <select name="flow_override" aria-label="Change cash-flow treatment">
-        <option value="__no_change__">Treatment: no change</option>
-        <option value="">Automatic</option>
-        {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
-      </select>
-      <select name="spending_override" aria-label="Change spending treatment">
-        <option value="__no_change__">Spending: no change</option>
-        <option value="">Automatic from account</option>
-        {% for value, label in spending_overrides.items() %}<option value="{{ value }}">{{ label }} in spending</option>{% endfor %}
+        {% for value, label in flow_types.items() %}<option value="{{ value }}" {{ "selected" if value == "spending" }}>{{ label }}</option>{% endfor %}
       </select>
       <select name="inclusion" aria-label="Change inclusion">
         <option value="__no_change__">Inclusion: no change</option>
@@ -88,9 +59,99 @@
     </div>
   </form>
 
+  <form id="transaction-table-filters" method="get">
   <div class="table-wrap transaction-table-wrap">
     <table>
-      <thead><tr><th class="select-column"><input id="select-all-transactions" type="checkbox" aria-label="Select every visible transaction"></th><th>Date</th><th>Merchant</th><th>Category</th><th>Cash flow</th><th>Spending</th><th>Account</th><th>Status</th><th class="currency">Amount</th><th>Review</th></tr></thead>
+      <thead><tr>
+        <th class="select-column"><input id="select-all-transactions" type="checkbox" aria-label="Select every visible transaction"></th>
+        <th>
+          <details class="table-filter">
+            <summary>Date <span>▾</span></summary>
+            <div class="table-filter-menu">
+              <label>From<input type="date" name="date_from" value="{{ date_from }}"></label>
+              <label>To<input type="date" name="date_to" value="{{ date_to }}"></label>
+              <label class="filter-choice"><input type="radio" name="sort" value="date_desc" {{ "checked" if transaction_sort == "date_desc" }}>Newest first</label>
+              <label class="filter-choice"><input type="radio" name="sort" value="date_asc" {{ "checked" if transaction_sort == "date_asc" }}>Oldest first</label>
+              <button class="button compact" type="submit">Apply</button>
+            </div>
+          </details>
+        </th>
+        <th>
+          <details class="table-filter">
+            <summary>Merchant <span>▾</span></summary>
+            <div class="table-filter-menu">
+              <label>Contains<input class="search-input" type="search" name="q" value="{{ search_query }}" placeholder="Merchant or description"></label>
+              <label class="filter-choice"><input type="radio" name="sort" value="merchant_asc" {{ "checked" if transaction_sort == "merchant_asc" }}>A to Z</label>
+              <label class="filter-choice"><input type="radio" name="sort" value="merchant_desc" {{ "checked" if transaction_sort == "merchant_desc" }}>Z to A</label>
+              <button class="button compact" type="submit">Apply</button>
+            </div>
+          </details>
+        </th>
+        <th>
+          <details class="table-filter category-table-filter">
+            <summary>Category <span>▾</span></summary>
+            <div class="table-filter-menu">
+              <label>Show only
+                <select name="category">
+                  <option value="">All categories</option>
+                  {% for category in category_options %}<option value="{{ category }}" {{ "selected" if category == selected_category }}>{{ category }}</option>{% endfor %}
+                </select>
+              </label>
+              <fieldset><legend>Hide selected categories</legend><div class="filter-check-list">
+                {% for category in category_options %}<label class="filter-choice"><input type="checkbox" name="exclude_category" value="{{ category }}" {{ "checked" if category in excluded_categories }}>{{ category }}</label>{% endfor %}
+              </div></fieldset>
+              <label class="filter-choice"><input type="radio" name="sort" value="category_asc" {{ "checked" if transaction_sort == "category_asc" }}>Sort A to Z</label>
+              <button class="button compact" type="submit">Apply</button>
+            </div>
+          </details>
+        </th>
+        <th>
+          <details class="table-filter">
+            <summary>Cash flow <span>▾</span></summary>
+            <div class="table-filter-menu">
+              <label>Table purpose
+                <select name="purpose">
+                  <option value="spending" {{ "selected" if reporting_scope == "spending" }}>Spending analysis</option>
+                  <option value="cash_flow" {{ "selected" if reporting_scope == "cash_flow" }}>Bank cash flow</option>
+                  <option value="all" {{ "selected" if reporting_scope == "all" }}>All transactions</option>
+                </select>
+              </label>
+              <button class="button compact" type="submit">Apply</button>
+            </div>
+          </details>
+        </th>
+        <th>
+          <details class="table-filter account-table-filter">
+            <summary>Account <span>▾</span></summary>
+            <div class="table-filter-menu">
+              <label>Connection<select name="person"><option value="">All connections</option>{% for profile in profiles %}<option value="{{ profile.id }}" {{ "selected" if profile.id == connection_id }}>{{ profile.owner_name }} · {{ profile.institution }}</option>{% endfor %}</select></label>
+              <label>Account<select name="account"><option value="">All accounts</option>{% for account in accounts %}{% if not connection_id or account.connection_id == connection_id %}<option value="{{ account.id }}" {{ "selected" if account.id == account_id }}>{{ account.owner_name }} · {{ account.name }} ····{{ account.mask }}</option>{% endif %}{% endfor %}</select></label>
+              <label class="filter-choice"><input type="radio" name="sort" value="account_asc" {{ "checked" if transaction_sort == "account_asc" }}>Sort by account</label>
+              <button class="button compact" type="submit">Apply</button>
+            </div>
+          </details>
+        </th>
+        <th>
+          <details class="table-filter">
+            <summary>Status <span>▾</span></summary>
+            <div class="table-filter-menu">
+              <label>Show<select name="view"><option value="active" {{ "selected" if transaction_view == "active" }}>Active only</option><option value="excluded" {{ "selected" if transaction_view == "excluded" }}>Excluded only</option><option value="all" {{ "selected" if transaction_view == "all" }}>Active and excluded</option></select></label>
+              <button class="button compact" type="submit">Apply</button>
+            </div>
+          </details>
+        </th>
+        <th class="currency">
+          <details class="table-filter amount-table-filter">
+            <summary>Amount <span>▾</span></summary>
+            <div class="table-filter-menu">
+              <label class="filter-choice"><input type="radio" name="sort" value="amount_desc" {{ "checked" if transaction_sort == "amount_desc" }}>Largest first</label>
+              <label class="filter-choice"><input type="radio" name="sort" value="amount_asc" {{ "checked" if transaction_sort == "amount_asc" }}>Smallest first</label>
+              <button class="button compact" type="submit">Apply</button>
+            </div>
+          </details>
+        </th>
+        <th>Review</th>
+      </tr></thead>
       <tbody>
         {% for transaction in transactions %}
           <tr class="{{ 'muted-row' if transaction.excluded and transaction_view != 'excluded' }}">
@@ -101,8 +162,7 @@
               {% if transaction.merchant and transaction.description != transaction.merchant %}<div class="transaction-sub">{{ transaction.description }}</div>{% endif %}
             </td>
             <td><span class="pill">{{ transaction.effective_category }}</span></td>
-            <td>{% if transaction.cash_flow_role == "cash_flow" %}<span class="pill">{{ flow_types[transaction.flow_type] }}</span>{% else %}<span class="transaction-sub">Not used</span>{% endif %}</td>
-            <td>{% if transaction.spending_included %}<span class="pill">Included</span>{% elif transaction.spending_enabled or transaction.spending_override or transaction.merchant_rule_spending_override %}<span class="transaction-sub">Not spending</span>{% else %}<span class="transaction-sub">Not used</span>{% endif %}</td>
+            <td>{% if transaction.cash_flow_role == "cash_flow" and transaction.flow_type %}<span class="pill">{{ flow_types[transaction.flow_type] }}</span>{% elif transaction.cash_flow_role == "cash_flow" %}<span class="transaction-sub">Unassigned</span>{% else %}<span class="transaction-sub">Not used</span>{% endif %}</td>
             <td>{{ transaction.owner_name }} · {{ transaction.account_name }}<div class="transaction-sub">····{{ transaction.mask }}</div></td>
             <td>
               {% if transaction.excluded %}<span class="pill excluded">Excluded</span>
@@ -116,20 +176,20 @@
                 type="button"
                 data-id="{{ transaction.id }}"
                 data-name="{{ transaction.merchant or transaction.description }}"
-                data-override="{{ transaction.category_override or '' }}"
-                data-flow-type="{{ transaction.flow_type }}"
-                data-spending-override="{{ transaction.spending_override or '' }}"
+                data-category="{{ '' if transaction.effective_category == 'Uncategorized' else transaction.effective_category }}"
+                data-flow-type="{{ transaction.flow_type or '' }}"
                 data-recurring-rule="{{ 1 if transaction.merchant_rule_id else 0 }}"
                 data-excluded="{{ transaction.excluded }}"
               >Review</button>
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="10" class="empty">No transactions match these filters.</td></tr>
+          <tr><td colspan="9" class="empty">No transactions match these filters.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+  </form>
 </section>
 
 <dialog id="transaction-review-dialog" class="connection-dialog transaction-review-dialog">
@@ -145,34 +205,26 @@
     <input type="hidden" name="date_to" value="{{ date_to }}">
     <input type="hidden" name="return_q" value="{{ search_query }}">
     <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
+    {% for category in excluded_categories %}<input type="hidden" name="return_excluded_category" value="{{ category }}">{% endfor %}
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
     <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
+    <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
     <label>Category
       <select id="review-category" name="category_choice">
-        <option value="">Use Plaid category</option>
+        <option value="">Uncategorized</option>
         {% for category in category_options %}<option value="{{ category }}">{{ category }}</option>{% endfor %}
         <option value="__new__">Create new category…</option>
       </select>
     </label>
     <label id="review-new-category-label" hidden>New category<input id="review-new-category" name="new_category" maxlength="80"></label>
-    <label id="review-new-category-flow-label" hidden>Default treatment
-      <select id="review-new-category-flow" name="new_category_flow_type">
-        {% for value, label in flow_types.items() %}<option value="{{ value }}" {{ "selected" if value == "other_inflow" }}>{{ label }}</option>{% endfor %}
-      </select>
-    </label>
-    <label>Cash-flow treatment
-      <select id="review-flow-override" name="flow_override">
+    <label>Category cash-flow treatment
+      <select id="review-category-flow" name="category_flow_type" required>
+        <option value="" disabled>Choose treatment</option>
         {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
       </select>
     </label>
-    <label>Spending analysis
-      <select id="review-spending-override" name="spending_override">
-        <option value="">Automatic from account purpose</option>
-        {% for value, label in spending_overrides.items() %}<option value="{{ value }}">{{ label }} in spending</option>{% endfor %}
-      </select>
-    </label>
-    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category, cash-flow treatment, and spending treatment for matching transactions on this account</label>
-    <p class="transaction-sub">This applies to existing and future matches. Clear it and save to remove an existing recurring rule.</p>
+    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category for the exact same description on this account</label>
+    <p class="transaction-sub">This applies to existing and future exact-description matches. Clear it and save to remove the rule.</p>
     <label class="check-label"><input id="review-excluded" type="checkbox" name="excluded"> Exclude from all reporting</label>
     <button class="button primary" type="submit">Save changes</button>
   </form>
@@ -186,10 +238,7 @@
   const reviewCategory = document.querySelector("#review-category");
   const reviewNewCategory = document.querySelector("#review-new-category");
   const reviewNewCategoryLabel = document.querySelector("#review-new-category-label");
-  const reviewNewCategoryFlowLabel = document.querySelector("#review-new-category-flow-label");
-  const reviewNewCategoryFlow = document.querySelector("#review-new-category-flow");
-  const reviewFlowOverride = document.querySelector("#review-flow-override");
-  const reviewSpendingOverride = document.querySelector("#review-spending-override");
+  const reviewCategoryFlow = document.querySelector("#review-category-flow");
   const reviewRememberMatch = document.querySelector("#review-remember-match");
   const reviewExcluded = document.querySelector("#review-excluded");
   const bulkCategory = document.querySelector("#bulk-category");
@@ -199,6 +248,47 @@
   const selectAll = document.querySelector("#select-all-transactions");
   const bulkButtons = document.querySelectorAll(".bulk-button");
   const selectedCount = document.querySelector("#selected-count");
+  const runLocalCategorization = document.querySelector("#run-local-categorization");
+
+  if (runLocalCategorization) {
+    runLocalCategorization.addEventListener("click", async () => {
+      const transactionIds = transactionCheckboxes
+        .filter(checkbox => checkbox.checked)
+        .map(checkbox => checkbox.value);
+      runLocalCategorization.disabled = true;
+      runLocalCategorization.textContent = "Categorizing locally…";
+      try {
+        const response = await fetch("/api/local-ai/evaluation", {
+          method: "POST",
+          headers: {"Content-Type": "application/json", "X-CSRF-Token": csrfToken},
+          body: JSON.stringify({
+            model: "qwen3.8:27b",
+            transaction_ids: transactionIds
+          })
+        });
+        const result = await response.json();
+        if (result.setup_url) {
+          location.href = result.setup_url;
+          return;
+        }
+        if (!response.ok) throw new Error(result.error || "Categorization could not be completed.");
+        location.href = result.report_url;
+      } catch (error) {
+        showNotice(error.message, "error");
+        runLocalCategorization.disabled = false;
+        updateLocalCategorizationLabel();
+      }
+    });
+  }
+
+  document.querySelectorAll(".table-filter").forEach(filter => {
+    filter.addEventListener("toggle", () => {
+      if (!filter.open) return;
+      document.querySelectorAll(".table-filter[open]").forEach(other => {
+        if (other !== filter) other.open = false;
+      });
+    });
+  });
 
   function updateBulkSelection() {
     const count = transactionCheckboxes.filter(checkbox => checkbox.checked).length;
@@ -207,6 +297,14 @@
     selectAll.checked = count > 0 && count === transactionCheckboxes.length;
     selectAll.indeterminate = count > 0 && count < transactionCheckboxes.length;
     transactionCheckboxes.forEach(checkbox => checkbox.closest("tr").classList.toggle("selected-row", checkbox.checked));
+    updateLocalCategorizationLabel();
+  }
+  function updateLocalCategorizationLabel() {
+    if (!runLocalCategorization || runLocalCategorization.disabled) return;
+    const count = transactionCheckboxes.filter(checkbox => checkbox.checked).length;
+    runLocalCategorization.textContent = count
+      ? `Categorize ${count} selected`
+      : "Categorize all uncategorized";
   }
   selectAll.addEventListener("change", () => {
     transactionCheckboxes.forEach(checkbox => checkbox.checked = selectAll.checked);
@@ -217,14 +315,9 @@
   function showReviewNewCategory() {
     const show = reviewCategory.value === "__new__";
     reviewNewCategoryLabel.hidden = !show;
-    reviewNewCategoryFlowLabel.hidden = !show;
     reviewNewCategory.required = show;
-    if (show) reviewFlowOverride.value = reviewNewCategoryFlow.value;
   }
   reviewCategory.addEventListener("change", showReviewNewCategory);
-  reviewNewCategoryFlow.addEventListener("change", () => {
-    if (reviewCategory.value === "__new__") reviewFlowOverride.value = reviewNewCategoryFlow.value;
-  });
   bulkCategory.addEventListener("change", () => {
     const show = bulkCategory.value === "__new__";
     bulkNewCategory.hidden = !show;
@@ -236,10 +329,9 @@
     button.addEventListener("click", () => {
       document.querySelector("#review-transaction-name").textContent = button.dataset.name;
       reviewForm.action = `/api/transaction/${encodeURIComponent(button.dataset.id)}`;
-      reviewCategory.value = button.dataset.override;
+      reviewCategory.value = button.dataset.category;
       reviewNewCategory.value = "";
-      reviewFlowOverride.value = button.dataset.flowType;
-      reviewSpendingOverride.value = button.dataset.spendingOverride;
+      reviewCategoryFlow.value = button.dataset.flowType || "spending";
       reviewRememberMatch.checked = button.dataset.recurringRule === "1";
       reviewExcluded.checked = button.dataset.excluded === "1";
       showReviewNewCategory();

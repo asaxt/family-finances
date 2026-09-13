@@ -5,11 +5,10 @@
 
 {% block content %}
 {% if cash_flow_error == "lookback" %}<p class="form-message error overview-page-message">Choose a lookback between 1 and {{ max_lookback_days }} days.</p>{% endif %}
-{% if cash_flow_error == "classification" %}<p class="form-message error overview-page-message">Choose a valid cash-flow classification.</p>{% endif %}
 {% if cash_flow_accounts %}
-<p class="cash-flow-scope-note">Cash flow uses {{ cash_flow_accounts | length }} designated account{{ "" if cash_flow_accounts | length == 1 else "s" }}. Credit-card transactions remain available in spending reports. <a href="{{ url_for('settings_page') }}">Manage account roles</a></p>
+<p class="cash-flow-scope-note">Cash flow and category spending use {{ cash_flow_accounts | length }} included account{{ "" if cash_flow_accounts | length == 1 else "s" }}. Matching movements between them are transfers. <a href="{{ url_for('settings_page') }}">Manage included accounts</a></p>
 {% else %}
-<p class="form-message development overview-page-message">No cash-flow accounts are selected. <a href="{{ url_for('settings_page') }}">Choose account roles in Settings.</a></p>
+<p class="form-message development overview-page-message">No accounts are included in reporting. <a href="{{ url_for('settings_page') }}">Choose included accounts in Settings.</a></p>
 {% endif %}
 <section class="metric-grid cash-flow-metrics">
   <article class="metric-card hero">
@@ -45,10 +44,10 @@
 </section>
 
 <section class="panel recent-panel">
-  <div class="panel-header"><div><h2>Money in and transfers</h2><p>Adjust how deposits, reimbursements, and account transfers are treated</p></div></div>
+  <div class="panel-header"><div><h2>Money in and transfers</h2><p>Cash-flow treatment follows each transaction category</p></div></div>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Date</th><th>Description</th><th>Account</th><th>Current treatment</th><th class="currency">Amount</th><th>Change</th></tr></thead>
+      <thead><tr><th>Date</th><th>Description</th><th>Account</th><th>Current treatment</th><th class="currency">Amount</th></tr></thead>
       <tbody>
       {% for item in cash_flow.activity %}
         <tr>
@@ -57,19 +56,8 @@
           <td>{{ item.institution }} · {{ item.account_name }} ····{{ item.mask }}</td>
           <td><span class="pill">{{ flow_types[item.flow_type] }}</span></td>
           <td class="currency {{ 'credit' if item.amount < 0 }}">{% if item.amount < 0 %}+{% else %}−{% endif %}{{ item.display_amount|money }}</td>
-          <td>
-            <form class="cash-flow-edit" method="post" action="/api/cash-flow/{{ item.id }}">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-              <select name="flow_type">
-                <option value="" {{ "selected" if not item.flow_override }}>Automatic</option>
-                {% for value, label in flow_types.items() %}<option value="{{ value }}" {{ "selected" if item.flow_override == value }}>{{ label }}</option>{% endfor %}
-                <option value="excluded">Excluded</option>
-              </select>
-              <button class="button compact" type="submit">Save</button>
-            </form>
-          </td>
         </tr>
-      {% else %}<tr><td colspan="6" class="empty">No money-in or transfer activity found in this lookback.</td></tr>{% endfor %}
+      {% else %}<tr><td colspan="5" class="empty">No money-in or transfer activity found in this lookback.</td></tr>{% endfor %}
       </tbody>
     </table>
   </div>

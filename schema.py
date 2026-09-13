@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 12
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -101,11 +101,16 @@ VERSION_SEVEN_COLUMNS = {
     **VERSION_SIX_COLUMNS,
     "accounts": VERSION_SIX_COLUMNS["accounts"] | {"cash_flow_role"},
 }
-EXPECTED_COLUMNS = {
+VERSION_TEN_COLUMNS = {
     **VERSION_SEVEN_COLUMNS,
     "accounts": VERSION_SEVEN_COLUMNS["accounts"] | {"spending_enabled"},
     "transactions": VERSION_SEVEN_COLUMNS["transactions"] | {"spending_override"},
     "merchant_rules": VERSION_SEVEN_COLUMNS["merchant_rules"] | {"spending_override"},
+}
+EXPECTED_COLUMNS = {
+    **VERSION_TEN_COLUMNS,
+    "transactions": VERSION_TEN_COLUMNS["transactions"]
+    | {"category_override_source"},
 }
 
 
@@ -183,7 +188,23 @@ def _validate_version_seven(connection):
 
 
 def _validate_version_eight(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 8)
+    _validate_columns(connection, VERSION_TEN_COLUMNS, 8)
+
+
+def _validate_version_nine(connection):
+    _validate_columns(connection, VERSION_TEN_COLUMNS, 9)
+
+
+def _validate_version_ten(connection):
+    _validate_columns(connection, VERSION_TEN_COLUMNS, 10)
+
+
+def _validate_version_eleven(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 11)
+
+
+def _validate_version_twelve(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 12)
 
 
 def _migrate_zero_to_one(connection):
@@ -362,6 +383,138 @@ def _migrate_seven_to_eight(connection):
     )
 
 
+def _migrate_eight_to_nine(connection):
+    connection.execute(
+        """
+        CREATE TABLE merchant_rules_v9 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            match_type TEXT NOT NULL CHECK (
+                match_type IN ('merchant', 'description')
+            ),
+            match_value TEXT NOT NULL COLLATE NOCASE,
+            category TEXT NOT NULL,
+            flow_type TEXT CHECK (
+                flow_type IN (
+                    'earned_income', 'other_inflow', 'spending', 'transfer'
+                )
+            ),
+            spending_override TEXT CHECK (
+                spending_override IN ('include', 'exclude')
+            ),
+            UNIQUE (account_id, match_type, match_value),
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO merchant_rules_v9 (
+            id, account_id, match_type, match_value, category, flow_type,
+            spending_override
+        )
+        SELECT id, account_id, match_type, match_value, category, flow_type,
+               spending_override
+        FROM merchant_rules
+        """
+    )
+    connection.execute("DROP TABLE merchant_rules")
+    connection.execute("ALTER TABLE merchant_rules_v9 RENAME TO merchant_rules")
+
+
+def _migrate_nine_to_ten(connection):
+    connection.execute(
+        """
+        UPDATE transactions SET category = 'Transfer'
+        WHERE category COLLATE NOCASE IN ('Transfer In', 'Transfer Out')
+        """
+    )
+    connection.execute(
+        """
+        UPDATE transactions SET category_override = 'Transfer'
+        WHERE category_override COLLATE NOCASE IN ('Transfer In', 'Transfer Out')
+        """
+    )
+    connection.execute(
+        """
+        UPDATE merchant_rules SET category = 'Transfer'
+        WHERE category COLLATE NOCASE IN ('Transfer In', 'Transfer Out')
+        """
+    )
+    connection.execute(
+        """
+        DELETE FROM category_rules
+        WHERE name COLLATE NOCASE IN ('Transfer In', 'Transfer Out')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO category_rules (name, flow_type) VALUES ('Transfer', 'transfer')
+        ON CONFLICT(name) DO UPDATE SET flow_type = excluded.flow_type
+        """
+    )
+    connection.executemany(
+        """
+        INSERT INTO category_rules (name, flow_type) VALUES (?, ?)
+        ON CONFLICT(name) DO NOTHING
+        """,
+        (
+            ("Income", "earned_income"),
+            ("Loan Disbursements", "other_inflow"),
+            ("Reimbursed Work Travel", "other_inflow"),
+        ),
+    )
+
+
+def _migrate_ten_to_eleven(connection):
+    connection.execute(
+        """
+        ALTER TABLE transactions ADD COLUMN category_override_source TEXT
+        CHECK (category_override_source IN ('user', 'model'))
+        """
+    )
+    connection.execute(
+        """
+        UPDATE transactions SET category_override_source = 'model'
+        WHERE category_override IS NOT NULL
+        """
+    )
+
+
+def _migrate_eleven_to_twelve(connection):
+    connection.execute(
+        """
+        UPDATE transactions
+        SET category = 'Uncategorized',
+            category_override = NULL,
+            category_override_source = NULL,
+            flow_override = NULL,
+            spending_override = NULL,
+            excluded = 0
+        """
+    )
+    connection.execute("DELETE FROM merchant_rules")
+    connection.execute(
+        """
+        UPDATE accounts
+        SET cash_flow_role = CASE
+                WHEN type IN ('depository', 'credit') THEN 'cash_flow'
+                ELSE 'other'
+            END,
+            spending_enabled = CASE
+                WHEN type IN ('depository', 'credit') THEN 1
+                ELSE 0
+            END
+        """
+    )
+    connection.execute(
+        """
+        DELETE FROM settings
+        WHERE key IN ('development_ollama_result_v1', 'local_ai_result_v1')
+        """
+    )
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
@@ -372,6 +525,10 @@ VALIDATORS = {
     6: _validate_version_six,
     7: _validate_version_seven,
     8: _validate_version_eight,
+    9: _validate_version_nine,
+    10: _validate_version_ten,
+    11: _validate_version_eleven,
+    12: _validate_version_twelve,
 }
 MIGRATIONS = {
     0: _migrate_zero_to_one,
@@ -382,6 +539,10 @@ MIGRATIONS = {
     5: _migrate_five_to_six,
     6: _migrate_six_to_seven,
     7: _migrate_seven_to_eight,
+    8: _migrate_eight_to_nine,
+    9: _migrate_nine_to_ten,
+    10: _migrate_ten_to_eleven,
+    11: _migrate_eleven_to_twelve,
 }
 
 
@@ -457,6 +618,9 @@ def create_schema(connection):
                 transacted_at TEXT NOT NULL,
                 category TEXT NOT NULL,
                 category_override TEXT,
+                category_override_source TEXT CHECK (
+                    category_override_source IN ('user', 'model')
+                ),
                 flow_override TEXT CHECK (
                     flow_override IN (
                         'earned_income', 'other_inflow', 'spending', 'transfer'
@@ -483,7 +647,7 @@ def create_schema(connection):
                 ),
                 match_value TEXT NOT NULL COLLATE NOCASE,
                 category TEXT NOT NULL,
-                flow_type TEXT NOT NULL CHECK (
+                flow_type TEXT CHECK (
                     flow_type IN (
                         'earned_income', 'other_inflow', 'spending', 'transfer'
                     )
@@ -519,6 +683,11 @@ def create_schema(connection):
             );
             INSERT INTO settings (key, value)
             VALUES ('savings_goal_cents', '{DEFAULT_SAVINGS_GOAL}');
+            INSERT INTO category_rules (name, flow_type) VALUES
+                ('Income', 'earned_income'),
+                ('Loan Disbursements', 'other_inflow'),
+                ('Reimbursed Work Travel', 'other_inflow'),
+                ('Transfer', 'transfer');
             PRAGMA user_version = {CURRENT_SCHEMA_VERSION};
 
             COMMIT;
