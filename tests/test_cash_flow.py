@@ -116,7 +116,7 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         initial = cash_flow_summary(
             self.connection, lookback_days=30, today=date(2026, 8, 15)
         )
-        self.assertEqual(initial["other_inflows"], 12_000)
+        self.assertEqual(initial["income"], 12_000)
 
         self.connection.execute(
             "UPDATE transactions SET flow_override = 'transfer' WHERE id = 'payback'"
@@ -124,7 +124,7 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         overridden = cash_flow_summary(
             self.connection, lookback_days=30, today=date(2026, 8, 15)
         )
-        self.assertEqual(overridden["other_inflows"], 12_000)
+        self.assertEqual(overridden["income"], 12_000)
         self.assertEqual(overridden["transfers_in"], 0)
 
     def test_spending_pages_share_cash_flow_classification(self):
@@ -326,8 +326,8 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         summary = cash_flow_summary(
             self.connection, lookback_days=30, today=date(2026, 8, 15)
         )
-        self.assertEqual(summary["income"], 100_000)
-        self.assertEqual(summary["other_inflows"], 70_000)
+        self.assertEqual(summary["income"], 170_000)
+        self.assertEqual(summary["other_inflows"], 0)
         self.assertEqual(summary["spending"], 4_000)
 
 

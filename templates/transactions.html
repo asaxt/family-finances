@@ -217,7 +217,7 @@
       </select>
     </label>
     <label id="review-new-category-label" hidden>New category<input id="review-new-category" name="new_category" maxlength="80"></label>
-    <label>Category cash-flow treatment
+    <label>Category cash-flow treatment (applies to all transactions in this category)
       <select id="review-category-flow" name="category_flow_type" required>
         <option value="" disabled>Choose treatment</option>
         {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
@@ -312,10 +312,12 @@
   });
   transactionCheckboxes.forEach(checkbox => checkbox.addEventListener("change", updateBulkSelection));
 
+  const categoryFlowDefaults = {{ category_flow_defaults|tojson }};
   function showReviewNewCategory() {
     const show = reviewCategory.value === "__new__";
     reviewNewCategoryLabel.hidden = !show;
     reviewNewCategory.required = show;
+    reviewCategoryFlow.value = categoryFlowDefaults[reviewCategory.value] || "spending";
   }
   reviewCategory.addEventListener("change", showReviewNewCategory);
   bulkCategory.addEventListener("change", () => {
@@ -331,7 +333,6 @@
       reviewForm.action = `/api/transaction/${encodeURIComponent(button.dataset.id)}`;
       reviewCategory.value = button.dataset.category;
       reviewNewCategory.value = "";
-      reviewCategoryFlow.value = button.dataset.flowType || "spending";
       reviewRememberMatch.checked = button.dataset.recurringRule === "1";
       reviewExcluded.checked = button.dataset.excluded === "1";
       showReviewNewCategory();

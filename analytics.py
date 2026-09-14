@@ -34,12 +34,13 @@ END
 
 EFFECTIVE_CASH_FLOW_SQL = f"""
 CASE
+    WHEN r.flow_type = 'other_inflow' THEN 'earned_income'
     WHEN r.flow_type IS NOT NULL THEN r.flow_type
     WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) = 'uncategorized' THEN NULL
     WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) = 'income' THEN 'earned_income'
     WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) IN (
         'loan disbursements', 'reimbursed work travel'
-    ) THEN 'other_inflow'
+    ) THEN 'earned_income'
     WHEN LOWER({EFFECTIVE_CATEGORY_SQL}) = 'transfer' THEN 'transfer'
     ELSE 'spending'
 END
@@ -443,6 +444,8 @@ def rolling_spending_summary(
 
 def effective_cash_flow_type(row):
     if row["category_flow_type"]:
+        if row["category_flow_type"] == "other_inflow":
+            return "earned_income"
         return row["category_flow_type"]
     category = row["category"].lower()
     if category == "uncategorized":
@@ -450,7 +453,7 @@ def effective_cash_flow_type(row):
     if category == "income":
         return "earned_income"
     if category in {"loan disbursements", "reimbursed work travel"}:
-        return "other_inflow"
+        return "earned_income"
     if category == "transfer":
         return "transfer"
     return "spending"

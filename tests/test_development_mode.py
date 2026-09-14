@@ -92,8 +92,8 @@ class DevelopmentModeTests(unittest.TestCase):
                 ],
                 "flow_type": [
                     "earned_income",
-                    "other_inflow",
-                    "other_inflow",
+                    "earned_income",
+                    "earned_income",
                     "transfer",
                 ],
             },
@@ -289,8 +289,8 @@ class DevelopmentModeTests(unittest.TestCase):
                 ],
                 "flow_type": [
                     "earned_income",
-                    "other_inflow",
-                    "other_inflow",
+                    "earned_income",
+                    "earned_income",
                     "transfer",
                     "spending",
                     "spending",

@@ -114,8 +114,7 @@ CATEGORY_SUGGESTIONS = (
     "Transportation",
 )
 FLOW_TYPES = {
-    "earned_income": "Earned income",
-    "other_inflow": "Other money in",
+    "earned_income": "Money in",
     "spending": "Money out",
     "transfer": "Transfer",
 }
@@ -1317,6 +1316,14 @@ def transactions():
                 """
             )
         ]
+        context["category_flow_defaults"] = {
+            name: default_category_flow_type(name)
+            for name in context["category_options"]
+            if name
+        }
+        context["category_flow_defaults"].update(
+            dict(connection.execute("SELECT name, flow_type FROM category_rules"))
+        )
         context["local_ai_enabled"] = local_ai_enabled(connection)
         ollama_result = (
             load_ollama_result(connection) if context["local_ai_enabled"] else None
@@ -1801,7 +1808,7 @@ def default_category_flow_type(name):
     if normalized == "income":
         return "earned_income"
     if normalized in {"loan disbursements", "reimbursed work travel"}:
-        return "other_inflow"
+        return "earned_income"
     if normalized == "transfer":
         return "transfer"
     return "spending"

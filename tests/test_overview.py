@@ -69,14 +69,14 @@ class OverviewTests(unittest.TestCase):
         self.assertIn(b"Savings snapshot", overview.data)
         self.assertIn(b"Bank cash flow", overview.data)
         self.assertLess(
-            overview.data.index(b"Earned income"),
+            overview.data.index(b"Money in"),
             overview.data.index(b"Net cash flow"),
         )
         self.assertLess(
             overview.data.index(b"Net cash flow"),
             overview.data.index(b"Tracked spending"),
         )
-        self.assertEqual(overview.data.count(b'<article class="metric-card'), 8)
+        self.assertEqual(overview.data.count(b'<article class="metric-card'), 7)
 
     def test_dashboard_layout_cleanup_and_recent_category_transactions(self):
         month = date.today().strftime("%Y-%m")
