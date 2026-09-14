@@ -2,7 +2,7 @@ import json
 import time
 import urllib.request
 from collections import Counter, defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from analytics import CATEGORY_RULE_JOIN, RAW_CATEGORY_SQL
 
@@ -10,17 +10,6 @@ from analytics import CATEGORY_RULE_JOIN, RAW_CATEGORY_SQL
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 TRANSFER_CATEGORY = "Transfer"
 EVALUATION_BATCH_SIZE = 5
-
-
-def complete_month_window(today=None, month_count=4):
-    today = today or date.today()
-    end = today.replace(day=1) - timedelta(days=1)
-    start_month = end.month - month_count + 1
-    start_year = end.year
-    while start_month <= 0:
-        start_month += 12
-        start_year -= 1
-    return date(start_year, start_month, 1), end
 
 
 def normalized_description(value):
@@ -62,11 +51,11 @@ def transfer_matches(rows, maximum_days=5):
 
 
 def representative_transactions(connection, today=None, transaction_ids=None):
-    start, end = complete_month_window(today)
+    start = end = today or date.today()
     transaction_ids = list(dict.fromkeys(transaction_ids or []))
     targeted = bool(transaction_ids)
-    where_clause = "t.pending = 0 AND t.transacted_at BETWEEN ? AND ?"
-    parameters = [start.isoformat(), end.isoformat()]
+    where_clause = "t.pending = 0"
+    parameters = []
     if targeted:
         placeholders = ",".join("?" for _ in transaction_ids)
         where_clause = f"t.pending = 0 AND t.id IN ({placeholders})"
@@ -93,7 +82,7 @@ def representative_transactions(connection, today=None, transaction_ids=None):
             parameters,
         )
     ]
-    if targeted and rows:
+    if rows:
         start = date.fromisoformat(rows[0]["transacted_at"])
         end = date.fromisoformat(rows[-1]["transacted_at"])
     matches = transfer_matches(rows)
@@ -347,7 +336,7 @@ def prepare_evaluation(
                 "categorization. Choose posted transactions and try again."
             )
         raise ValueError(
-            "No uncategorized posted transactions were found in the four complete months."
+            "No uncategorized posted transactions were found."
         )
 
     return {

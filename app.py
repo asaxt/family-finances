@@ -2258,8 +2258,7 @@ def evaluate_with_ollama():
             if transaction_ids:
                 return jsonify(error=str(error)), 400
             if str(error) == (
-                "No uncategorized posted transactions were found in the four "
-                "complete months."
+                "No uncategorized posted transactions were found."
             ):
                 with db() as connection:
                     if load_ollama_result(connection):
