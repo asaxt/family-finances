@@ -19,6 +19,7 @@
       {% elif local_ai_enabled and ollama_result_status == "running" %}<a class="button primary" href="{{ url_for('ollama_evaluation_report') }}">View categorization progress</a>
       {% elif local_ai_enabled %}<button class="button primary" id="run-local-categorization" type="button">Categorize all uncategorized</button>{% endif %}
       {% if local_ai_enabled and has_ollama_result and ollama_result_status != "running" %}<a class="button secondary" href="{{ url_for('ollama_evaluation_report') }}">View last results</a>{% endif %}
+      <a class="button secondary" href="{{ url_for('transactions', ai_review='1', purpose='all') }}">Review AI guesses</a>
       <span class="pill">{{ profiles|length }} household member{{ "" if profiles|length == 1 else "s" }}</span>
     </div>
   </div>
@@ -36,6 +37,7 @@
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
     <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
     <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
+    <input type="hidden" name="return_ai_review" value="{{ '1' if ai_review else '' }}">
     <span><strong id="selected-count">0</strong> selected</span>
     <div class="bulk-fields">
       <select id="bulk-category" name="category_choice" aria-label="Change category">
@@ -150,7 +152,12 @@
             </div>
           </details>
         </th>
-        <th>Review</th>
+        <th><details class="table-filter"><summary>Review <span>▾</span></summary>
+          <div class="table-filter-menu">
+            <label class="check-label"><input type="checkbox" name="ai_review" value="1" {{ "checked" if ai_review }}>Only uncertain AI guesses</label>
+            <button class="button compact" type="submit">Apply</button>
+          </div>
+        </details></th>
       </tr></thead>
       <tbody>
         {% for transaction in transactions %}
@@ -161,7 +168,9 @@
               <div class="transaction-name">{{ transaction.merchant or transaction.description }}</div>
               {% if transaction.merchant and transaction.description != transaction.merchant %}<div class="transaction-sub">{{ transaction.description }}</div>{% endif %}
             </td>
-            <td><span class="pill">{{ transaction.effective_category }}</span></td>
+            <td><span class="pill">{{ transaction.effective_category }}</span>
+              {% if transaction.ai_review %}<div><span class="pill pending">AI best guess</span></div><div class="transaction-sub">{{ transaction.ai_reason or "The model chose this category with limited evidence." }}</div>{% endif %}
+            </td>
             <td>{% if transaction.cash_flow_role == "cash_flow" and transaction.flow_type %}<span class="pill">{{ flow_types[transaction.flow_type] }}</span>{% elif transaction.cash_flow_role == "cash_flow" %}<span class="transaction-sub">Unassigned</span>{% else %}<span class="transaction-sub">Not used</span>{% endif %}</td>
             <td>{{ transaction.owner_name }} · {{ transaction.account_name }}<div class="transaction-sub">····{{ transaction.mask }}</div></td>
             <td>
@@ -180,7 +189,8 @@
                 data-flow-type="{{ transaction.flow_type or '' }}"
                 data-recurring-rule="{{ 1 if transaction.merchant_rule_id else 0 }}"
                 data-excluded="{{ transaction.excluded }}"
-              >Review</button>
+              >{{ "Change category" if transaction.ai_review else "Review" }}</button>
+              {% if transaction.ai_review %}<button class="text-button" type="submit" form="confirm-ai-form" formaction="{{ url_for('confirm_ai_review', transaction_id=transaction.id) }}">Keep category</button>{% endif %}
             </td>
           </tr>
         {% else %}
@@ -191,6 +201,22 @@
   </div>
   </form>
 </section>
+
+{% if ai_review %}<p class="transaction-sub">These transactions already have categories. Review is optional. Keep the category or change it to remove a transaction from this list.</p>{% endif %}
+<form id="confirm-ai-form" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="return_ai_review" value="{{ '1' if ai_review else '' }}">
+  <input type="hidden" name="account" value="{{ account_id or '' }}">
+  <input type="hidden" name="person" value="{{ connection_id or '' }}">
+  <input type="hidden" name="date_from" value="{{ date_from }}">
+  <input type="hidden" name="date_to" value="{{ date_to }}">
+  <input type="hidden" name="return_q" value="{{ search_query }}">
+  <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
+  {% for category in excluded_categories %}<input type="hidden" name="return_excluded_category" value="{{ category }}">{% endfor %}
+  <input type="hidden" name="return_view" value="{{ transaction_view }}">
+  <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
+  <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
+</form>
 
 <dialog id="transaction-review-dialog" class="connection-dialog transaction-review-dialog">
   <div class="dialog-header">
@@ -209,6 +235,7 @@
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
     <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
     <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
+    <input type="hidden" name="return_ai_review" value="{{ '1' if ai_review else '' }}">
     <label>Category
       <select id="review-category" name="category_choice">
         <option value="">Uncategorized</option>
@@ -217,8 +244,10 @@
       </select>
     </label>
     <label id="review-new-category-label" hidden>New category<input id="review-new-category" name="new_category" maxlength="80"></label>
-    <label>Category cash-flow treatment (applies to all transactions in this category)
-      <select id="review-category-flow" name="category_flow_type" required>
+    <p id="review-treatment-summary" class="transaction-sub">Category treatment: <strong id="review-treatment-name"></strong></p>
+    <label id="review-edit-treatment-label" class="check-label"><input id="review-edit-treatment" type="checkbox" name="edit_category_treatment"> Edit treatment for this category</label>
+    <label id="review-treatment-editor" hidden>Category cash-flow treatment (applies to all transactions in this category)
+      <select id="review-category-flow" name="category_flow_type" disabled>
         <option value="" disabled>Choose treatment</option>
         {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
       </select>
@@ -239,6 +268,11 @@
   const reviewNewCategory = document.querySelector("#review-new-category");
   const reviewNewCategoryLabel = document.querySelector("#review-new-category-label");
   const reviewCategoryFlow = document.querySelector("#review-category-flow");
+  const reviewEditTreatment = document.querySelector("#review-edit-treatment");
+  const reviewEditTreatmentLabel = document.querySelector("#review-edit-treatment-label");
+  const reviewTreatmentEditor = document.querySelector("#review-treatment-editor");
+  const reviewTreatmentSummary = document.querySelector("#review-treatment-summary");
+  const reviewTreatmentName = document.querySelector("#review-treatment-name");
   const reviewRememberMatch = document.querySelector("#review-remember-match");
   const reviewExcluded = document.querySelector("#review-excluded");
   const bulkCategory = document.querySelector("#bulk-category");
@@ -313,11 +347,26 @@
   transactionCheckboxes.forEach(checkbox => checkbox.addEventListener("change", updateBulkSelection));
 
   const categoryFlowDefaults = {{ category_flow_defaults|tojson }};
+  const flowLabels = {{ flow_types|tojson }};
+  function showTreatmentEditor() {
+    const editing = reviewCategory.value === "__new__" || reviewEditTreatment.checked;
+    reviewTreatmentEditor.hidden = !editing;
+    reviewCategoryFlow.disabled = !editing;
+    reviewCategoryFlow.required = editing;
+  }
+  reviewEditTreatment.addEventListener("change", showTreatmentEditor);
   function showReviewNewCategory() {
     const show = reviewCategory.value === "__new__";
     reviewNewCategoryLabel.hidden = !show;
     reviewNewCategory.required = show;
     reviewCategoryFlow.value = categoryFlowDefaults[reviewCategory.value] || "spending";
+    reviewEditTreatment.checked = false;
+    reviewEditTreatmentLabel.hidden = show || !reviewCategory.value;
+    reviewEditTreatment.disabled = show || !reviewCategory.value;
+    reviewTreatmentSummary.hidden = show;
+    reviewTreatmentName.textContent = reviewCategory.value
+      ? flowLabels[reviewCategoryFlow.value] : "Unassigned";
+    showTreatmentEditor();
   }
   reviewCategory.addEventListener("change", showReviewNewCategory);
   bulkCategory.addEventListener("change", () => {

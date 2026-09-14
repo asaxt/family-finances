@@ -1,27 +1,46 @@
 {% extends "base.html" %}
-{% block title %}Local model evaluation{% endblock %}
-{% block eyebrow %}Development experiment{% endblock %}
-{% block heading %}Local model evaluation{% endblock %}
+{% block title %}Categorization results{% endblock %}
+{% block eyebrow %}Local AI{% endblock %}
+{% block heading %}Categorization results{% endblock %}
 {% block content %}
 <section class="panel">
   <div class="panel-header">
     <div>
       <h2>{{ result.model }}</h2>
-      <p>{% if result.targeted %}Selected transactions{% else %}{{ result.date_from }}–{{ result.date_to }}{% endif %} · {{ result.sample_transaction_count }} exact-description groups covering {{ result.source_transaction_count }} transactions · {{ result.elapsed_seconds }} seconds</p>
+      <p>{% if result.targeted %}Selected transactions{% else %}{{ result.date_from }}–{{ result.date_to }}{% endif %} · {{ result.sample_transaction_count }} exact-description groups covering {{ result.coverage.eligible if result.coverage is defined else result.source_transaction_count }} eligible transactions · {{ result.elapsed_seconds }} seconds</p>
     </div>
     <div><a class="button secondary" href="{{ url_for('transactions') }}">View transactions</a>
+      <a class="button secondary" href="{{ url_for('transactions', ai_review='1', purpose='all') }}">Review AI guesses</a>
       {% if result.status == "running" %}<span class="pill pending">{{ result.processed_group_count }} of {{ result.sample_transaction_count }} groups complete</span>
       {% elif result.status == "interrupted" %}<span class="pill pending">Run paused</span>
-      {% else %}<span class="pill">{{ result.review_count }} group{{ "" if result.review_count == 1 else "s" }} need{{ "s" if result.review_count == 1 else "" }} review</span>{% endif %}
+      {% else %}<span class="pill">{{ result.review_count }} uncategorized group{{ "" if result.review_count == 1 else "s" }}</span>{% endif %}
     </div>
   </div>
 </section>
+
+{% if result.coverage is defined %}
+<section class="panel">
+  <div class="panel-header"><div><h2>Run coverage</h2>
+    <p>{{ result.coverage.considered }} transactions considered · {{ result.coverage.eligible }} eligible for classification. Counts describe this run, before any later manual edits.</p>
+  </div></div>
+  <div class="metric-grid">
+    {% for label, count in [("Classified confidently", result.coverage.confident), ("Classified as best guesses", result.coverage.tentative), ("Left uncategorized", result.coverage.uncategorized), ("Skipped", result.coverage.skipped)] %}
+    <article class="metric-card"><span class="metric-label">{{ label }}</span><div class="metric-value">{{ count }}</div></article>
+    {% endfor %}
+  </div>
+  <p>{{ result.coverage.not_processed }} eligible transactions {% if result.status == "running" %}still waiting to be processed{% else %}not processed{% endif %}.</p>
+  <p class="transaction-sub">Best guesses are already applied. Uncategorized means the model could not choose a valid category. Recurring rule matches outside this run's eligible transactions are not added to these totals.</p>
+  {% if result.coverage.skipped_reasons %}<h3>Why transactions were skipped</h3><ul>
+    {% for reason, count in result.coverage.skipped_reasons.items() %}<li>{{ reason }}: {{ count }}</li>{% endfor %}
+  </ul>{% endif %}
+</section>
+{% else %}<p class="transaction-sub">Detailed coverage is unavailable for this older saved run. Future runs will include it.</p>{% endif %}
 
 <section class="panel">
   <div class="panel-header"><div><h2>Results</h2>
     {% if result.status == "running" %}<p>The model is still working. Each completed batch is already saved, and you can safely leave this page.</p>
     {% elif result.status == "interrupted" %}<p>{{ result.error }} {{ result.applied_transaction_count }} transaction{{ "" if result.applied_transaction_count == 1 else "s" }} remain categorized.</p>
-    {% else %}<p>{{ result.applied_transaction_count }} transaction{{ "" if result.applied_transaction_count == 1 else "s" }} categorized. Confidence 0 stays uncategorized; 1 is tentative; 2 is highly confident.</p>{% endif %}
+    {% else %}<p>{{ result.applied_transaction_count }} transaction{{ "" if result.applied_transaction_count == 1 else "s" }} categorized. Best guesses are applied immediately; reviewing them is optional.</p>{% endif %}
   </div></div>
   <div class="table-wrap">
     <table>
@@ -34,12 +53,13 @@
           <td>{{ item.account_subtype or item.account_type }}</td>
           <td>{{ item.occurrence_count }}<div class="transaction-sub">{{ item.first_date }}–{{ item.last_date }}</div></td>
           <td>
-            {% if item.status == "categorized" %}<span class="pill">{{ item.category }}</span>{% if item.confidence is defined %} <span class="pill">Confidence {{ item.confidence }}</span>{% endif %}{% if item.applied_transaction_count %}<div class="transaction-sub">Applied to {{ item.applied_transaction_count }} transaction{{ "" if item.applied_transaction_count == 1 else "s" }}</div>{% else %}<div class="transaction-sub">Already categorized</div>{% endif %}{% if item.rule_match_count %}<div class="transaction-sub">Exact-description rule covers {{ item.rule_match_count }} matching record{{ "" if item.rule_match_count == 1 else "s" }}; individual user overrides remain exceptions.</div>{% endif %}
+            {% if item.status == "categorized" %}<span class="pill">{{ item.category }}</span>{% if item.confidence is defined %} <span class="pill">{{ "Best guess" if item.confidence == 1 else "Confident" }}</span>{% endif %}<div class="transaction-sub">{{ item.reason }}</div>{% if item.applied_transaction_count %}<div class="transaction-sub">Applied to {{ item.applied_transaction_count }} transaction{{ "" if item.applied_transaction_count == 1 else "s" }}</div>{% else %}<div class="transaction-sub">No changes saved for this group</div>{% endif %}{% if item.rule_match_count %}<div class="transaction-sub">Exact-description rule covers {{ item.rule_match_count }} matching record{{ "" if item.rule_match_count == 1 else "s" }}; individual user overrides remain exceptions.</div>{% endif %}
+            {% elif item.rule_applied_transaction_count %}<span class="pill">{{ item.rule_category }}</span><div class="transaction-sub">Assigned to {{ item.rule_applied_transaction_count }} transactions by the matching-description rule.</div>
             {% else %}<span class="pill pending">Uncategorized</span>{% if item.confidence is defined %} <span class="pill">Confidence {{ item.confidence }}</span>{% endif %}<div class="transaction-sub">{{ item.reason }}</div>{% endif %}
           </td>
         </tr>
         {% else %}
-          <tr><td colspan="5" class="empty">The first batch is still being processed.</td></tr>
+          <tr><td colspan="5" class="empty">{{ "The first batch is still being processed." if result.status == "running" else "No eligible transactions needed classification in this run." }}</td></tr>
         {% endfor %}
       </tbody>
     </table>

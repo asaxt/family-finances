@@ -318,6 +318,56 @@ def existing_category_examples(connection, categories, limit=5):
     return examples
 
 
+AI_REVIEW_SETTING = "local_ai_reviews_v1"
+
+
+def load_ai_reviews(connection):
+    row = connection.execute(
+        "SELECT value FROM settings WHERE key = ?", (AI_REVIEW_SETTING,)
+    ).fetchone()
+    if row:
+        return json.loads(row[0])
+    # Preserve tentative assignments from the last run when upgrading.
+    row = connection.execute(
+        "SELECT value FROM settings WHERE key = 'local_ai_result_v1'"
+    ).fetchone()
+    result = json.loads(row[0]) if row else {}
+    return {
+        transaction_id: {"category": item["category"], "reason": item.get("reason", "")[:400]}
+        for item in result.get("details", [])
+        if item.get("status") == "categorized" and item.get("confidence") == 1
+        for transaction_id in item.get("transaction_ids", [])
+    }
+
+
+def save_ai_reviews(connection, reviews):
+    connection.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (AI_REVIEW_SETTING, json.dumps(reviews, separators=(",", ":"))),
+    )
+
+
+def update_ai_reviews(connection, items):
+    reviews = load_ai_reviews(connection)
+    for item in items:
+        for transaction_id in item.get("applied_transaction_ids", []):
+            if item.get("confidence") == 1:
+                reviews[transaction_id] = {
+                    "category": item["category"], "reason": item.get("reason", "")[:400]
+                }
+            else:
+                reviews.pop(transaction_id, None)
+    save_ai_reviews(connection, reviews)
+
+
+def dismiss_ai_reviews(connection, transaction_ids):
+    reviews = load_ai_reviews(connection)
+    for transaction_id in transaction_ids:
+        reviews.pop(transaction_id, None)
+    save_ai_reviews(connection, reviews)
+
+
 def prepare_evaluation(
     connection, categories, model="qwen3.8:27b", today=None, transaction_ids=None
 ):
@@ -329,17 +379,25 @@ def prepare_evaluation(
     source_rows, groups, start, end = representative_transactions(
         connection, today, transaction_ids
     )
-    if not groups:
-        if transaction_ids:
-            raise ValueError(
-                "None of the selected transactions are eligible for local "
-                "categorization. Choose posted transactions and try again."
-            )
-        raise ValueError(
-            "No uncategorized posted transactions were found."
-        )
+    scope = "1 = 1"
+    if transaction_ids:
+        scope = "t.id IN (" + ",".join("?" for _ in transaction_ids) + ")"
+    scope_count, pending_count = connection.execute(
+        f"SELECT COUNT(*), COALESCE(SUM(t.pending != 0), 0) "
+        f"FROM transactions t JOIN accounts a ON a.id = t.account_id WHERE {scope}",
+        transaction_ids,
+    ).fetchone()
+    eligible_count = sum(len(group["transaction_ids"]) for group in groups)
+    skipped_counts = {
+        "Pending transactions": pending_count,
+        "Already categorized or covered by a saved rule": len(source_rows) - eligible_count,
+        "Selected transactions no longer available": max(0, len(transaction_ids) - scope_count),
+    }
 
     return {
+        "considered_count": len(transaction_ids) if transaction_ids else scope_count,
+        "eligible_count": eligible_count,
+        "skipped_counts": skipped_counts,
         "model": model,
         "categories": categories,
         "category_examples": existing_category_examples(connection, categories),
@@ -408,13 +466,47 @@ def evaluation_result(
         "elapsed_seconds": round(elapsed_seconds, 1),
         "category_counts": dict(Counter(item["category"] for item in categorized)),
         "review_count": sum(
-            item["status"] != "categorized" for item in details
+            item["status"] != "categorized"
+            and item.get("rule_applied_transaction_count", 0) < len(item["transaction_ids"])
+            for item in details
         ),
         "applied_transaction_count": applied_transaction_count,
         "status": status,
         "targeted": prepared["targeted"],
         "details": details,
     }
+    if "eligible_count" in prepared:
+        confident = tentative = uncategorized = changed = processed = 0
+        for item in details:
+            count = len(item["transaction_ids"])
+            processed += count
+            rule_assigned = item.get("rule_applied_transaction_count", 0)
+            if rule_assigned:
+                if item["rule_confidence"] == 2:
+                    confident += rule_assigned
+                else:
+                    tentative += rule_assigned
+            if item["status"] == "categorized":
+                assigned = item.get("applied_transaction_count", count)
+                changed += count - assigned - rule_assigned
+                if item["confidence"] == 2:
+                    confident += assigned
+                else:
+                    tentative += assigned
+            else:
+                uncategorized += count - rule_assigned
+        skipped = dict(prepared["skipped_counts"])
+        skipped["Changed before this batch could be saved"] = changed
+        result["coverage"] = {
+            "considered": prepared["considered_count"],
+            "eligible": prepared["eligible_count"],
+            "confident": confident,
+            "tentative": tentative,
+            "uncategorized": uncategorized,
+            "not_processed": prepared["eligible_count"] - processed,
+            "skipped": sum(skipped.values()),
+            "skipped_reasons": {reason: count for reason, count in skipped.items() if count},
+        }
     if error:
         result["error"] = error
     return result
@@ -444,6 +536,8 @@ def apply_categorized_suggestions(connection, result):
         if item["status"] != "categorized":
             continue
         transaction_ids = list(dict.fromkeys(item["transaction_ids"]))
+        item["applied_transaction_ids"] = []
+        item["applied_transaction_count"] = 0
         for offset in range(0, len(transaction_ids), 500):
             batch = transaction_ids[offset : offset + 500]
             placeholders = ",".join("?" for _ in batch)
@@ -459,14 +553,16 @@ def apply_categorized_suggestions(connection, result):
                     spending_override = NULL
                 WHERE id IN ({placeholders})
                 {category_guard}
+                RETURNING id
                 """,
                 [item["category"], *batch],
             )
-            applied += cursor.rowcount
-            item["applied_transaction_count"] = (
-                item.get("applied_transaction_count", 0) + cursor.rowcount
-            )
+            applied_ids = [row[0] for row in cursor.fetchall()]
+            applied += len(applied_ids)
+            item["applied_transaction_ids"].extend(applied_ids)
+            item["applied_transaction_count"] += len(applied_ids)
 
+    update_ai_reviews(connection, result["details"])
     result["applied_transaction_count"] = applied
     return applied
 
@@ -518,6 +614,22 @@ def create_recurring_category_rules(connection, result):
             """,
             (account_id, description),
         ).fetchone()[0]
+        review_item = min(categorized_items, key=lambda item: item.get("confidence", 2))
+        review_ids = [row[0] for row in connection.execute(
+            "SELECT id FROM transactions WHERE account_id = ? "
+            "AND TRIM(description) = ? COLLATE NOCASE "
+            "AND COALESCE(category_override_source, '') != 'user'",
+            (account_id, description),
+        )]
+        review_ids_set = set(review_ids)
+        for item in items:
+            covered = len(review_ids_set.intersection(item.get("transaction_ids", [])))
+            item["rule_applied_transaction_count"] = max(
+                0, covered - item.get("applied_transaction_count", 0)
+            )
+            item["rule_confidence"] = review_item.get("confidence", 2)
+            item["rule_category"] = category
+        update_ai_reviews(connection, [{**review_item, "applied_transaction_ids": review_ids}])
         for item in categorized_items:
             item["rule_match_count"] = match_count
     return created

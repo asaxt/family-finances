@@ -38,6 +38,8 @@ from vault import (
 )
 
 from analytics import (
+    CATEGORY_RULE_JOIN,
+    EFFECTIVE_CATEGORY_SQL,
     DEFAULT_OVERVIEW_LOOKBACK_DAYS,
     MAX_OVERVIEW_LOOKBACK_DAYS,
     category_details,
@@ -49,11 +51,15 @@ from analytics import (
     transaction_list,
 )
 from llm_evaluation import (
+    AI_REVIEW_SETTING,
     apply_categorized_suggestions,
     classify_evaluation_rows,
     create_recurring_category_rules,
     evaluation_batches,
     evaluation_result,
+    load_ai_reviews,
+    save_ai_reviews,
+    dismiss_ai_reviews,
     prepare_evaluation,
 )
 
@@ -267,7 +273,8 @@ def prepare_development_blank_slate():
             """
         )
         connection.execute(
-            "DELETE FROM settings WHERE key = ?", (OLLAMA_RESULT_SETTING,)
+            "DELETE FROM settings WHERE key IN (?, ?)",
+            (OLLAMA_RESULT_SETTING, AI_REVIEW_SETTING),
         )
         connection.executemany(
             "INSERT INTO category_rules (name, flow_type) VALUES (?, ?)",
@@ -541,6 +548,10 @@ def load_ollama_result(connection):
 
 
 def save_ollama_result(connection, result):
+    if not connection.execute(
+        "SELECT 1 FROM settings WHERE key = ?", (AI_REVIEW_SETTING,)
+    ).fetchone():
+        save_ai_reviews(connection, load_ai_reviews(connection))
     connection.execute(
         """
         INSERT INTO settings (key, value) VALUES (?, ?)
@@ -1230,6 +1241,7 @@ def categories():
 def transactions():
     context = page_context("transactions")
     category = request.args.get("category") or None
+    ai_review = request.args.get("ai_review") == "1"
     excluded_categories = list(
         dict.fromkeys(
             value.strip()
@@ -1301,6 +1313,18 @@ def transactions():
             excluded_categories=excluded_categories,
             sort=sort,
         )
+        reviews = load_ai_reviews(connection)
+        for transaction in context["transactions"]:
+            review = reviews.get(transaction["id"])
+            transaction["ai_review"] = bool(
+                review and transaction["category_override_source"] != "user"
+                and review["category"].casefold() == transaction["effective_category"].casefold()
+            )
+            transaction["ai_reason"] = review.get("reason", "") if transaction["ai_review"] else ""
+        if ai_review:
+            context["transactions"] = [
+                transaction for transaction in context["transactions"] if transaction["ai_review"]
+            ]
         context["category_options"] = [
             row["name"]
             for row in connection.execute(
@@ -1335,6 +1359,7 @@ def transactions():
         context["category_setup_complete"] = category_setup_is_complete(connection)
     context["flow_types"] = FLOW_TYPES
     context.update(
+        ai_review=ai_review,
         selected_category=category,
         search_query=query or "",
         transaction_view=transaction_view,
@@ -1344,7 +1369,8 @@ def transactions():
         excluded_categories=excluded_categories,
         transaction_sort=sort,
         table_filters_active=bool(
-            date_from
+            ai_review
+            or date_from
             or date_to
             or query
             or category
@@ -1861,6 +1887,15 @@ def save_category_setup(connection, rows):
         if row["original_name"]
         and row["original_name"].casefold() in existing
     }
+    reviews = load_ai_reviews(connection)
+    for transaction_id, review in list(reviews.items()):
+        key = review["category"].casefold()
+        if key in existing:
+            if key in submitted:
+                review["category"] = submitted[key]
+            else:
+                del reviews[transaction_id]
+    save_ai_reviews(connection, reviews)
     staged = []
     for key, original_name in existing.items():
         replacement = submitted.get(key)
@@ -2028,7 +2063,7 @@ def selected_category(connection, choice, new_name=None, new_flow_type=None):
         connection.execute(
             """
             INSERT INTO category_rules (name, flow_type) VALUES (?, ?)
-            ON CONFLICT(name) DO UPDATE SET flow_type = excluded.flow_type
+            ON CONFLICT(name) DO NOTHING
             """,
             (name, new_flow_type),
         )
@@ -2047,7 +2082,9 @@ def recurring_match(transaction):
 @app.post("/api/transaction/<transaction_id>")
 def update_transaction(transaction_id):
     category_flow_type = request.form.get("category_flow_type", "")
-    if category_flow_type not in FLOW_TYPES:
+    edit_treatment = request.form.get("edit_category_treatment") == "on"
+    new_category = request.form.get("category_choice") == "__new__"
+    if (edit_treatment or new_category) and category_flow_type not in FLOW_TYPES:
         return transaction_cleanup_redirect()
     excluded = int(request.form.get("excluded") == "on")
     with db() as connection:
@@ -2069,7 +2106,7 @@ def update_transaction(transaction_id):
         )
         if not valid:
             return transaction_cleanup_redirect()
-        if category:
+        if category and edit_treatment:
             connection.execute(
                 """
                 INSERT INTO category_rules (name, flow_type) VALUES (?, ?)
@@ -2129,6 +2166,28 @@ def update_transaction(transaction_id):
                 transaction_id,
             ),
         )
+        dismiss_ai_reviews(connection, [transaction_id])
+    return transaction_cleanup_redirect()
+
+
+@app.post("/api/transaction/<transaction_id>/confirm-ai")
+def confirm_ai_review(transaction_id):
+    with db() as connection:
+        review = load_ai_reviews(connection).get(transaction_id)
+        transaction = connection.execute(
+            f"SELECT {EFFECTIVE_CATEGORY_SQL} AS category, t.category_override_source "
+            f"FROM transactions t {CATEGORY_RULE_JOIN} WHERE t.id = ?",
+            (transaction_id,),
+        ).fetchone()
+        if (review and transaction
+                and transaction["category_override_source"] != "user"
+                and transaction["category"].casefold() == review["category"].casefold()):
+            connection.execute(
+                "UPDATE transactions SET category_override = ?, category_override_source = 'user' "
+                "WHERE id = ?",
+                (transaction["category"], transaction_id),
+            )
+        dismiss_ai_reviews(connection, [transaction_id])
     return transaction_cleanup_redirect()
 
 
@@ -2181,6 +2240,8 @@ def bulk_update_transactions():
                         f"WHERE id IN ({placeholders})",
                         [*values, *batch],
                     )
+            if category != "__no_change__":
+                dismiss_ai_reviews(connection, transaction_ids)
     return transaction_cleanup_redirect()
 
 
@@ -2199,6 +2260,7 @@ def transaction_cleanup_redirect():
             purpose=request.form.get("return_purpose") or None,
             view=transaction_view if transaction_view != "active" else None,
             sort=request.form.get("return_sort") or None,
+            ai_review="1" if request.form.get("return_ai_review") == "1" else None,
         )
     )
 
@@ -2255,18 +2317,7 @@ def evaluate_with_ollama():
                     transaction_ids=transaction_ids,
                 )
         except ValueError as error:
-            if transaction_ids:
-                return jsonify(error=str(error)), 400
-            if str(error) == (
-                "No uncategorized posted transactions were found."
-            ):
-                with db() as connection:
-                    if load_ollama_result(connection):
-                        return jsonify(
-                            ok=True,
-                            report_url=url_for("ollama_evaluation_report"),
-                        )
-            raise
+            return jsonify(error=str(error)), 400
 
         started = time.monotonic()
         details = []
@@ -2281,19 +2332,13 @@ def evaluate_with_ollama():
             for rows in evaluation_batches(prepared):
                 batch_details = classify_evaluation_rows(prepared, rows)
                 next_details = [*details, *batch_details]
-                progress = evaluation_result(
-                    prepared,
-                    next_details,
-                    time.monotonic() - started,
-                    status="running",
-                    applied_transaction_count=applied,
-                )
                 with db() as connection:
                     batch_result = {"details": batch_details}
-                    batch_applied = apply_categorized_suggestions(
-                        connection, batch_result
+                    batch_applied = apply_categorized_suggestions(connection, batch_result)
+                    progress = evaluation_result(
+                        prepared, next_details, time.monotonic() - started,
+                        status="running", applied_transaction_count=applied + batch_applied,
                     )
-                    progress["applied_transaction_count"] += batch_applied
                     save_ollama_result(connection, progress)
                 details = next_details
                 applied += batch_applied
@@ -2307,6 +2352,11 @@ def evaluate_with_ollama():
             )
             with db() as connection:
                 create_recurring_category_rules(connection, result)
+                applied += sum(item.get("rule_applied_transaction_count", 0) for item in details)
+                result = evaluation_result(
+                    prepared, details, time.monotonic() - started,
+                    status="completed", applied_transaction_count=applied,
+                )
                 save_ollama_result(connection, result)
         except Exception:
             app.logger.exception("Local model categorization stopped early")
