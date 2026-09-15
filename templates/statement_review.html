@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Review statement · {{ app_name }}{% endblock %}
+{% block eyebrow %}Check before adding{% endblock %}
+{% block heading %}Review statement{% endblock %}
+{% block content %}
+{% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+<section class="panel"><div class="panel-header"><div><h2>{{ draft.account_name }}</h2><p>{{ draft.start }} through {{ draft.end }} · {{ draft.rows|length }} extracted or manually added rows</p></div><a class="text-link" href="{{ url_for('statement_import') }}">All imports</a></div>
+  <p>Check the account and every selected date, amount, and direction against the source pages. Extraction can miss or misread rows. Balances and statement totals must not be imported as transactions.</p>
+  {% if draft.warnings %}<div class="notice error"><strong>Check these issues before importing</strong><ul>{% for warning in draft.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></div>{% endif %}
+</section>
+<div class="statement-review-grid">
+<section class="panel">
+<form method="post" id="statement-review-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {% for row in draft.rows %}
+  <article class="statement-row">
+    <div class="statement-row-heading"><label class="check-label"><input class="statement-include" type="checkbox" name="include" value="{{ loop.index0 }}" {{ 'checked' if row.selected and not row.already_imported }} {{ 'disabled' if row.already_imported }}> Add row {{ loop.index }}</label><a href="#source-page-{{ row.page }}">Source page {{ row.page }}</a></div>
+    {% if row.error %}<p class="statement-warning">{{ row.error }}</p>{% endif %}
+    {% if row.duplicate %}<p class="statement-warning">{{ row.duplicate }}</p>{% endif %}
+    <label>Description<input name="description_{{ loop.index0 }}" value="{{ row.description }}" maxlength="300"></label>
+    <div class="statement-fields">
+      <label>Date<input type="date" name="date_{{ loop.index0 }}" value="{{ row.date }}"></label>
+      <label>Amount in USD<input class="statement-amount" name="amount_{{ loop.index0 }}" inputmode="decimal" value="{{ row.amount }}" placeholder="12.34"></label>
+      <label>Direction<select class="statement-direction" name="direction_{{ loop.index0 }}"><option value="">Choose</option><option value="money_out" {{ 'selected' if row.direction == 'money_out' }}>Money out</option><option value="money_in" {{ 'selected' if row.direction == 'money_in' }}>Money in</option></select></label>
+    </div>
+    {% if row.evidence %}<p class="transaction-sub">Source excerpt: {{ row.evidence }}</p>{% endif %}
+  </article>
+  {% else %}<p>No transaction rows were extracted. Check the source pages, add rows manually, or discard this draft and retry using page images.</p>{% endfor %}
+  <div class="statement-actions"><button class="button secondary" name="action" value="add_row" type="submit" formnovalidate>Add a missing row</button><button class="button secondary" name="action" value="save" type="submit" formnovalidate>Save edits and recheck duplicates</button></div>
+  <p id="statement-totals" role="status"></p>
+  <p class="transaction-sub">Imported rows start as Uncategorized. Existing category rules can still apply. Running local categorization afterward uses the usual category settings.</p>
+  <label class="check-label"><input type="checkbox" name="reviewed"> I checked the selected account, dates, amounts, and directions against the statement.</label>
+  <label class="check-label"><input type="checkbox" name="allow_duplicates"> Any selected possible duplicates are separate transactions that should also be added.</label>
+  <div class="statement-actions"><button class="button primary" name="action" value="confirm" type="submit">Add selected transactions</button><button class="button secondary" name="action" value="discard" type="submit" formnovalidate>Discard draft</button></div>
+</form>
+</section>
+<aside class="statement-source"><h2>Source pages</h2><p class="transaction-sub">Rendered previews are stored only in this encrypted draft and removed when you finish or discard it.</p>
+{% for page in draft.pages %}<details id="source-page-{{ page.number }}" open><summary>Page {{ page.number }}</summary><img loading="lazy" src="{{ url_for('statement_page', token=token, number=page.number) }}" alt="Statement source page {{ page.number }}"></details>{% endfor %}
+</aside>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+function updateStatementTotals() {
+  let count = 0, moneyIn = 0, moneyOut = 0;
+  document.querySelectorAll('.statement-row').forEach(row => {
+    if (!row.querySelector('.statement-include').checked) return;
+    count++;
+    const amount = Number(row.querySelector('.statement-amount').value);
+    const direction = row.querySelector('.statement-direction').value;
+    if (Number.isFinite(amount) && amount > 0) {
+      if (direction === 'money_in') moneyIn += Math.round(amount * 100);
+      if (direction === 'money_out') moneyOut += Math.round(amount * 100);
+    }
+  });
+  const dollars = cents => (cents / 100).toLocaleString('en-US', {style: 'currency', currency: 'USD'});
+  document.querySelector('#statement-totals').textContent = `${count} rows selected · Money in ${dollars(moneyIn)} · Money out ${dollars(moneyOut)}`;
+}
+document.querySelector('#statement-review-form').addEventListener('input', updateStatementTotals);
+updateStatementTotals();
+</script>{% endblock %}

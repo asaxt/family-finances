@@ -19,6 +19,7 @@
       {% elif local_ai_enabled and ollama_result_status == "running" %}<a class="button primary" href="{{ url_for('ollama_evaluation_report') }}">View categorization progress</a>
       {% elif local_ai_enabled %}<button class="button primary" id="run-local-categorization" type="button">Categorize all uncategorized</button>{% endif %}
       {% if local_ai_enabled and has_ollama_result and ollama_result_status != "running" %}<a class="button secondary" href="{{ url_for('ollama_evaluation_report') }}">View last results</a>{% endif %}
+      <a class="button secondary" href="{{ url_for('statement_import', account=account_id) }}">Add a statement</a>
       <a class="button secondary" href="{{ url_for('transactions', ai_review='1', purpose='all') }}">Review AI guesses</a>
       <span class="pill">{{ profiles|length }} household member{{ "" if profiles|length == 1 else "s" }}</span>
     </div>
@@ -166,6 +167,8 @@
             <td>{{ transaction.transacted_at }}</td>
             <td>
               <div class="transaction-name">{{ transaction.merchant or transaction.description }}</div>
+              {% if transaction.id.startswith('statement:') %}<span class="pill">Statement import</span>{% endif %}
+              {% if transaction.statement_overlap %}<span class="pill pending">Possible statement overlap</span><div class="transaction-sub">A statement row and bank-synced row have the same amount within three days. Review before excluding either.</div>{% endif %}
               {% if transaction.merchant and transaction.description != transaction.merchant %}<div class="transaction-sub">{{ transaction.description }}</div>{% endif %}
             </td>
             <td><span class="pill">{{ transaction.effective_category }}</span>

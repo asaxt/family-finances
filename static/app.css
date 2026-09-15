@@ -390,3 +390,17 @@ tr:last-child td { border-bottom: 0; }
   .category-editor-row .transaction-sub { text-align: left; }
   .data-status { display: none; }
 }
+
+/* Local statement import and review */
+.statement-upload { max-width: 720px; }
+.statement-fields { display: flex; flex-wrap: wrap; gap: 12px; }
+.statement-fields > label { flex: 1; min-width: 120px; }
+.statement-review-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(280px, 1fr); gap: 20px; align-items: start; }
+.statement-row { border-bottom: 1px solid var(--line); padding: 18px 0; }
+.statement-row > label, .statement-fields label { display: grid; gap: 5px; margin-bottom: 10px; }
+.statement-row-heading, .statement-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin: 12px 0; }
+.statement-source img { width: 100%; height: auto; border: 1px solid var(--line); }
+.statement-source details { margin-bottom: 18px; }
+.statement-warning { color: var(--rose); font-size: 13px; }
+.statement-history-entry { border-top: 1px solid var(--line); padding: 12px 0; }
+@media (max-width: 1200px) { .statement-review-grid { grid-template-columns: 1fr; } }
