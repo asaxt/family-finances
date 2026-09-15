@@ -1,4 +1,5 @@
 import importlib
+import io
 import os
 import re
 import sys
@@ -218,6 +219,127 @@ class DevelopmentModeTests(unittest.TestCase):
         self.assertEqual(coverage['eligible'], 0)
         self.assertEqual(coverage['skipped_reasons'], {'Pending transactions': 2})
         self.assertIn(b'No eligible transactions needed classification', self.client.get('/local-ai/evaluation').data)
+
+    def upload_synthetic_statement(self):
+        page = {'number': 1, 'text': 'Example synthetic statement text', 'image': 'ZXhhbXBsZQ=='}
+        extraction = {'account_last4': '', 'warnings': [], 'transactions': [
+            {'date': '2026-09-01', 'description': 'Example Cafe', 'amount': '1.00', 'direction': 'money_out', 'evidence': 'Example Cafe'},
+            {'date': '2026-09-05', 'description': 'Private synthetic purchase marker', 'amount': '12.34', 'direction': 'money_out', 'evidence': 'Example purchase'},
+            {'date': '2026-09-12', 'description': 'Example deposit', 'amount': '45.67', 'direction': 'money_in', 'evidence': 'Example deposit'},
+        ]}
+        token = self.csrf_token(self.client.get('/statement-import'))
+        with patch.object(self.application.statements, 'document_pages', return_value=[page]), patch.object(self.application.statements, 'extract_page', return_value=extraction):
+            response = self.client.post('/statement-import', data={
+                'csrf_token': token, 'account_id': 'example', 'start': '2026-09-01', 'end': '2026-09-30', 'usd': 'on',
+                'statement': (io.BytesIO(b'%PDF-synthetic-example'), 'example.pdf'),
+            })
+        self.assertEqual(response.status_code, 302)
+        return response.location
+
+    def test_statement_draft_is_encrypted_and_only_confirmed_rows_are_added(self):
+        self.seed_review_transactions()
+        location = self.upload_synthetic_statement()
+        page = self.client.get(location)
+        self.assertIn(b'Matches an existing transaction', page.data)
+        self.assertEqual(self.client.get(location + '/page/1').mimetype, 'image/jpeg')
+        self.assertNotIn(b'Private synthetic purchase marker', self.application.vault.path.read_bytes())
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 2)
+        token = self.csrf_token(page)
+        self.assertEqual(self.client.post(location, data={'action': 'confirm'}).status_code, 400)
+        response = self.client.post(location, data={'csrf_token': token, 'action': 'confirm', 'include': ['1']})
+        self.assertIn(b'Confirm that you checked', response.data)
+        self.application.lock_data()
+        self.application.unlock_data(self.password)
+        self.assertIn(b'Private synthetic purchase marker', self.client.get(location).data)
+        response = self.client.post(location, data={'csrf_token': token, 'action': 'confirm', 'include': ['1', '2'], 'reviewed': 'on'})
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            added = connection.execute("SELECT amount, category FROM transactions WHERE id LIKE 'statement:%' ORDER BY amount").fetchall()
+            self.assertEqual([tuple(row) for row in added], [(-4567, 'Uncategorized'), (1234, 'Uncategorized')])
+        self.client.post(location, data={'csrf_token': token, 'action': 'confirm', 'include': ['1'], 'reviewed': 'on'})
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 4)
+        repeated = self.upload_synthetic_statement()
+        repeated_page = self.client.get(repeated)
+        self.assertIn(b'This statement row was already imported', repeated_page.data)
+        response = self.client.post(repeated, data={'csrf_token': self.csrf_token(repeated_page), 'action': 'confirm', 'include': ['1'], 'reviewed': 'on', 'allow_duplicates': 'on'})
+        self.assertIn(b'already imported. Deselect', response.data)
+
+    def test_statement_duplicates_require_explicit_acknowledgement_and_invalid_rows_do_not_partially_save(self):
+        self.seed_review_transactions()
+        location = self.upload_synthetic_statement()
+        token = self.csrf_token(self.client.get(location))
+        response = self.client.post(location, data={'csrf_token': token, 'action': 'confirm', 'include': ['0', '1'], 'reviewed': 'on'})
+        self.assertIn(b'Deselect possible duplicates', response.data)
+        response = self.client.post(location, data={'csrf_token': token, 'action': 'confirm', 'include': ['1', '2'], 'reviewed': 'on', 'amount_2': 'NaN'})
+        self.assertIn(b'Correct the highlighted selected rows', response.data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 2)
+        self.client.post(location, data={'csrf_token': token, 'action': 'confirm', 'include': ['0'], 'reviewed': 'on', 'allow_duplicates': 'on'})
+        with self.application.db() as connection:
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+        self.client.post('/statement-import/history/' + history[0]['id'] + '/exclude', data={'csrf_token': token})
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT excluded FROM transactions WHERE id = 'guess-one'").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT excluded FROM transactions WHERE id LIKE 'statement:%'").fetchone()[0], 1)
+
+    def test_later_bank_sync_reconciles_unique_exact_statement_match_and_keeps_manual_choice(self):
+        self.seed_review_transactions()
+        location = self.upload_synthetic_statement()
+        self.client.post(location, data={'csrf_token': self.csrf_token(self.client.get(location)), 'action': 'confirm', 'include': ['1'], 'reviewed': 'on'})
+        with self.application.db() as connection:
+            connection.execute("UPDATE transactions SET category_override = 'Dining', category_override_source = 'user' WHERE id LIKE 'statement:%'")
+            self.application.save_transaction(connection, SimpleNamespace(
+                transaction_id='bank-posted', account_id='example', amount=12.34, iso_currency_code='USD',
+                name='Private synthetic purchase marker', merchant_name='Example', pending=False, date=date(2026, 9, 5),
+            ))
+            row = connection.execute("SELECT category_override, category_override_source FROM transactions WHERE id = 'bank-posted'").fetchone()
+            self.assertEqual(tuple(row), ('Dining', 'user'))
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 3)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE id LIKE 'statement:%'").fetchone()[0], 0)
+
+    def test_statement_review_can_add_missing_rows_and_discard_source_previews(self):
+        self.seed_review_transactions()
+        location = self.upload_synthetic_statement()
+        token = self.csrf_token(self.client.get(location))
+        self.client.post(location, data={'csrf_token': token, 'action': 'add_row'})
+        response = self.client.post(location, data={
+            'csrf_token': token, 'action': 'confirm', 'include': ['3'], 'reviewed': 'on',
+            'date_3': '2026-09-20', 'description_3': 'Manually checked example',
+            'amount_3': '5.20', 'direction_3': 'money_out',
+        })
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT amount FROM transactions WHERE description = 'Manually checked example'").fetchone()[0], 520)
+        self.assertEqual(self.client.get(location + '/page/1').status_code, 404)
+        location = self.upload_synthetic_statement()
+        self.client.post(location, data={'csrf_token': token, 'action': 'discard'})
+        self.assertEqual(self.client.get(location + '/page/1').status_code, 404)
+
+    def test_statement_failure_does_not_save_partial_import_or_expose_model_error(self):
+        self.seed_review_transactions()
+        token = self.csrf_token(self.client.get('/statement-import'))
+        with patch.object(self.application.statements, 'document_pages', side_effect=RuntimeError('example-private-source-detail')):
+            response = self.client.post('/statement-import', data={
+                'csrf_token': token, 'account_id': 'example', 'start': '2026-09-01', 'end': '2026-09-30',
+                'usd': 'on', 'statement': (io.BytesIO(b'%PDF-test'), 'example.pdf'),
+            })
+        self.assertIn(b'No transactions were added', response.data)
+        self.assertNotIn(b'example-private-source-detail', response.data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM settings WHERE key LIKE 'statement_draft:%'").fetchone()[0], 0)
+
+    def test_statement_upload_uses_memory_stream_and_respects_local_ai_setting(self):
+        self.seed_review_transactions()
+        stream = self.application.MemoryUploadRequest.from_values()._get_file_stream(1000000, 'application/pdf')
+        self.assertIsInstance(stream, io.BytesIO)
+        self.set_local_ai(False)
+        with patch.object(self.application.statements, 'extract_page') as extract:
+            response = self.client.post('/statement-import', data={'csrf_token': self.csrf_token(self.client.get('/statement-import'))})
+            extract.assert_not_called()
+        self.assertIn(b'Enable local AI', response.data)
 
     def test_development_mode_is_visible_and_blocks_plaid(self):
         health = self.client.get("/health").get_json()
