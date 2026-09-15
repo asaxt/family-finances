@@ -220,7 +220,101 @@ class DevelopmentModeTests(unittest.TestCase):
         self.assertEqual(coverage['skipped_reasons'], {'Pending transactions': 2})
         self.assertIn(b'No eligible transactions needed classification', self.client.get('/local-ai/evaluation').data)
 
-    def upload_synthetic_statement(self):
+    def create_history_account(self, **overrides):
+        data = {'csrf_token': self.csrf_token(self.client.get('/history-accounts/new')),
+                'owner_name': 'Example Person', 'institution': 'Example Former Bank',
+                'name': 'Private synthetic closed account', 'type': 'depository', 'mask': '1234'}
+        data.update(overrides)
+        return self.client.post('/history-accounts/new', data=data)
+
+    def test_unlinked_account_import_reporting_and_encrypted_persistence(self):
+        self.complete_setup()
+        self.assertIn(b'Add an unlinked account', self.client.get('/statement-import').data)
+        response = self.create_history_account()
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            account = dict(connection.execute('SELECT * FROM accounts').fetchone())
+            self.assertIsNone(account['current_balance'])
+            self.assertIsNone(account['available_balance'])
+            self.assertEqual((account['cash_flow_role'], account['spending_enabled']), ('cash_flow', 1))
+            self.assertEqual(len(self.application.statement_accounts(connection)), 1)
+        self.assertIn(account['id'], response.location)
+        self.assertNotIn(b'Private synthetic closed account', self.application.vault.path.read_bytes())
+        self.application.lock_data()
+        self.application.unlock_data(self.password)
+        self.application.save_setting(self.application.LOCAL_AI_SETTING, '1')
+        self.assertIn(b'Unlinked history', self.client.get(response.location).data)
+        location = self.upload_synthetic_statement(account['id'])
+        response = self.client.post(location, data={
+            'csrf_token': self.csrf_token(self.client.get(location)),
+            'action': 'confirm', 'include': ['0', '1', '2'], 'reviewed': 'on'})
+        self.assertEqual(response.status_code, 302)
+        report = self.client.get('/transactions', query_string={
+            'account': account['id'], 'date_from': '2026-09-01', 'date_to': '2026-09-30'})
+        self.assertIn(b'Private synthetic purchase marker', report.data)
+        with self.application.db() as connection:
+            connection.execute(
+                "UPDATE transactions SET category_override = 'Example expense' WHERE amount > 0"
+            )
+            spending = self.application.rolling_spending_summary(
+                connection, lookback_days=30, account_id=account['id'], today=date(2026, 9, 30))
+            self.assertEqual(spending['total'], 1334)
+        with self.application.app.test_request_context('/'):
+            context = self.application.page_context('overview')
+        self.assertFalse(context['connected'])
+        self.assertTrue(context['accounts'][0]['unlinked'])
+        self.assertEqual(self.client.get('/').status_code, 200)
+        self.assertIn(b'Unlinked history', self.client.get('/settings').data)
+
+    def test_unlinked_account_validation_and_repeated_submit(self):
+        self.complete_setup()
+        self.assertEqual(self.client.post('/history-accounts/new', data={}).status_code, 400)
+        for invalid in ({'owner_name': ''}, {'institution': 'x' * 101}, {'name': ''},
+                        {'type': 'investment'}, {'mask': '123456789'}, {'mask': 'abcd'}):
+            self.assertEqual(self.create_history_account(**invalid).status_code, 200)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM accounts').fetchone()[0], 0)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM connections').fetchone()[0], 0)
+        first = self.create_history_account()
+        second = self.create_history_account(name='private synthetic closed account')
+        self.assertEqual(first.location, second.location)
+        self.assertEqual(self.create_history_account(name='Old credit card', type='credit', mask='').status_code, 302)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM accounts').fetchone()[0], 2)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM connections').fetchone()[0], 1)
+
+    def test_unlinked_accounts_never_use_plaid(self):
+        self.complete_setup()
+        self.create_history_account()
+        with self.application.db() as connection:
+            item = dict(connection.execute('SELECT * FROM connections').fetchone())
+        self.assertEqual(self.application.connection_rows(), [])
+        with patch.object(self.application, 'plaid_client') as client:
+            self.assertEqual(self.application.sync_all_connections(), (0, []))
+            self.assertEqual(self.application.sync_connection(item), 0)
+            client.assert_not_called()
+        self.assertEqual(self.application.plaid_product_status()['connections'], [])
+        token = self.csrf_token(self.client.get('/history-accounts/new'))
+        with patch.object(self.application, 'PLAID_DISABLED', False), \
+             patch.object(self.application, 'plaid_credentials', return_value=('synthetic', 'synthetic')), \
+             patch.object(self.application, 'plaid_client') as client:
+            response = self.client.post('/api/link-token', json={'connection_id': item['id']},
+                                        headers={'X-CSRF-Token': token})
+            self.assertEqual(response.status_code, 404)
+            self.application.audit_plaid_products()
+            client.assert_not_called()
+        with self.application.db() as connection:
+            linked_id = connection.execute(
+                "INSERT INTO connections (owner_name, institution, access_token) "
+                "VALUES ('Example linked owner', 'Example linked bank', 'synthetic-token')"
+            ).lastrowid
+        with patch.object(self.application, 'sync_connection', return_value=2) as sync:
+            self.assertEqual(self.application.sync_all_connections(), (2, []))
+            sync.assert_called_once()
+            self.assertEqual(sync.call_args.args[0]['id'], linked_id)
+        self.assertEqual([row['id'] for row in self.application.connection_rows()], [linked_id])
+
+    def upload_synthetic_statement(self, account_id='example'):
         page = {'number': 1, 'text': 'Example synthetic statement text', 'image': 'ZXhhbXBsZQ=='}
         extraction = {'account_last4': '', 'warnings': [], 'transactions': [
             {'date': '2026-09-01', 'description': 'Example Cafe', 'amount': '1.00', 'direction': 'money_out', 'evidence': 'Example Cafe'},
@@ -230,7 +324,7 @@ class DevelopmentModeTests(unittest.TestCase):
         token = self.csrf_token(self.client.get('/statement-import'))
         with patch.object(self.application.statements, 'document_pages', return_value=[page]), patch.object(self.application.statements, 'extract_page', return_value=extraction):
             response = self.client.post('/statement-import', data={
-                'csrf_token': token, 'account_id': 'example', 'start': '2026-09-01', 'end': '2026-09-30', 'usd': 'on',
+                'csrf_token': token, 'account_id': account_id, 'start': '2026-09-01', 'end': '2026-09-30', 'usd': 'on',
                 'statement': (io.BytesIO(b'%PDF-synthetic-example'), 'example.pdf'),
             })
         self.assertEqual(response.status_code, 302)

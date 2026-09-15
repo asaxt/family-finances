@@ -3,6 +3,7 @@ import io
 import base64
 import hashlib
 import json
+import re
 import calendar
 import secrets
 import sqlite3
@@ -662,9 +663,11 @@ def audit_plaid_products():
         items = [
             dict(row)
             for row in connection.execute(
-                "SELECT id, access_token FROM connections ORDER BY id"
+                "SELECT id, access_token FROM connections WHERE access_token != '' ORDER BY id"
             )
         ]
+    if not items:
+        return []
     client = plaid_client()
     results = []
     for item in items:
@@ -863,6 +866,7 @@ def connection_rows():
                        COUNT(a.id) AS account_count
                 FROM connections c
                 LEFT JOIN accounts a ON a.connection_id = c.id
+                WHERE c.access_token != ''
                 GROUP BY c.id
                 ORDER BY c.created_at, c.id
                 """
@@ -975,6 +979,8 @@ def save_account(connection, account, connection_id, institution, checked_at):
 
 
 def sync_connection(item):
+    if not item["access_token"]:
+        return 0
     client = plaid_client()
     cursor = item["cursor"]
     count = 0
@@ -1049,7 +1055,7 @@ def sync_all_connections():
         items = [
             dict(row)
             for row in connection.execute(
-                "SELECT * FROM connections ORDER BY id"
+                "SELECT * FROM connections WHERE access_token != '' ORDER BY id"
             )
         ]
     imported = 0
@@ -1080,7 +1086,7 @@ def page_context(active):
             dict(row)
             for row in connection.execute(
                 """
-                SELECT a.*, c.owner_name
+                SELECT a.*, c.owner_name, (c.access_token = '') AS unlinked
                 FROM accounts a
                 JOIN connections c ON c.id = a.connection_id
                 ORDER BY c.owner_name, a.name
@@ -1098,7 +1104,7 @@ def page_context(active):
             dict(row)
             for row in connection.execute(
                 """
-                SELECT id, owner_name, institution,
+                SELECT id, owner_name, institution, (access_token = '') AS unlinked,
                        transactions_update_status, last_synced_at
                 FROM connections ORDER BY created_at, id
                 """
@@ -1117,7 +1123,7 @@ def page_context(active):
         "month_label": month_label(month),
         "account_id": account_id,
         "connection_id": connection_id,
-        "connected": bool(profiles),
+        "connected": any(not profile["unlinked"] for profile in profiles),
         "last_synced_at": max(last_synced_values) if last_synced_values else None,
         "history_loading": any(
             profile["transactions_update_status"]
@@ -1742,7 +1748,7 @@ def create_link_token():
     if connection_id:
         with db() as connection:
             item = connection.execute(
-                "SELECT access_token FROM connections WHERE id = ?",
+                "SELECT access_token FROM connections WHERE id = ? AND access_token != ''",
                 (connection_id,),
             ).fetchone()
         if not item:
@@ -1813,7 +1819,7 @@ def sync():
             statuses = [
                 row["transactions_update_status"]
                 for row in connection.execute(
-                    "SELECT transactions_update_status FROM connections"
+                    "SELECT transactions_update_status FROM connections WHERE access_token != ''"
                 )
             ]
         history_loading = any(
@@ -2415,10 +2421,54 @@ def evaluate_with_ollama():
 
 def statement_accounts(connection):
     return [dict(row) for row in connection.execute(
-        "SELECT a.id, a.name, a.mask, a.type, c.owner_name FROM accounts a "
+        "SELECT a.id, a.name, a.mask, a.type, c.owner_name, (c.access_token = '') AS unlinked FROM accounts a "
         "JOIN connections c ON c.id = a.connection_id WHERE a.type IN ('depository', 'credit') "
         "ORDER BY c.owner_name, a.name"
     )]
+
+
+@app.route('/history-accounts/new', methods=['GET', 'POST'])
+def add_history_account():
+    error = None
+    if request.method == 'POST':
+        values = {key: request.form.get(key, '').strip()
+                  for key in ('owner_name', 'institution', 'name', 'type', 'mask')}
+        if any(not values[key] or len(values[key]) > limit
+               for key, limit in (('owner_name', 40), ('institution', 100), ('name', 100))):
+            error = 'Enter an owner, institution, and account name within the shown limits.'
+        elif values['type'] not in {'depository', 'credit'}:
+            error = 'Choose a bank account or credit card.'
+        elif values['mask'] and not re.fullmatch(r'[0-9]{4}', values['mask']):
+            error = 'Enter only the last four digits, or leave them blank.'
+        else:
+            with db() as connection:
+                # An empty token identifies a local-only group, never a Plaid connection.
+                group = connection.execute(
+                    "SELECT id FROM connections WHERE access_token = '' "
+                    "AND owner_name = ? COLLATE NOCASE AND institution = ? COLLATE NOCASE",
+                    (values['owner_name'], values['institution']),
+                ).fetchone()
+                if group:
+                    group_id = group['id']
+                else:
+                    group_id = connection.execute(
+                        "INSERT INTO connections (owner_name, institution, access_token) VALUES (?, ?, '')",
+                        (values['owner_name'], values['institution']),
+                    ).lastrowid
+                existing = connection.execute(
+                    "SELECT id FROM accounts WHERE connection_id = ? AND name = ? COLLATE NOCASE "
+                    "AND type = ? AND COALESCE(mask, '') = ?",
+                    (group_id, values['name'], values['type'], values['mask']),
+                ).fetchone()
+                account_id = existing['id'] if existing else 'manual:' + secrets.token_hex(16)
+                if not existing:
+                    connection.execute(
+                        "INSERT INTO accounts (id, connection_id, institution, name, mask, type, "
+                        "cash_flow_role, spending_enabled) VALUES (?, ?, ?, ?, ?, ?, 'cash_flow', 1)",
+                        (account_id, group_id, values['institution'], values['name'], values['mask'], values['type']),
+                    )
+            return redirect(url_for('statement_import', account=account_id, account_added='1'))
+    return render_template('history_account.html', error=error, **page_context('transactions'))
 
 
 def statement_context(connection):
