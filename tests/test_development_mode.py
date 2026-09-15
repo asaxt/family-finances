@@ -92,8 +92,8 @@ class DevelopmentModeTests(unittest.TestCase):
                 ],
                 "flow_type": [
                     "earned_income",
-                    "other_inflow",
-                    "other_inflow",
+                    "earned_income",
+                    "earned_income",
                     "transfer",
                 ],
             },
@@ -110,6 +110,114 @@ class DevelopmentModeTests(unittest.TestCase):
 
     def enable_local_ai(self):
         self.set_local_ai(True)
+
+    def seed_review_transactions(self):
+        self.complete_setup()
+        self.set_local_ai(True)
+        with self.application.db() as connection:
+            connection.execute("INSERT INTO connections (id, owner_name, institution, access_token) VALUES (1, 'Example', 'Example Bank', 'test')")
+            connection.execute("INSERT INTO accounts (id, connection_id, institution, name, type, cash_flow_role, spending_enabled) VALUES ('example', 1, 'Example Bank', 'Checking', 'depository', 'cash_flow', 1)")
+            for transaction_id, description in [('guess-one', 'Example Cafe'), ('guess-two', 'Example Shop')]:
+                connection.execute(
+                    "INSERT INTO transactions (id, account_id, amount, currency, description, pending, transacted_at, category) VALUES (?, 'example', 100, 'USD', ?, 0, '2026-09-01', 'Uncategorized')",
+                    (transaction_id, description),
+                )
+            connection.execute("INSERT INTO category_rules (name, flow_type) VALUES ('Dining', 'spending')")
+            connection.execute("INSERT INTO category_rules (name, flow_type) VALUES ('Receipts', 'earned_income')")
+
+    def test_transaction_save_changes_shared_treatment_only_when_explicit(self):
+        self.seed_review_transactions()
+        token = self.csrf_token(self.client.get('/transactions'))
+        data = {'csrf_token': token, 'category_choice': 'Receipts', 'category_flow_type': 'spending'}
+        self.client.post('/api/transaction/guess-one', data=data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT flow_type FROM category_rules WHERE name = 'Receipts'").fetchone()[0], 'earned_income')
+            self.assertEqual(connection.execute("SELECT category_override FROM transactions WHERE id = 'guess-one'").fetchone()[0], 'Receipts')
+        data['edit_category_treatment'] = 'on'
+        self.client.post('/api/transaction/guess-one', data=data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT flow_type FROM category_rules WHERE name = 'Receipts'").fetchone()[0], 'spending')
+        # An ordinary save also works without any treatment field.
+        self.client.post('/api/transaction/guess-one', data={'csrf_token': token, 'category_choice': 'Dining'})
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT category_override FROM transactions WHERE id = 'guess-one'").fetchone()[0], 'Dining')
+
+    def test_new_category_with_existing_name_does_not_change_shared_treatment(self):
+        self.seed_review_transactions()
+        self.client.post('/api/transaction/guess-one', data={
+            'csrf_token': self.csrf_token(self.client.get('/transactions')),
+            'category_choice': '__new__', 'new_category': 'receipts',
+            'category_flow_type': 'spending',
+        })
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT flow_type FROM category_rules WHERE name = 'Receipts'").fetchone()[0], 'earned_income')
+
+    def test_ai_review_survives_runs_and_confirmation_preserves_rules(self):
+        self.seed_review_transactions()
+        from llm_evaluation import apply_categorized_suggestions, create_recurring_category_rules, load_ai_reviews
+        items = []
+        for transaction_id, description in [('guess-one', 'Example Cafe'), ('guess-two', 'Example Shop')]:
+            item = {'transaction_ids': [transaction_id], 'account_id': 'example', 'description': description,
+                    'status': 'categorized', 'category': 'Dining', 'confidence': 1,
+                    'reason': '<script>untrusted</script> Limited evidence.'}
+            items.append(item)
+            with self.application.db() as connection:
+                apply_categorized_suggestions(connection, {'details': [item]})
+                create_recurring_category_rules(connection, {'details': [item]})
+        page = self.client.get('/transactions?ai_review=1&purpose=all')
+        self.assertEqual(page.data.count(b'AI best guess'), 2)
+        self.assertIn(b'&lt;script&gt;untrusted&lt;/script&gt;', page.data)
+        self.assertNotIn(b'<script>untrusted</script>', page.data)
+        self.assertEqual(self.client.post('/api/transaction/guess-one/confirm-ai').status_code, 400)
+        response = self.client.post('/api/transaction/guess-one/confirm-ai', data={
+            'csrf_token': self.csrf_token(page), 'return_ai_review': '1', 'return_purpose': 'all',
+        })
+        self.assertIn('ai_review=1', response.location)
+        self.application.lock_data()
+        self.application.unlock_data(self.password)
+        with self.application.db() as connection:
+            create_recurring_category_rules(connection, {'details': items})
+            self.assertEqual(connection.execute("SELECT category_override_source FROM transactions WHERE id = 'guess-one'").fetchone()[0], 'user')
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0], 2)
+            self.assertNotIn('guess-one', load_ai_reviews(connection))
+            self.assertIn('guess-two', load_ai_reviews(connection))
+        page = self.client.get('/transactions?ai_review=1&purpose=all')
+        self.assertEqual(page.data.count(b'AI best guess'), 1)
+        self.assertNotIn(b'Example Cafe', page.data)
+        self.client.post('/api/transaction/guess-two', data={
+            'csrf_token': self.csrf_token(page), 'category_choice': 'Receipts',
+            'remember_match': 'on', 'return_ai_review': '1',
+        })
+        self.assertNotIn(b'AI best guess', self.client.get('/transactions?ai_review=1').data)
+
+    def test_legacy_tentative_assignments_survive_starting_a_new_report(self):
+        self.seed_review_transactions()
+        from llm_evaluation import AI_REVIEW_SETTING, load_ai_reviews
+        import json
+        with self.application.db() as connection:
+            connection.execute("DELETE FROM settings WHERE key = ?", (AI_REVIEW_SETTING,))
+            connection.execute("INSERT INTO settings (key, value) VALUES ('local_ai_result_v1', ?)", (json.dumps({
+                'details': [{'status': 'categorized', 'category': 'Dining', 'confidence': 1,
+                             'reason': 'Example', 'transaction_ids': ['guess-one']}]
+            }),))
+            self.application.save_ollama_result(connection, {'status': 'running', 'details': []})
+            self.assertIn('guess-one', load_ai_reviews(connection))
+
+    def test_empty_run_replaces_old_report_with_current_coverage(self):
+        self.seed_review_transactions()
+        with self.application.db() as connection:
+            connection.execute("UPDATE transactions SET pending = 1")
+        token = self.csrf_token(self.client.get('/transactions'))
+        with patch.object(self.application, 'classify_evaluation_rows') as classify:
+            response = self.client.post('/api/local-ai/evaluation', json={}, headers={'X-CSRF-Token': token})
+            self.assertEqual(response.status_code, 200)
+            classify.assert_not_called()
+        with self.application.db() as connection:
+            coverage = self.application.load_ollama_result(connection)['coverage']
+        self.assertEqual(coverage['considered'], 2)
+        self.assertEqual(coverage['eligible'], 0)
+        self.assertEqual(coverage['skipped_reasons'], {'Pending transactions': 2})
+        self.assertIn(b'No eligible transactions needed classification', self.client.get('/local-ai/evaluation').data)
 
     def test_development_mode_is_visible_and_blocks_plaid(self):
         health = self.client.get("/health").get_json()
@@ -289,8 +397,8 @@ class DevelopmentModeTests(unittest.TestCase):
                 ],
                 "flow_type": [
                     "earned_income",
-                    "other_inflow",
-                    "other_inflow",
+                    "earned_income",
+                    "earned_income",
                     "transfer",
                     "spending",
                     "spending",
@@ -769,7 +877,7 @@ class DevelopmentModeTests(unittest.TestCase):
         self.client.get("/")
         report = self.client.get("/local-ai/evaluation")
         self.assertIn(b"Food And Drink", report.data)
-        self.assertIn(b"Confidence 2", report.data)
+        self.assertIn(b"Confident", report.data)
         self.assertIn(b"Confidence 0", report.data)
         self.assertIn(b"Uncategorized", report.data)
         self.assertNotIn(b"New category suggested", report.data)

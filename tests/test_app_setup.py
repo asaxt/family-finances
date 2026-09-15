@@ -1,3 +1,4 @@
+import json
 import importlib
 import os
 import re
@@ -77,7 +78,7 @@ class AppSetupTests(unittest.TestCase):
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
         with self.application.db() as connection:
-            self.assertEqual(schema_version(connection), 12)
+            self.assertEqual(schema_version(connection), 13)
             initial_goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
@@ -153,6 +154,16 @@ class AppSetupTests(unittest.TestCase):
         self.assertIn(b"<summary>Cash flow", transactions_page.data)
         self.assertNotIn(b"<th>Spending</th>", transactions_page.data)
         self.assertIn(b'data-flow-type="spending"', transactions_page.data)
+        with self.application.db() as connection:
+            connection.execute("INSERT INTO category_rules (name, flow_type) VALUES ('Example receipts', 'earned_income')")
+        defaults_page = self.client.get("/transactions?purpose=all")
+        defaults = json.loads(re.search(
+            rb'const categoryFlowDefaults = (.*);', defaults_page.data
+        ).group(1))
+        self.assertEqual(defaults['Example receipts'], 'earned_income')
+        self.assertEqual(defaults['Transfer'], 'transfer')
+        self.assertIn(b'applies to all transactions in this category', defaults_page.data)
+        self.assertNotIn(b'Other money in', defaults_page.data)
         css_response = self.client.get("/static/app.css")
         try:
             self.assertIn(
@@ -168,7 +179,7 @@ class AppSetupTests(unittest.TestCase):
                     "csrf_token": self.csrf_token(transactions_page),
                     "category_choice": "__new__",
                     "new_category": "  Payback  ",
-                    "category_flow_type": "other_inflow",
+                    "category_flow_type": "earned_income",
                 },
             ).status_code,
             302,
@@ -185,8 +196,8 @@ class AppSetupTests(unittest.TestCase):
                 "SELECT flow_type FROM category_rules WHERE name = 'payback'"
             ).fetchone()[0]
         self.assertEqual(tuple(transaction), ("Payback", "user", None, 0))
-        self.assertEqual(rule, "other_inflow")
-        self.assertIn(b"Other money in", self.client.get("/cash-flow").data)
+        self.assertEqual(rule, "earned_income")
+        self.assertIn(b"Money in", self.client.get("/cash-flow").data)
 
         transactions_page = self.client.get("/transactions?purpose=all")
         self.client.post(
@@ -195,7 +206,7 @@ class AppSetupTests(unittest.TestCase):
                 "csrf_token": self.csrf_token(transactions_page),
                 "category_choice": "__new__",
                 "new_category": "payback",
-                "category_flow_type": "other_inflow",
+                "category_flow_type": "earned_income",
             },
         )
         with self.application.db() as connection:

@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -515,6 +515,14 @@ def _migrate_eleven_to_twelve(connection):
     )
 
 
+def _migrate_twelve_to_thirteen(connection):
+    # Keep the existing storage key for compatibility; both treatments are Money in.
+    connection.execute(
+        "UPDATE category_rules SET flow_type = 'earned_income' "
+        "WHERE flow_type = 'other_inflow'"
+    )
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
@@ -529,6 +537,7 @@ VALIDATORS = {
     10: _validate_version_ten,
     11: _validate_version_eleven,
     12: _validate_version_twelve,
+    13: _validate_version_twelve,
 }
 MIGRATIONS = {
     0: _migrate_zero_to_one,
@@ -543,6 +552,7 @@ MIGRATIONS = {
     9: _migrate_nine_to_ten,
     10: _migrate_ten_to_eleven,
     11: _migrate_eleven_to_twelve,
+    12: _migrate_twelve_to_thirteen,
 }
 
 
@@ -685,8 +695,8 @@ def create_schema(connection):
             VALUES ('savings_goal_cents', '{DEFAULT_SAVINGS_GOAL}');
             INSERT INTO category_rules (name, flow_type) VALUES
                 ('Income', 'earned_income'),
-                ('Loan Disbursements', 'other_inflow'),
-                ('Reimbursed Work Travel', 'other_inflow'),
+                ('Loan Disbursements', 'earned_income'),
+                ('Reimbursed Work Travel', 'earned_income'),
                 ('Transfer', 'transfer');
             PRAGMA user_version = {CURRENT_SCHEMA_VERSION};
 
