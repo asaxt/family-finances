@@ -431,3 +431,8 @@ tr:last-child td { border-bottom: 0; }
 .statement-account-card select, .statement-row-editor input, .statement-row-editor select { width: 100%; min-width: 0; }
 @media (max-width: 800px) { .sidebar .nav { max-width: 100%; overflow-x: auto; } .sidebar .nav a { flex-shrink: 0; } }
 @media (max-width: 600px) { .statement-fields > label { flex-basis: 100%; } }
+
+.statement-batch-results { list-style: none; padding: 0; margin: 16px 0; }
+.statement-batch-results li { display: grid; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.statement-batch-results span { color: var(--muted); font-size: 13px; }
+#statement-progress { width: 100%; accent-color: var(--forest-2); margin-bottom: 12px; }

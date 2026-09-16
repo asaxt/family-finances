@@ -2482,10 +2482,12 @@ def statement_context(connection):
     for row in connection.execute("SELECT key, value FROM settings WHERE key LIKE ?", (statements.DRAFT_PREFIX + '%',)):
         draft = json.loads(row['value'])
         drafts.append({'id': row['key'][len(statements.DRAFT_PREFIX):],
-                       'account_name': draft['account_name'], 'start': draft['start'], 'end': draft['end']})
+                       'account_name': draft['account_name'], 'filename': draft.get('filename', ''),
+                       'start': draft['start'], 'end': draft['end']})
     return dict(accounts=statement_accounts(connection), drafts=drafts,
                 history=statements.read_setting(connection, statements.HISTORY_KEY, []),
-                local_ai_enabled=local_ai_enabled(connection))
+                local_ai_enabled=local_ai_enabled(connection), max_batch_files=statements.MAX_BATCH_FILES,
+                max_open_drafts=statements.MAX_OPEN_DRAFTS)
 
 
 def refresh_statement_rows(connection, draft):
@@ -2527,7 +2529,12 @@ def oversized_upload(error):
 
 @app.route('/statement-import', methods=['GET', 'POST'])
 def statement_import():
+    global vault_last_activity
     error = None
+    error_code = 'read_failed'
+    wants_json = request.accept_mimetypes.best == 'application/json'
+    if request.method == 'GET' and wants_json:
+        return jsonify(csrf_token=csrf_token())
     if request.method == 'POST':
         with db() as connection:
             accounts = {row['id']: row for row in statement_accounts(connection)}
@@ -2535,10 +2542,12 @@ def statement_import():
             draft_count = connection.execute("SELECT COUNT(*) FROM settings WHERE key LIKE ?", (statements.DRAFT_PREFIX + '%',)).fetchone()[0]
         if not enabled:
             error = 'Enable local AI in Settings before reading a statement.'
-        elif draft_count >= 3:
-            error = 'Finish or discard an existing draft before uploading another statement.'
+            error_code = 'disabled'
+        elif len(request.files.getlist('statement')) > 1:
+            error = 'Enable JavaScript to read multiple statements in sequence, or choose one file.'
         elif not OLLAMA_EVALUATION_LOCK.acquire(blocking=False):
             error = 'The local model is already busy. Wait for the current run to finish.'
+            error_code = 'busy'
         else:
             try:
                 account = accounts.get(request.form.get('account_id'))
@@ -2551,9 +2560,20 @@ def statement_import():
                     raise statements.StatementError('Choose a PDF, PNG, or JPEG statement.')
                 data = upload.read(statements.MAX_UPLOAD_BYTES + 1)
                 digest = hashlib.sha256(data).hexdigest()
+                with db() as connection:
+                    existing = next((dict(row) for row in connection.execute(
+                        "SELECT key, value FROM settings WHERE key LIKE ?", (statements.DRAFT_PREFIX + '%',))
+                        if json.loads(row['value']).get('digest') == digest), None)
+                if existing:
+                    review_url = url_for('review_statement', token=existing['key'][len(statements.DRAFT_PREFIX):])
+                    return jsonify(review_url=review_url, reused=True) if wants_json else redirect(review_url)
+                if draft_count >= statements.MAX_OPEN_DRAFTS:
+                    error_code = 'capacity'
+                    raise statements.StatementError('You have 30 open drafts. Review or discard some, then continue this batch.')
                 pages = statements.document_pages(data)
                 del data
                 draft = {'account_id': account['id'] if account else '', 'account_name': 'Statement accounts',
+                         'filename': (upload.filename or 'Statement').replace('\\', '/').rsplit('/', 1)[-1][:120],
                          'start': '', 'end': '', 'digest': digest,
                          'created_at': datetime.now(timezone.utc).isoformat(), 'rows': [], 'warnings': [],
                          'pages': [{'number': page['number'], 'image': page['image']} for page in pages]}
@@ -2587,13 +2607,17 @@ def statement_import():
                         except statements.StatementError:
                             row['selected'] = False
                     statements.write_setting(connection, statements.DRAFT_PREFIX + token, draft)
-                return redirect(url_for('review_statement', token=token))
+                review_url = url_for('review_statement', token=token)
+                vault_last_activity = time.monotonic()
+                return jsonify(review_url=review_url, reused=False) if wants_json else redirect(review_url)
             except statements.StatementError as failure:
                 error = str(failure)
             except Exception:
                 error = 'The statement could not be read. No transactions were added. Try a clearer document or check that Ollama is running.'
             finally:
                 OLLAMA_EVALUATION_LOCK.release()
+    if request.method == 'POST' and wants_json:
+        return jsonify(error=error, code=error_code), 409 if error_code in {'busy', 'capacity'} else 400
     context = page_context('transactions')
     with db() as connection:
         context.update(statement_context(connection))

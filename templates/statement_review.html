@@ -4,7 +4,7 @@
 {% block heading %}Review your statement{% endblock %}
 {% block content %}
 {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
-<div class="statement-overview"><p>{{ draft.rows|length }} transactions · {{ draft.pages|length }} source pages{% if draft.start %} · {{ draft.start }} to {{ draft.end }}{% endif %}</p><a class="text-link" href="{{ url_for('statement_import') }}">All imports</a></div>
+<div class="statement-overview"><p>{% if draft.filename %}<strong>{{ draft.filename }}</strong> · {% endif %}{{ draft.rows|length }} transactions · {{ draft.pages|length }} source pages{% if draft.start %} · {{ draft.start }} to {{ draft.end }}{% endif %}</p><a class="text-link" href="{{ url_for('statement_import') }}">All imports</a></div>
 {% if draft.warnings %}<details class="panel statement-notices"><summary>{{ draft.warnings|length }} notes from the reader</summary><ul>{% for warning in draft.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></details>{% endif %}
 <form method="post" id="statement-review-form">
 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

@@ -16,6 +16,8 @@ from PIL import Image, ImageOps
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_PAGES = 25
 MAX_ROWS = 2500
+MAX_OPEN_DRAFTS = 30
+MAX_BATCH_FILES = 25
 MODEL = "qwen3.8:27b"
 DRAFT_PREFIX = "statement_draft:"
 HISTORY_KEY = "statement_import_history_v1"

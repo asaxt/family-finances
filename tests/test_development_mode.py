@@ -419,6 +419,60 @@ class DevelopmentModeTests(unittest.TestCase):
             self.application.refresh_statement_rows(connection, draft)
             self.assertTrue(all(row['already_imported'] for row in draft['rows']))
 
+    def test_batch_upload_api_keeps_successes_reuses_drafts_and_allows_more_than_three(self):
+        self.seed_review_transactions()
+        csrf = self.client.get('/statement-import', headers={'Accept': 'application/json'}).json['csrf_token']
+        page = {'number': 1, 'text': 'Fictional statement', 'image': 'ZXhhbXBsZQ=='}
+        def upload(data, name='example.pdf'):
+            return self.client.post('/statement-import', headers={'Accept': 'application/json'}, data={
+                'csrf_token': csrf, 'usd': 'on', 'statement': (io.BytesIO(data), name)})
+        with patch.object(self.application.statements, 'document_pages', return_value=[page]) as reader, \
+             patch.object(self.application.statements, 'extract_page', return_value={'transactions': [], 'warnings': []}):
+            first = upload(b'%PDF-one', '../../private-test-statement.pdf')
+            self.assertEqual(first.status_code, 200)
+            repeated = upload(b'%PDF-one')
+            self.assertTrue(repeated.json['reused'])
+            self.assertEqual(first.json['review_url'], repeated.json['review_url'])
+            self.assertEqual(reader.call_count, 1)
+            with patch.object(self.application.statements, 'document_pages', side_effect=RuntimeError('private-detail')):
+                failure = upload(b'broken')
+                self.assertEqual(failure.status_code, 400)
+                self.assertNotIn('private-detail', failure.get_data(as_text=True))
+            for index in range(4):
+                self.assertEqual(upload(f'%PDF-next-{index}'.encode()).status_code, 200)
+        with self.application.db() as connection:
+            drafts = list(connection.execute("SELECT value FROM settings WHERE key LIKE 'statement_draft:%'"))
+            self.assertEqual(len(drafts), 5)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 2)
+            first_draft = self.application.statements.read_setting(connection, self.application.statements.DRAFT_PREFIX + first.json['review_url'].rsplit('/', 1)[1])
+            self.assertEqual(first_draft['filename'], 'private-test-statement.pdf')
+        self.assertNotIn(b'private-test-statement.pdf', self.application.vault.path.read_bytes())
+        self.assertIn(b'private-test-statement.pdf', self.client.get('/statement-import').data)
+        self.application.lock_data()
+        self.assertEqual(self.client.get('/statement-import', headers={'Accept': 'application/json'}).status_code, 302)
+
+    def test_batch_capacity_and_direct_multiple_uploads_are_explicit(self):
+        self.seed_review_transactions()
+        csrf = self.csrf_token(self.client.get('/statement-import'))
+        headers = {'Accept': 'application/json'}
+        multi = self.client.post('/statement-import', headers=headers, data={'csrf_token': csrf, 'usd': 'on',
+            'statement': [(io.BytesIO(b'%PDF-one'), 'one.pdf'), (io.BytesIO(b'%PDF-two'), 'two.pdf')]})
+        self.assertEqual(multi.status_code, 400)
+        with patch.object(self.application.statements, 'MAX_OPEN_DRAFTS', 0), \
+             patch.object(self.application.statements, 'document_pages') as reader:
+            response = self.client.post('/statement-import', headers=headers, data={'csrf_token': csrf, 'usd': 'on',
+                'statement': (io.BytesIO(b'%PDF-one'), 'one.pdf')})
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json['code'], 'capacity')
+            reader.assert_not_called()
+        self.application.OLLAMA_EVALUATION_LOCK.acquire()
+        try:
+            response = self.client.post('/statement-import', headers=headers, data={'csrf_token': csrf, 'usd': 'on',
+                'statement': (io.BytesIO(b'%PDF-one'), 'one.pdf')})
+            self.assertEqual(response.json['code'], 'busy')
+        finally:
+            self.application.OLLAMA_EVALUATION_LOCK.release()
+
     def test_import_automatically_classifies_and_timeout_can_be_retried_without_reimporting(self):
         self.seed_review_transactions()
         self.import_classifier.stop()
