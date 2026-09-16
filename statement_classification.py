@@ -31,7 +31,7 @@ def match_import_transfers(connection, imported_ids):
     rows = [row for row in account_rows(connection)
             if row['amount'] and row['cash_flow_role'] == 'cash_flow' and row['spending_enabled']
             and (needs_category(row) or row['flow_type'] == 'transfer'
-                 or row['effective_category'].casefold() == 'transfer')]
+                 or (row['flow_type'] is None and row['effective_category'].casefold() == 'transfer'))]
     available = {row['id']: row for row in rows}
     by_amount = defaultdict(list)
     for row in rows:

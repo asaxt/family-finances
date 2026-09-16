@@ -17,7 +17,7 @@ EXISTS (
           AND (
             (LOWER(COALESCE(p.category_override, pm.category, p.category)) = 'uncategorized'
              AND COALESCE(p.category_override_source, '') != 'user' AND pm.category IS NULL)
-            OR LOWER(COALESCE(p.category_override, pm.category, p.category)) = 'transfer'
+            OR (pc.flow_type IS NULL AND LOWER(COALESCE(p.category_override, pm.category, p.category)) = 'transfer')
             OR pc.flow_type = 'transfer'
           )
     )

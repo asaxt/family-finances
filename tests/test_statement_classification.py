@@ -77,3 +77,10 @@ class StatementClassificationTests(unittest.TestCase):
         self.add('new', 'savings', -1000)
         self.assertEqual(match_import_transfers(self.db, ['new']), 1)
         self.assertEqual(self.db.execute("SELECT category_override_source FROM transactions WHERE id = 'existing'").fetchone()[0], 'user')
+
+    def test_category_treatment_takes_precedence_over_transfer_label(self):
+        self.db.execute("UPDATE category_rules SET flow_type = 'spending' WHERE name = 'Transfer'")
+        self.add('existing', 'checking', 1000, category='Transfer')
+        self.add('new', 'savings', -1000)
+        self.assertEqual(match_import_transfers(self.db, ['new']), 0)
+        self.assertEqual(self.categories()['new'], 'Uncategorized')
