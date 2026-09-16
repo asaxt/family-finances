@@ -4,7 +4,7 @@
 {% block heading %}Review statement{% endblock %}
 {% block content %}
 {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
-<section class="panel"><div class="panel-header"><div><h2>{{ draft.account_name }}</h2><p>{{ draft.start }} through {{ draft.end }} · {{ draft.rows|length }} extracted or manually added rows</p></div><a class="text-link" href="{{ url_for('statement_import') }}">All imports</a></div>
+<section class="panel"><div class="panel-header"><div><h2>{{ draft.account_name }}</h2><p>{{ ('Transaction dates: ' ~ draft.start ~ ' through ' ~ draft.end) if draft.start else 'Transaction dates need review' }} · {{ draft.rows|length }} extracted or manually added rows</p></div><a class="text-link" href="{{ url_for('statement_import') }}">All imports</a></div>
   <p>Check the account and every selected date, amount, and direction against the source pages. Extraction can miss or misread rows. Balances and statement totals must not be imported as transactions.</p>
   {% if draft.warnings %}<div class="notice error"><strong>Check these issues before importing</strong><ul>{% for warning in draft.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></div>{% endif %}
 </section>

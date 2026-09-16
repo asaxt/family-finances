@@ -7,8 +7,8 @@
 {% if request.args.get('account_added') %}<div class="notice" role="status">Your unlinked account is ready. Select its statement below.</div>{% endif %}
 {% if request.args.get('imported') %}<div class="notice" role="status">Statement transactions added. <a href="{{ url_for('transactions') }}">View transactions</a> to categorize them.</div>{% endif %}
 <section class="panel">
-  <div class="panel-header"><div><h2>Read a bank or credit-card statement</h2><p>Choose an account, read the statement locally, then check the extracted rows before adding them.</p></div></div>
-  <p class="transaction-sub">PDF, PNG, or JPEG · up to 20 MB · up to 8 PDF pages per draft. Uploaded originals stay in memory. Page previews and drafts are encrypted until you add or discard the draft. No cloud AI is used.</p>
+  <div class="panel-header"><div><h2>Read a bank or credit-card statement</h2><p>Choose an account and upload the full statement. Transaction dates are read from the document; check the extracted rows before adding them.</p></div></div>
+  <p class="transaction-sub">PDF, PNG, or JPEG · up to 20 MB · full statements up to 25 PDF pages. Uploaded originals stay in memory. Page previews and drafts are encrypted until you add or discard the draft. No cloud AI is used.</p>
   <p>Closed account or unable to connect through Plaid? <a class="text-link" href="{{ url_for('add_history_account') }}">Add an unlinked account</a> for its historical statements.</p>
   {% if not local_ai_enabled %}<p><a class="button secondary" href="{{ url_for('settings_page') }}">Enable local AI in Settings</a></p>
   {% elif not accounts %}<p>Add the bank or credit-card account first, then return here to fill its missing history.</p>
@@ -19,21 +19,18 @@
       <option value="">Choose account</option>
       {% for account in accounts %}<option value="{{ account.id }}" {{ 'selected' if account.id == request.form.get('account_id', request.args.get('account')) }}>{{ account.owner_name }} · {{ account.name }}{% if account.mask %} · ending {{ account.mask }}{% endif %}{% if account.unlinked %} · Unlinked history{% endif %}</option>{% endfor %}
     </select></label>
-    <div class="statement-fields"><label>Statement period starts<input type="date" name="start" value="{{ request.form.get('start', '') }}" required></label><label>Statement period ends<input type="date" name="end" value="{{ request.form.get('end', '') }}" required></label></div>
     <label>Statement file<input type="file" name="statement" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" required></label>
-    <details><summary>PDF page range and reading options</summary>
-      <p class="transaction-sub">Leave the page range blank to read the whole document, up to 8 pages. For longer PDFs, import separate page ranges.</p>
-      <div class="statement-fields"><label>First PDF page<input type="number" name="first_page" min="1" value="{{ request.form.get('first_page', '') }}"></label><label>Last PDF page<input type="number" name="last_page" min="1" value="{{ request.form.get('last_page', '') }}"></label></div>
+    <details><summary>Reading option for difficult layouts</summary>
       <label class="check-label"><input type="checkbox" name="read_images"> Read page images instead of selectable text, for difficult layouts</label>
     </details>
     <label class="check-label"><input type="checkbox" name="usd" required> This is a US-dollar statement for the selected account.</label>
     <button class="button primary" type="submit">Read statement locally</button>
-    <p id="statement-reading" class="transaction-sub" hidden>Reading locally. This can take several minutes. Keep this page open; no transactions will be added yet.</p>
+    <p id="statement-reading" class="transaction-sub" hidden>Reading locally. Long statements can take several minutes as every page is read. Keep this page open; no transactions will be added yet.</p>
   </form>
   {% endif %}
 </section>
 {% if drafts %}<section class="panel"><div class="panel-header"><h2>Drafts to review</h2></div>
-  {% for draft in drafts %}<p><a class="text-link" href="{{ url_for('review_statement', token=draft.id) }}">{{ draft.account_name }} · {{ draft.start }} to {{ draft.end }}</a></p>{% endfor %}
+  {% for draft in drafts %}<p><a class="text-link" href="{{ url_for('review_statement', token=draft.id) }}">{{ draft.account_name }} · {{ (draft.start ~ ' to ' ~ draft.end) if draft.start else 'Dates need review' }}</a></p>{% endfor %}
 </section>{% endif %}
 {% if history %}<section class="panel"><div class="panel-header"><h2>Statement import history</h2></div>
   <p class="transaction-sub">Excluding an import removes its remaining statement rows from reporting. You can restore them from excluded transactions.</p>

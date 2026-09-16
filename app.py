@@ -143,6 +143,8 @@ class MemoryUploadRequest(Request):
 app = Flask(__name__)
 app.request_class = MemoryUploadRequest
 app.config["MAX_CONTENT_LENGTH"] = statements.MAX_UPLOAD_BYTES + 65536
+# Review forms can contain up to 2,500 editable transaction rows.
+app.config["MAX_FORM_MEMORY_SIZE"] = 4 * 1024 * 1024
 LOGIN_ATTEMPTS = {}
 vault = EncryptedDatabase(VAULT_PATH)
 vault_last_activity = 0.0
@@ -2483,11 +2485,12 @@ def statement_context(connection):
 
 
 def refresh_statement_rows(connection, draft):
+    draft['start'], draft['end'] = statements.date_range(draft['rows'])
     valid, valid_indexes = [], []
     for index, row in enumerate(draft['rows']):
         row['duplicate'] = ''
         try:
-            valid.append(statements.validate_row(row, draft['start'], draft['end']))
+            valid.append(statements.validate_row(row))
             valid_indexes.append(index)
             row['error'] = ''
         except statements.StatementError as error:
@@ -2527,17 +2530,6 @@ def statement_import():
                 account = accounts.get(request.form.get('account_id'))
                 if not account:
                     raise statements.StatementError('Choose the account this statement belongs to.')
-                try:
-                    start = date.fromisoformat(request.form.get('start', ''))
-                    end = date.fromisoformat(request.form.get('end', ''))
-                    if end < start or (end - start).days > 370:
-                        raise ValueError()
-                    first = int(request.form['first_page']) if request.form.get('first_page') else None
-                    last = int(request.form['last_page']) if request.form.get('last_page') else None
-                    if first is not None and first < 1 or last is not None and last < 1:
-                        raise ValueError()
-                except ValueError:
-                    raise statements.StatementError('Choose a valid statement period of up to one year and positive page numbers.') from None
                 if request.form.get('usd') != 'on':
                     raise statements.StatementError('This first version supports US-dollar statements only. Confirm the statement currency.')
                 upload = request.files.get('statement')
@@ -2545,16 +2537,21 @@ def statement_import():
                     raise statements.StatementError('Choose a PDF, PNG, or JPEG statement.')
                 data = upload.read(statements.MAX_UPLOAD_BYTES + 1)
                 digest = hashlib.sha256(data).hexdigest()
-                pages = statements.document_pages(data, first, last)
+                pages = statements.document_pages(data)
                 del data
                 draft = {'account_id': account['id'], 'account_name': account['owner_name'] + ' · ' + account['name'],
-                         'start': start.isoformat(), 'end': end.isoformat(), 'digest': digest,
+                         'start': '', 'end': '', 'digest': digest,
                          'created_at': datetime.now(timezone.utc).isoformat(), 'rows': [], 'warnings': [],
                          'pages': [{'number': page['number'], 'image': page['image']} for page in pages]}
-                for page in pages:
-                    if request.form.get('read_images') == 'on':
+                if request.form.get('read_images') == 'on':
+                    for page in pages:
                         page['text'] = ''
-                    result = statements.extract_page(page, account['type'], draft['start'], draft['end'])
+                date_context = statements.date_context(pages)
+                for page in pages:
+                    result = statements.extract_page(page, account['type'], date_context)
+                    for key in ('statement_start', 'statement_end'):
+                        if result.get(key):
+                            date_context[key] = result[key]
                     draft['warnings'].extend(f"Page {page['number']}: {warning}" for warning in result['warnings'])
                     mask = account.get('mask') or ''
                     if mask and result['account_last4'] and mask[-4:] != result['account_last4']:
@@ -2563,7 +2560,7 @@ def statement_import():
                         draft['rows'].append({**row, 'page': page['number'],
                             'id': statements.import_identity(account['id'], digest, page['number'], index)})
                     if len(draft['rows']) > statements.MAX_ROWS:
-                        raise statements.StatementError('Read fewer pages; each draft can contain up to 500 rows.')
+                        raise statements.StatementError('This statement exceeds the limit of 2,500 transaction rows. No transactions were added.')
                 token = secrets.token_hex(16)
                 with db() as connection:
                     refresh_statement_rows(connection, draft)
@@ -2574,7 +2571,7 @@ def statement_import():
             except statements.StatementError as failure:
                 error = str(failure)
             except Exception:
-                error = 'The statement could not be read. No transactions were added. Try a clearer document or fewer pages.'
+                error = 'The statement could not be read. No transactions were added. Try a clearer document or check that Ollama is running.'
             finally:
                 OLLAMA_EVALUATION_LOCK.release()
     context = page_context('transactions')
@@ -2622,12 +2619,13 @@ def review_statement(token):
                     error = 'The selected account is no longer available.'
                 else:
                     for row in chosen:
-                        validated = statements.validate_row(row, draft['start'], draft['end'])
+                        validated = statements.validate_row(row)
                         connection.execute(
                             "INSERT INTO transactions (id, account_id, amount, currency, description, pending, transacted_at, category) "
                             "VALUES (?, ?, ?, 'USD', ?, 0, ?, 'Uncategorized')",
                             (row['id'], draft['account_id'], validated['amount'], validated['description'], validated['date']),
                         )
+                    draft['start'], draft['end'] = statements.date_range(chosen)
                     history = statements.read_setting(connection, statements.HISTORY_KEY, [])
                     history.insert(0, {'id': token, 'account_id': draft['account_id'], 'account_name': draft['account_name'],
                         'start': draft['start'], 'end': draft['end'], 'count': len(chosen),

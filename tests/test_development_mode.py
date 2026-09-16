@@ -324,11 +324,44 @@ class DevelopmentModeTests(unittest.TestCase):
         token = self.csrf_token(self.client.get('/statement-import'))
         with patch.object(self.application.statements, 'document_pages', return_value=[page]), patch.object(self.application.statements, 'extract_page', return_value=extraction):
             response = self.client.post('/statement-import', data={
-                'csrf_token': token, 'account_id': account_id, 'start': '2026-09-01', 'end': '2026-09-30', 'usd': 'on',
+                'csrf_token': token, 'account_id': account_id, 'usd': 'on',
                 'statement': (io.BytesIO(b'%PDF-synthetic-example'), 'example.pdf'),
             })
         self.assertEqual(response.status_code, 302)
         return response.location
+
+    def test_full_statement_without_date_or_page_fields_and_review_date_correction(self):
+        self.seed_review_transactions()
+        page = self.client.get('/statement-import')
+        for field in (b'name="start"', b'name="end"', b'name="first_page"', b'name="last_page"'):
+            self.assertNotIn(field, page.data)
+        pages = [{'number': number, 'text': 'Synthetic page', 'image': 'ZXhhbXBsZQ=='} for number in range(1, 26)]
+        contexts = []
+        def extract(page, account_type, context):
+            contexts.append(dict(context))
+            return {'account_last4': '', 'warnings': [], 'statement_start': '2025-12-15', 'statement_end': '2026-01-14',
+                    'transactions': [{'date': '2026-01-02', 'description': f"Example page {page['number']} row {index}",
+                        'amount': '1.00', 'direction': 'money_out', 'evidence': 'Fictional row'} for index in range(25)]}
+        with patch.object(self.application.statements, 'document_pages', return_value=pages), \
+             patch.object(self.application.statements, 'extract_page', side_effect=extract) as reader:
+            response = self.client.post('/statement-import', data={
+                'csrf_token': self.csrf_token(page), 'account_id': 'example', 'usd': 'on',
+                'statement': (io.BytesIO(b'%PDF-synthetic'), 'example.pdf')})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(reader.call_count, 25)
+        self.assertEqual(contexts[1]['statement_start'], '2025-12-15')
+        location = response.location
+        with self.application.db() as connection:
+            draft = self.application.statements.read_setting(connection, self.application.statements.DRAFT_PREFIX + location.rsplit('/', 1)[1])
+        self.assertEqual(len(draft['rows']), 625)
+        self.assertEqual((draft['start'], draft['end']), ('2026-01-02', '2026-01-02'))
+        # Correcting a date outside the extracted range must work, and history covers only selected rows.
+        response = self.client.post(location, data={'csrf_token': self.csrf_token(self.client.get(location)),
+            'action': 'confirm', 'include': ['0'], 'date_0': '2025-12-30', 'reviewed': 'on'})
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+        self.assertEqual((history[0]['start'], history[0]['end']), ('2025-12-30', '2025-12-30'))
 
     def test_statement_draft_is_encrypted_and_only_confirmed_rows_are_added(self):
         self.seed_review_transactions()
@@ -416,7 +449,7 @@ class DevelopmentModeTests(unittest.TestCase):
         token = self.csrf_token(self.client.get('/statement-import'))
         with patch.object(self.application.statements, 'document_pages', side_effect=RuntimeError('example-private-source-detail')):
             response = self.client.post('/statement-import', data={
-                'csrf_token': token, 'account_id': 'example', 'start': '2026-09-01', 'end': '2026-09-30',
+                'csrf_token': token, 'account_id': 'example',
                 'usd': 'on', 'statement': (io.BytesIO(b'%PDF-test'), 'example.pdf'),
             })
         self.assertIn(b'No transactions were added', response.data)
