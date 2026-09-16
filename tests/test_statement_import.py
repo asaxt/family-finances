@@ -30,6 +30,27 @@ def text_pdf():
 
 
 class StatementImportTests(unittest.TestCase):
+    def test_account_sections_match_only_unique_endings_and_leave_unknowns_unassigned(self):
+        accounts = [{'id': 'checking', 'type': 'depository', 'mask': '1111'},
+                    {'id': 'savings', 'type': 'depository', 'mask': '2222'},
+                    {'id': 'another-savings', 'type': 'depository', 'mask': '2222'}]
+        rows = [{'account_label': 'Checking', 'account_last4': '1111', 'account_type': 'depository'},
+                {'account_label': 'Checking', 'account_last4': '1111', 'account_type': 'depository'},
+                {'account_label': 'Savings', 'account_last4': '2222', 'account_type': 'depository'},
+                {'account_label': '', 'account_last4': '', 'account_type': ''}]
+        groups = statements.group_accounts(rows, accounts, 'checking')
+        self.assertEqual(len(groups), 3)
+        self.assertEqual([group['account_id'] for group in groups], ['checking', '', ''])
+        self.assertEqual([row['account_group'] for row in rows], ['0', '0', '1', '2'])
+
+    def test_extraction_does_not_keep_full_account_identifiers(self):
+        row = {'date': '2026-01-02', 'description': 'Example', 'amount': '1.00', 'direction': 'money_out',
+               'evidence': 'Example', 'account_label': 'Checking 123456789', 'account_last4': '123456789', 'account_type': 'other'}
+        with patch.object(statements, 'local_model', return_value={'transactions': [row]}):
+            result = statements.extract_page({'number': 1, 'text': 'A' * 100, 'image': ''}, 'unknown')
+        self.assertEqual(result['transactions'][0]['account_last4'], '')
+        self.assertNotIn('123456789', result['transactions'][0]['account_label'])
+
     def test_full_pdf_accepts_25_pages_and_rejects_26_without_truncation(self):
         with Image.new('RGB', (100, 80), 'white') as image:
             for count in (9, 25, 26):

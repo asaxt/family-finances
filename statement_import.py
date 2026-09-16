@@ -114,8 +114,8 @@ def document_pages(data):
 
 ROW_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "properties": {key: {"type": "string"} for key in ["date", "description", "amount", "direction", "evidence"]},
-    "required": ["date", "description", "amount", "direction", "evidence"],
+    "properties": {key: {"type": "string"} for key in ["date", "description", "amount", "direction", "evidence", "account_label", "account_last4", "account_type"]},
+    "required": ["date", "description", "amount", "direction", "evidence", "account_label", "account_last4", "account_type"],
 }
 EXTRACTION_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -157,7 +157,7 @@ or account identifiers as transactions. Never invent missing records or values.
 Use full ISO transaction dates YYYY-MM-DD. Read the year from the transaction or the statement's
 printed period, closing date, and date reference. Handle December/January year boundaries.
 Infer a missing year only when the document supports exactly one year; otherwise leave date blank.
-Never assume the current year. Reference excerpts and cover images are for dates only; extract
+Never assume the current year. Reference excerpts and cover images are for dates and account headings only; extract
 transactions only from the requested page. Do not exclude a printed transaction merely because
 its transaction date falls outside the statement period. Return statement_start and statement_end
 as ISO dates only when a printed statement period establishes them; otherwise return empty strings.
@@ -166,8 +166,16 @@ Direction is money_out for withdrawals, card charges, fees, and purchases; money
 card payments, and refunds. Do not confuse payment due or balance due with an actual payment.
 Use column headers and debit/credit indicators. Leave uncertain dates, amounts or direction blank.
 Copy the description and a short supporting line as evidence. Do not classify categories.
-Return account_last4 only if clearly shown, never a full account number. Warn if the document
-contains multiple accounts, non-USD amounts, unreadable text, or incomplete transaction lines.
+For EACH transaction return account_label (its section heading, such as Checking or Savings),
+account_last4 (exactly four digits only when shown), and account_type (depository or credit, or blank).
+A statement can contain several accounts on the SAME page. Attribute each row to its own account
+section, not the document's first account or an account mentioned in a transfer description.
+Use explicit section headings and continuation headings. Reference prior account context only when
+this page clearly continues that account. Leave account fields blank if ownership is ambiguous.
+Never invent an account identifier, use a full account number, or combine different account sections.
+The supplied account type is only a hint, not a requirement for every row.
+Return the page-level account_last4 only when the page covers exactly one account; otherwise blank.
+Warn about ambiguous account ownership, non-USD amounts, unreadable text, or incomplete lines.
 No transactions on a page is valid. Do not make a best guess about monetary values."""},
             message,
         ],
@@ -181,6 +189,10 @@ No transactions on a page is valid. Do not make a best guess about monetary valu
     for row in rows:
         if any(not isinstance(row.get(key), str) for key in ROW_SCHEMA["required"]):
             raise StatementError("A statement row was incomplete. No transactions were added. Try a clearer document.")
+    for row in rows:
+        row['account_last4'] = row['account_last4'] if re.fullmatch(r'[0-9]{4}', row['account_last4']) else ''
+        row['account_label'] = re.sub(r'\d(?:[ -]?\d){4,}', '[number omitted]', row['account_label'])[:100]
+        row['account_type'] = row['account_type'] if row['account_type'] in {'depository', 'credit'} else ''
     return {
         "account_last4": str(response.get("account_last4", ""))[-4:],
         **{key: response.get(key, '') if isinstance(response.get(key), str) and
@@ -304,3 +316,28 @@ def possible_overlaps(connection):
         "AND s.excluded = 0 AND t.excluded = 0 AND s.pending = 0 AND t.pending = 0"
     )
     return {transaction_id for pair in pairs for transaction_id in pair}
+
+
+def group_accounts(rows, accounts, default_id=''):
+    groups = []
+    by_key = {}
+    has_accounts = any(row.get('account_label') or row.get('account_last4') for row in rows)
+    for row in rows:
+        label = row.get('account_label', '').strip()
+        mask = row.get('account_last4', '')
+        kind = row.get('account_type', '')
+        key = (normalized_description(label), mask, kind)
+        if key not in by_key:
+            matches = [account for account in accounts if mask and account.get('mask') == mask
+                       and (not kind or account['type'] == kind)]
+            account_id = matches[0]['id'] if len(matches) == 1 else ''
+            # A user-selected single account is useful only when no account sections were detected.
+            if not has_accounts:
+                account_id = default_id
+            group = {'id': str(len(groups)), 'label': label or 'Account needs identification',
+                     'mask': mask, 'type': kind, 'account_id': account_id}
+            groups.append(group)
+            by_key[key] = group
+        row['account_group'] = by_key[key]['id']
+        row['account_override'] = ''
+    return groups

@@ -363,6 +363,59 @@ class DevelopmentModeTests(unittest.TestCase):
             history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
         self.assertEqual((history[0]['start'], history[0]['end']), ('2025-12-30', '2025-12-30'))
 
+    def test_multi_account_statement_routes_rows_and_checks_duplicates_per_account(self):
+        self.complete_setup()
+        self.create_history_account(name='Checking', mask='1111')
+        self.create_history_account(name='Savings', mask='2222')
+        self.application.save_setting(self.application.LOCAL_AI_SETTING, '1')
+        with self.application.db() as connection:
+            accounts = {row['name']: row['id'] for row in connection.execute('SELECT id, name FROM accounts')}
+        rows = [{'date': '2026-01-02', 'description': 'Example transfer', 'amount': '10.00',
+                 'direction': 'money_out', 'evidence': 'Fictional row', 'account_label': name,
+                 'account_last4': mask, 'account_type': 'depository'}
+                for name, mask in [('Checking', '1111'), ('Savings', '2222'), ('Unknown section', '3333')]]
+        page = {'number': 1, 'text': 'Fictional multi-account statement', 'image': 'ZXhhbXBsZQ=='}
+        csrf = self.csrf_token(self.client.get('/statement-import'))
+        with patch.object(self.application.statements, 'document_pages', return_value=[page]), \
+             patch.object(self.application.statements, 'extract_page', return_value={'transactions': rows, 'warnings': []}):
+            response = self.client.post('/statement-import', data={'csrf_token': csrf, 'usd': 'on',
+                'statement': (io.BytesIO(b'%PDF-multi-example'), 'example.pdf')})
+        self.assertEqual(response.status_code, 302)
+        location = response.location
+        token = location.rsplit('/', 1)[1]
+        key = self.application.statements.DRAFT_PREFIX + token
+        with self.application.db() as connection:
+            draft = self.application.statements.read_setting(connection, key)
+        self.assertEqual([row['account_id'] for row in draft['rows']], [accounts['Checking'], accounts['Savings'], ''])
+        self.assertFalse(draft['rows'][0]['duplicate'])
+        self.assertFalse(draft['rows'][1]['duplicate'])
+        self.assertTrue(draft['rows'][2]['selected'])
+        confirm = {'csrf_token': csrf, 'action': 'confirm', 'include': ['0', '1', '2'], 'reviewed': 'on'}
+        self.assertEqual(self.client.post(location, data=confirm).status_code, 200)
+        self.assertEqual(self.client.post(location, data={**confirm, 'group_account_2': 'missing'}).status_code, 200)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 0)
+        response = self.client.post('/history-accounts/new?draft=' + token, data={
+            'csrf_token': csrf, 'owner_name': 'Example Person', 'institution': 'Example Former Bank',
+            'name': 'Old card', 'mask': '3333', 'type': 'credit'})
+        self.assertEqual(response.location, location)
+        with self.application.db() as connection:
+            card_id = connection.execute("SELECT id FROM accounts WHERE name = 'Old card'").fetchone()[0]
+        response = self.client.post(location, data={**confirm, 'group_account_2': card_id})
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            self.assertEqual({row[0] for row in connection.execute('SELECT account_id FROM transactions')},
+                             {accounts['Checking'], accounts['Savings'], card_id})
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+        self.assertEqual(len(history), 3)
+        self.client.post('/statement-import/history/' + history[0]['id'] + '/exclude', data={'csrf_token': csrf})
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions WHERE excluded = 1').fetchone()[0], 1)
+            # A replay or reassignment cannot bypass already-imported row identities.
+            draft['account_groups'][0]['account_id'] = card_id
+            self.application.refresh_statement_rows(connection, draft)
+            self.assertTrue(all(row['already_imported'] for row in draft['rows']))
+
     def test_statement_draft_is_encrypted_and_only_confirmed_rows_are_added(self):
         self.seed_review_transactions()
         location = self.upload_synthetic_statement()
@@ -435,6 +488,7 @@ class DevelopmentModeTests(unittest.TestCase):
             'csrf_token': token, 'action': 'confirm', 'include': ['3'], 'reviewed': 'on',
             'date_3': '2026-09-20', 'description_3': 'Manually checked example',
             'amount_3': '5.20', 'direction_3': 'money_out',
+            'account_override_3': 'example',
         })
         self.assertEqual(response.status_code, 302)
         with self.application.db() as connection:

@@ -12,11 +12,24 @@
 <section class="panel">
 <form method="post" id="statement-review-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <h2>Match statement accounts</h2>
+  <p>Confirm where each account section belongs. If an account is missing, <a href="{{ url_for('add_history_account', draft=token) }}">add an unlinked account</a>, then return to this draft. Save edits first to keep any changes.</p>
+  {% for group in draft.account_groups %}
+  <label>{{ group.label }}{% if group.mask %} · ending {{ group.mask }}{% endif %} · {{ draft.rows|selectattr('account_group', 'equalto', group.id)|list|length }} transactions
+    <select name="group_account_{{ group.id }}"><option value="">Choose account</option>
+      {% for account in accounts %}<option value="{{ account.id }}" {{ 'selected' if group.account_id == account.id }}>{{ account.owner_name }} · {{ account.institution }} · {{ account.name }}{% if account.mask %} · ending {{ account.mask }}{% endif %}</option>{% endfor %}
+    </select>
+  </label>
+  {% endfor %}
+  <p class="transaction-sub">Suggestions use matching last four digits and account type. Check the owner and institution too. Unmatched or ambiguous sections must be assigned before importing. You can override the account for an individual row below.</p>
+  <button class="button secondary" name="action" value="save" type="submit">Save account matches and recheck duplicates</button>
   {% for row in draft.rows %}
   <article class="statement-row">
     <div class="statement-row-heading"><label class="check-label"><input class="statement-include" type="checkbox" name="include" value="{{ loop.index0 }}" {{ 'checked' if row.selected and not row.already_imported }} {{ 'disabled' if row.already_imported }}> Add row {{ loop.index }}</label><a href="#source-page-{{ row.page }}">Source page {{ row.page }}</a></div>
     {% if row.error %}<p class="statement-warning">{{ row.error }}</p>{% endif %}
     {% if row.duplicate %}<p class="statement-warning">{{ row.duplicate }}</p>{% endif %}
+    <p class="transaction-sub">Statement account: {{ row.account_label or 'Unidentified' }}{% if row.account_last4 %} · ending {{ row.account_last4 }}{% endif %}</p>
+    <label>Account for this row<select name="account_override_{{ loop.index0 }}"><option value="">Use section match above</option>{% for account in accounts %}<option value="{{ account.id }}" {{ 'selected' if row.account_override == account.id }}>{{ account.owner_name }} · {{ account.institution }} · {{ account.name }}{% if account.mask %} · ending {{ account.mask }}{% endif %}</option>{% endfor %}</select></label>
     <label>Description<input name="description_{{ loop.index0 }}" value="{{ row.description }}" maxlength="300"></label>
     <div class="statement-fields">
       <label>Date<input type="date" name="date_{{ loop.index0 }}" value="{{ row.date }}"></label>
@@ -29,7 +42,7 @@
   <div class="statement-actions"><button class="button secondary" name="action" value="add_row" type="submit" formnovalidate>Add a missing row</button><button class="button secondary" name="action" value="save" type="submit" formnovalidate>Save edits and recheck duplicates</button></div>
   <p id="statement-totals" role="status"></p>
   <p class="transaction-sub">Imported rows start as Uncategorized. Existing category rules can still apply. Running local categorization afterward uses the usual category settings.</p>
-  <label class="check-label"><input type="checkbox" name="reviewed"> I checked the selected account, dates, amounts, and directions against the statement.</label>
+  <label class="check-label"><input type="checkbox" name="reviewed"> I checked each selected transaction’s account, date, amount, and direction against the statement.</label>
   <label class="check-label"><input type="checkbox" name="allow_duplicates"> Any selected possible duplicates are separate transactions that should also be added.</label>
   <div class="statement-actions"><button class="button primary" name="action" value="confirm" type="submit">Add selected transactions</button><button class="button secondary" name="action" value="discard" type="submit" formnovalidate>Discard draft</button></div>
 </form>

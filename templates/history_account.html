@@ -14,7 +14,7 @@
     <label>Account type<select name="type" required><option value="">Choose type</option><option value="depository" {{ 'selected' if request.form.get('type') == 'depository' }}>Bank account</option><option value="credit" {{ 'selected' if request.form.get('type') == 'credit' }}>Credit card</option></select></label>
     <label>Last four digits (optional)<input name="mask" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" value="{{ request.form.get('mask', '') }}" autocomplete="off"></label>
     <p class="transaction-sub">Enter only the last four digits, never the full account number. Account details stay in your encrypted vault. Imported transactions count toward historical reports; this account has no current balance and never syncs with Plaid.</p>
-    <div><button class="button primary" type="submit">Save account and add a statement</button> <a class="button secondary" href="{{ url_for('statement_import') }}">Cancel</a></div>
+    <div><button class="button primary" type="submit">{{ 'Save account and return to review' if request.args.get('draft') else 'Save account and add a statement' }}</button> <a class="button secondary" href="{{ url_for('review_statement', token=request.args.get('draft')) if request.args.get('draft') else url_for('statement_import') }}">Cancel</a></div>
   </form>
 </section>
 {% endblock %}

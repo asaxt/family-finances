@@ -2469,6 +2469,9 @@ def add_history_account():
                         "cash_flow_role, spending_enabled) VALUES (?, ?, ?, ?, ?, ?, 'cash_flow', 1)",
                         (account_id, group_id, values['institution'], values['name'], values['mask'], values['type']),
                     )
+            draft_token = request.args.get('draft', '')
+            if re.fullmatch(r'[0-9a-f]{32}', draft_token):
+                return redirect(url_for('review_statement', token=draft_token))
             return redirect(url_for('statement_import', account=account_id, account_added='1'))
     return render_template('history_account.html', error=error, **page_context('transactions'))
 
@@ -2486,17 +2489,26 @@ def statement_context(connection):
 
 def refresh_statement_rows(connection, draft):
     draft['start'], draft['end'] = statements.date_range(draft['rows'])
-    valid, valid_indexes = [], []
+    accounts = {account['id']: account for account in statement_accounts(connection)}
+    if 'account_groups' not in draft:
+        draft['account_groups'] = statements.group_accounts(draft['rows'], list(accounts.values()), draft.get('account_id', ''))
+    groups = {group['id']: group for group in draft['account_groups']}
+    valid_by_account = {}
     for index, row in enumerate(draft['rows']):
         row['duplicate'] = ''
+        row['account_id'] = row.get('account_override') or groups.get(row.get('account_group'), {}).get('account_id', '')
         try:
-            valid.append(statements.validate_row(row))
-            valid_indexes.append(index)
+            if row['account_id'] not in accounts:
+                raise statements.StatementError('Choose the account for this transaction before importing.')
+            valid = statements.validate_row(row)
+            valid_by_account.setdefault(row['account_id'], []).append((index, valid))
             row['error'] = ''
         except statements.StatementError as error:
             row['error'] = str(error)
-    for index, duplicate in zip(valid_indexes, statements.find_duplicates(connection, draft['account_id'], valid)):
-        draft['rows'][index]['duplicate'] = duplicate
+    for account_id, entries in valid_by_account.items():
+        duplicates = statements.find_duplicates(connection, account_id, [row for _, row in entries])
+        for (index, _), duplicate in zip(entries, duplicates):
+            draft['rows'][index]['duplicate'] = duplicate
     imported_ids = {transaction_id for entry in statements.read_setting(connection, statements.HISTORY_KEY, []) for transaction_id in entry['transaction_ids']}
     for row in draft['rows']:
         if row['id'] in imported_ids or connection.execute("SELECT 1 FROM transactions WHERE id = ?", (row['id'],)).fetchone():
@@ -2528,8 +2540,8 @@ def statement_import():
         else:
             try:
                 account = accounts.get(request.form.get('account_id'))
-                if not account:
-                    raise statements.StatementError('Choose the account this statement belongs to.')
+                if request.form.get('account_id') and not account:
+                    raise statements.StatementError('Choose an available account or let the reader identify accounts.')
                 if request.form.get('usd') != 'on':
                     raise statements.StatementError('This first version supports US-dollar statements only. Confirm the statement currency.')
                 upload = request.files.get('statement')
@@ -2539,7 +2551,7 @@ def statement_import():
                 digest = hashlib.sha256(data).hexdigest()
                 pages = statements.document_pages(data)
                 del data
-                draft = {'account_id': account['id'], 'account_name': account['owner_name'] + ' · ' + account['name'],
+                draft = {'account_id': account['id'] if account else '', 'account_name': 'Statement accounts',
                          'start': '', 'end': '', 'digest': digest,
                          'created_at': datetime.now(timezone.utc).isoformat(), 'rows': [], 'warnings': [],
                          'pages': [{'number': page['number'], 'image': page['image']} for page in pages]}
@@ -2548,24 +2560,30 @@ def statement_import():
                         page['text'] = ''
                 date_context = statements.date_context(pages)
                 for page in pages:
-                    result = statements.extract_page(page, account['type'], date_context)
+                    result = statements.extract_page(page, account['type'] if account else 'unknown', date_context)
                     for key in ('statement_start', 'statement_end'):
                         if result.get(key):
                             date_context[key] = result[key]
                     draft['warnings'].extend(f"Page {page['number']}: {warning}" for warning in result['warnings'])
-                    mask = account.get('mask') or ''
-                    if mask and result['account_last4'] and mask[-4:] != result['account_last4']:
-                        draft['warnings'].append(f"Page {page['number']}: the account ending does not match the selected account. Check the source before importing.")
                     for index, row in enumerate(result['transactions']):
                         draft['rows'].append({**row, 'page': page['number'],
-                            'id': statements.import_identity(account['id'], digest, page['number'], index)})
+                            'id': statements.import_identity('', digest, page['number'], index)})
+                    if result['transactions']:
+                        last_row = result['transactions'][-1]
+                        date_context['previous_page_last_account'] = {
+                            key: last_row.get(key, '') for key in ('account_label', 'account_last4', 'account_type')}
                     if len(draft['rows']) > statements.MAX_ROWS:
                         raise statements.StatementError('This statement exceeds the limit of 2,500 transaction rows. No transactions were added.')
+                draft['account_groups'] = statements.group_accounts(draft['rows'], list(accounts.values()), draft['account_id'])
                 token = secrets.token_hex(16)
                 with db() as connection:
                     refresh_statement_rows(connection, draft)
                     for row in draft['rows']:
-                        row['selected'] = not (row['error'] or row['duplicate'])
+                        try:
+                            statements.validate_row(row)
+                            row['selected'] = not row['duplicate']
+                        except statements.StatementError:
+                            row['selected'] = False
                     statements.write_setting(connection, statements.DRAFT_PREFIX + token, draft)
                 return redirect(url_for('review_statement', token=token))
             except statements.StatementError as failure:
@@ -2588,20 +2606,25 @@ def review_statement(token):
         draft = statements.read_setting(connection, key)
         if not draft:
             return redirect(url_for('statement_import'))
+        refresh_statement_rows(connection, draft)
         if request.method == 'POST':
             action = request.form.get('action')
             if action == 'discard':
                 connection.execute('DELETE FROM settings WHERE key = ?', (key,))
                 return redirect(url_for('statement_import'))
+            for group in draft['account_groups']:
+                group['account_id'] = request.form.get('group_account_' + group['id'], group['account_id'])
             selected = set(request.form.getlist('include'))
             for index, row in enumerate(draft['rows']):
                 for field in ['date', 'description', 'amount', 'direction']:
                     row[field] = request.form.get(f'{field}_{index}', row[field])[:300]
+                row['account_override'] = request.form.get(f'account_override_{index}', row.get('account_override', ''))
                 row['selected'] = str(index) in selected
             refresh_statement_rows(connection, draft)
             if action == 'add_row' and len(draft['rows']) < statements.MAX_ROWS:
                 draft['rows'].append({'id': 'statement:' + secrets.token_hex(32), 'page': draft['pages'][0]['number'],
                     'date': '', 'description': '', 'amount': '', 'direction': '', 'evidence': 'Manually added during review',
+                    'account_group': '', 'account_override': '', 'account_id': '',
                     'selected': True, 'duplicate': '', 'error': 'Complete this row before importing.', 'already_imported': False})
             elif action == 'confirm':
                 chosen = [row for row in draft['rows'] if row['selected']]
@@ -2615,21 +2638,25 @@ def review_statement(token):
                     error = 'Correct the highlighted selected rows before adding transactions.'
                 elif any(row['duplicate'] for row in chosen) and request.form.get('allow_duplicates') != 'on':
                     error = 'Deselect possible duplicates, or explicitly confirm they are separate transactions.'
-                elif not connection.execute('SELECT 1 FROM accounts WHERE id = ?', (draft['account_id'],)).fetchone():
-                    error = 'The selected account is no longer available.'
                 else:
                     for row in chosen:
                         validated = statements.validate_row(row)
                         connection.execute(
                             "INSERT INTO transactions (id, account_id, amount, currency, description, pending, transacted_at, category) "
                             "VALUES (?, ?, ?, 'USD', ?, 0, ?, 'Uncategorized')",
-                            (row['id'], draft['account_id'], validated['amount'], validated['description'], validated['date']),
+                            (row['id'], row['account_id'], validated['amount'], validated['description'], validated['date']),
                         )
-                    draft['start'], draft['end'] = statements.date_range(chosen)
                     history = statements.read_setting(connection, statements.HISTORY_KEY, [])
-                    history.insert(0, {'id': token, 'account_id': draft['account_id'], 'account_name': draft['account_name'],
-                        'start': draft['start'], 'end': draft['end'], 'count': len(chosen),
-                        'transaction_ids': [row['id'] for row in chosen], 'created_at': datetime.now(timezone.utc).isoformat()})
+                    accounts = {account['id']: account for account in statement_accounts(connection)}
+                    for account_id in dict.fromkeys(row['account_id'] for row in chosen):
+                        account_rows = [row for row in chosen if row['account_id'] == account_id]
+                        start, end = statements.date_range(account_rows)
+                        account = accounts[account_id]
+                        history.insert(0, {'id': token + ':' + account_id, 'account_id': account_id,
+                            'account_name': account['owner_name'] + ' · ' + account['name'],
+                            'start': start, 'end': end, 'count': len(account_rows),
+                            'transaction_ids': [row['id'] for row in account_rows],
+                            'created_at': datetime.now(timezone.utc).isoformat()})
                     statements.write_setting(connection, statements.HISTORY_KEY, history)
                     connection.execute('DELETE FROM settings WHERE key = ?', (key,))
                     return redirect(url_for('statement_import', imported=len(chosen)))
