@@ -36,6 +36,9 @@ class DevelopmentModeTests(unittest.TestCase):
         self.application = importlib.import_module("app")
         self.application.app.config["TESTING"] = True
         self.client = self.application.app.test_client()
+        self.import_classifier = patch.object(self.application, 'classify_statement_import')
+        self.import_classifier_mock = self.import_classifier.start()
+        self.addCleanup(self.import_classifier.stop)
         self.password = "a long development password"
         self.assertEqual(
             self.application.app.config["SESSION_COOKIE_NAME"],
@@ -415,6 +418,61 @@ class DevelopmentModeTests(unittest.TestCase):
             draft['account_groups'][0]['account_id'] = card_id
             self.application.refresh_statement_rows(connection, draft)
             self.assertTrue(all(row['already_imported'] for row in draft['rows']))
+
+    def test_import_automatically_classifies_and_timeout_can_be_retried_without_reimporting(self):
+        self.seed_review_transactions()
+        self.import_classifier.stop()
+        location = self.upload_synthetic_statement()
+        csrf = self.csrf_token(self.client.get(location))
+        with patch.object(self.application, 'classify_evaluation_rows', side_effect=TimeoutError('private detail')):
+            response = self.client.post(location, data={'csrf_token': csrf, 'action': 'confirm', 'include': ['1'], 'reviewed': 'on'})
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+            self.assertEqual(history[0]['classification'], {'status': 'interrupted', 'remaining': 1})
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 3)
+        page = self.client.get('/statement-import')
+        self.assertIn(b'Finish categorizing', page.data)
+        self.assertNotIn(b'private detail', page.data)
+        def classify(prepared, rows):
+            self.assertFalse(prepared['targeted'])
+            return [{'status': 'categorized', 'category': 'Dining', 'confidence': 1,
+                     'reason': 'Fictional category example', 'transaction_ids': row['transaction_ids']}
+                    for row in rows]
+        with patch.object(self.application, 'classify_evaluation_rows', side_effect=classify) as model:
+            response = self.client.post('/statement-import/history/' + history[0]['id'] + '/classify', data={'csrf_token': csrf})
+            model.assert_called_once()
+        with self.application.db() as connection:
+            imported = connection.execute("SELECT id, category_override FROM transactions WHERE id LIKE 'statement:%'").fetchone()
+            self.assertEqual(imported['category_override'], 'Dining')
+            self.assertIn(imported['id'], self.application.load_ai_reviews(connection))
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE category_override IS NULL").fetchone()[0], 2)
+            connection.execute("UPDATE transactions SET category_override = 'Groceries', category_override_source = 'user' WHERE id = ?", (imported['id'],))
+        with patch.object(self.application, 'classify_evaluation_rows') as model:
+            self.application.classify_statement_import(history[0]['id'])
+            model.assert_not_called()
+
+    def test_import_classifier_respects_saved_rules_and_busy_model(self):
+        self.seed_review_transactions()
+        location = self.upload_synthetic_statement()
+        csrf = self.csrf_token(self.client.get(location))
+        self.client.post(location, data={'csrf_token': csrf, 'action': 'confirm', 'include': ['1', '2'], 'reviewed': 'on'})
+        self.import_classifier_mock.assert_called_once()
+        self.import_classifier.stop()
+        with self.application.db() as connection:
+            connection.execute("INSERT INTO merchant_rules (account_id, match_type, match_value, category) VALUES ('example', 'description', 'Private synthetic purchase marker', 'Dining')")
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+        self.application.OLLAMA_EVALUATION_LOCK.acquire()
+        try:
+            with patch.object(self.application, 'classify_evaluation_rows') as model:
+                self.application.classify_statement_import(history[0]['id'])
+                model.assert_not_called()
+        finally:
+            self.application.OLLAMA_EVALUATION_LOCK.release()
+        with self.application.db() as connection:
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+            self.assertEqual(history[0]['classification'], {'status': 'busy', 'remaining': 1})
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM merchant_rules').fetchone()[0], 1)
 
     def test_statement_draft_is_encrypted_and_only_confirmed_rows_are_added(self):
         self.seed_review_transactions()

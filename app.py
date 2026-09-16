@@ -31,6 +31,7 @@ from plaid.model.transactions_sync_request import TransactionsSyncRequest
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import statement_import as statements
+from statement_classification import eligible_import_ids, match_import_transfers
 
 from schema import SchemaError, prepare_encrypted_database
 from vault import (
@@ -2497,6 +2498,7 @@ def refresh_statement_rows(connection, draft):
     for index, row in enumerate(draft['rows']):
         row['duplicate'] = ''
         row['account_id'] = row.get('account_override') or groups.get(row.get('account_group'), {}).get('account_id', '')
+        row['account_name'] = accounts.get(row['account_id'], {}).get('name', '')
         try:
             if row['account_id'] not in accounts:
                 raise statements.StatementError('Choose the account for this transaction before importing.')
@@ -2598,9 +2600,66 @@ def statement_import():
     return render_template('statement_import.html', error=error, **context)
 
 
+def classify_statement_import(import_key):
+    """Save each classification batch separately; model failures never undo an import."""
+    with db() as connection:
+        history = statements.read_setting(connection, statements.HISTORY_KEY, [])
+        entries = [entry for entry in history if entry['id'] == import_key or entry['id'].startswith(import_key + ':')]
+        transaction_ids = [transaction_id for entry in entries for transaction_id in entry['transaction_ids']]
+        if not transaction_ids:
+            return
+        match_import_transfers(connection, transaction_ids)
+        enabled = local_ai_enabled(connection)
+        categories = [row[0] for row in connection.execute('SELECT name FROM category_rules ORDER BY name')]
+    status = 'complete'
+    acquired = enabled and OLLAMA_EVALUATION_LOCK.acquire(blocking=False)
+    if not enabled:
+        status = 'disabled'
+    elif not acquired:
+        status = 'busy'
+    else:
+        try:
+            with db() as connection:
+                eligible = eligible_import_ids(connection, transaction_ids)
+                prepared = prepare_evaluation(connection, categories, statements.MODEL, transaction_ids=eligible) if eligible else None
+            if prepared:
+                # Import classification must never recategorize user choices or saved rules.
+                prepared['targeted'] = False
+                for group in prepared['groups']:
+                    # Verified pairs were handled above. Unmatched amounts are not enough to infer a transfer.
+                    group['all_have_transfer_match'] = False
+                for rows in evaluation_batches(prepared):
+                    details = classify_evaluation_rows(prepared, rows)
+                    with db() as connection:
+                        still_eligible = set(eligible_import_ids(connection, transaction_ids))
+                        for item in details:
+                            item['allow_recategorization'] = False
+                            item['transaction_ids'] = [value for value in item['transaction_ids'] if value in still_eligible]
+                        apply_categorized_suggestions(connection, {'details': details})
+        except Exception:
+            status = 'interrupted'
+        finally:
+            OLLAMA_EVALUATION_LOCK.release()
+    with db() as connection:
+        remaining = set(eligible_import_ids(connection, transaction_ids))
+        history = statements.read_setting(connection, statements.HISTORY_KEY, [])
+        for entry in history:
+            if entry['id'] == import_key or entry['id'].startswith(import_key + ':'):
+                count = sum(value in remaining for value in entry['transaction_ids'])
+                entry['classification'] = {'status': status if count else 'complete', 'remaining': count}
+        statements.write_setting(connection, statements.HISTORY_KEY, history)
+
+
+@app.post('/statement-import/history/<token>/classify')
+def retry_statement_classification(token):
+    classify_statement_import(token)
+    return redirect(url_for('statement_import'))
+
+
 @app.route('/statement-import/<token>', methods=['GET', 'POST'])
 def review_statement(token):
     error = None
+    imported_count = 0
     key = statements.DRAFT_PREFIX + token
     with db() as connection:
         draft = statements.read_setting(connection, key)
@@ -2659,9 +2718,17 @@ def review_statement(token):
                             'created_at': datetime.now(timezone.utc).isoformat()})
                     statements.write_setting(connection, statements.HISTORY_KEY, history)
                     connection.execute('DELETE FROM settings WHERE key = ?', (key,))
-                    return redirect(url_for('statement_import', imported=len(chosen)))
-            statements.write_setting(connection, key, draft)
+                    imported_count = len(chosen)
+            if not imported_count:
+                statements.write_setting(connection, key, draft)
         refresh_statement_rows(connection, draft)
+    if imported_count:
+        try:
+            classify_statement_import(token)
+        except Exception:
+            # The confirmed rows are already persisted; allow a safe retry from import history.
+            pass
+        return redirect(url_for('statement_import', imported=imported_count))
     return render_template('statement_review.html', draft=draft, token=token, error=error, **page_context('transactions'))
 
 

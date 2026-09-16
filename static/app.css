@@ -404,3 +404,30 @@ tr:last-child td { border-bottom: 0; }
 .statement-warning { color: var(--rose); font-size: 13px; }
 .statement-history-entry { border-top: 1px solid var(--line); padding: 12px 0; }
 @media (max-width: 1200px) { .statement-review-grid { grid-template-columns: 1fr; } }
+
+.statement-overview, .statement-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.statement-account-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 16px; }
+.statement-account-card { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
+.statement-account-card small, .statement-row-title small { color: var(--muted); }
+.statement-row { padding: 0; }
+.statement-row-summary { display: flex; align-items: center; gap: 12px; padding: 15px 0; cursor: pointer; list-style: none; }
+.statement-row-summary::-webkit-details-marker { display: none; }
+.statement-row-summary::after { content: '+'; font-size: 20px; }
+.statement-row details[open] > summary::after { content: '−'; }
+.statement-row-title { display: grid; gap: 4px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.statement-row-value { display: grid; gap: 4px; text-align: right; white-space: nowrap; }
+.statement-row-editor { padding: 4px 0 20px; }
+.statement-row-editor > label { display: grid; gap: 5px; margin-bottom: 10px; }
+.statement-finish { margin-top: 20px; }
+.statement-finish h2 { margin-top: 0; }
+.statement-duplicate-option { margin-top: 16px; }
+.statement-duplicate-option label { margin-top: 12px; }
+.statement-source { position: sticky; top: 16px; max-height: 85vh; overflow: auto; }
+.statement-source summary, .statement-notices summary { cursor: pointer; padding: 10px 0; }
+@media (max-width: 1200px) { .statement-source { position: static; max-height: none; } }
+@media (max-width: 600px) { .statement-row-summary { gap: 8px; font-size: 13px; } .statement-row-title small { font-size: 11px; } }
+#statement-review-form > .panel { margin-bottom: 20px; }
+.statement-review-grid > *, .statement-fields > label { min-width: 0; }
+.statement-account-card select, .statement-row-editor input, .statement-row-editor select { width: 100%; min-width: 0; }
+@media (max-width: 800px) { .sidebar .nav { max-width: 100%; overflow-x: auto; } .sidebar .nav a { flex-shrink: 0; } }
+@media (max-width: 600px) { .statement-fields > label { flex-basis: 100%; } }

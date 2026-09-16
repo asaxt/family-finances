@@ -1,58 +1,68 @@
 {% extends "base.html" %}
 {% block title %}Review statement · {{ app_name }}{% endblock %}
-{% block eyebrow %}Check before adding{% endblock %}
-{% block heading %}Review statement{% endblock %}
+{% block eyebrow %}Statement import{% endblock %}
+{% block heading %}Review your statement{% endblock %}
 {% block content %}
 {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
-<section class="panel"><div class="panel-header"><div><h2>{{ draft.account_name }}</h2><p>{{ ('Transaction dates: ' ~ draft.start ~ ' through ' ~ draft.end) if draft.start else 'Transaction dates need review' }} · {{ draft.rows|length }} extracted or manually added rows</p></div><a class="text-link" href="{{ url_for('statement_import') }}">All imports</a></div>
-  <p>Check the account and every selected date, amount, and direction against the source pages. Extraction can miss or misread rows. Balances and statement totals must not be imported as transactions.</p>
-  {% if draft.warnings %}<div class="notice error"><strong>Check these issues before importing</strong><ul>{% for warning in draft.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></div>{% endif %}
+<div class="statement-overview"><p>{{ draft.rows|length }} transactions · {{ draft.pages|length }} source pages{% if draft.start %} · {{ draft.start }} to {{ draft.end }}{% endif %}</p><a class="text-link" href="{{ url_for('statement_import') }}">All imports</a></div>
+{% if draft.warnings %}<details class="panel statement-notices"><summary>{{ draft.warnings|length }} notes from the reader</summary><ul>{% for warning in draft.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></details>{% endif %}
+<form method="post" id="statement-review-form">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<section class="panel">
+  <div class="panel-header"><div><h2>1. Match accounts</h2><p>Confirm the owner and account for each section of the statement.</p></div><a class="text-link" href="{{ url_for('add_history_account', draft=token) }}">Add an unlinked account</a></div>
+  <div class="statement-account-grid">
+  {% for group in draft.account_groups %}
+    <label class="statement-account-card"><strong>{{ group.label }}{% if group.mask %} · {{ group.mask }}{% endif %}</strong><small>{{ draft.rows|selectattr('account_group', 'equalto', group.id)|list|length }} transactions</small>
+      <select name="group_account_{{ group.id }}"><option value="">Choose account</option>{% for account in accounts %}<option value="{{ account.id }}" {{ 'selected' if group.account_id == account.id }}>{{ account.owner_name }} · {{ account.institution }} · {{ account.name }}{% if account.mask %} · {{ account.mask }}{% endif %}</option>{% endfor %}</select>
+    </label>
+  {% endfor %}
+  </div>
+  <div class="statement-actions"><button class="button secondary" name="action" value="save" type="submit">Save matches and check duplicates</button><span class="transaction-sub">Save edits before adding a missing account.</span></div>
 </section>
 <div class="statement-review-grid">
+<div>
 <section class="panel">
-<form method="post" id="statement-review-form">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <h2>Match statement accounts</h2>
-  <p>Confirm where each account section belongs. If an account is missing, <a href="{{ url_for('add_history_account', draft=token) }}">add an unlinked account</a>, then return to this draft. Save edits first to keep any changes.</p>
-  {% for group in draft.account_groups %}
-  <label>{{ group.label }}{% if group.mask %} · ending {{ group.mask }}{% endif %} · {{ draft.rows|selectattr('account_group', 'equalto', group.id)|list|length }} transactions
-    <select name="group_account_{{ group.id }}"><option value="">Choose account</option>
-      {% for account in accounts %}<option value="{{ account.id }}" {{ 'selected' if group.account_id == account.id }}>{{ account.owner_name }} · {{ account.institution }} · {{ account.name }}{% if account.mask %} · ending {{ account.mask }}{% endif %}</option>{% endfor %}
-    </select>
-  </label>
-  {% endfor %}
-  <p class="transaction-sub">Suggestions use matching last four digits and account type. Check the owner and institution too. Unmatched or ambiguous sections must be assigned before importing. You can override the account for an individual row below.</p>
-  <button class="button secondary" name="action" value="save" type="submit">Save account matches and recheck duplicates</button>
+  <div class="panel-header"><div><h2>2. Check transactions</h2><p>Open a row to edit it. Compare dates, amounts, and accounts with the source.</p></div></div>
+  <div class="statement-toolbar"><label class="check-label"><input type="checkbox" id="attention-only"> Show only rows needing attention</label><button class="text-button" id="select-valid" type="button">Select valid rows</button><button class="text-button" id="clear-selection" type="button">Clear selection</button></div>
   {% for row in draft.rows %}
-  <article class="statement-row">
-    <div class="statement-row-heading"><label class="check-label"><input class="statement-include" type="checkbox" name="include" value="{{ loop.index0 }}" {{ 'checked' if row.selected and not row.already_imported }} {{ 'disabled' if row.already_imported }}> Add row {{ loop.index }}</label><a href="#source-page-{{ row.page }}">Source page {{ row.page }}</a></div>
-    {% if row.error %}<p class="statement-warning">{{ row.error }}</p>{% endif %}
-    {% if row.duplicate %}<p class="statement-warning">{{ row.duplicate }}</p>{% endif %}
-    <p class="transaction-sub">Statement account: {{ row.account_label or 'Unidentified' }}{% if row.account_last4 %} · ending {{ row.account_last4 }}{% endif %}</p>
-    <label>Account for this row<select name="account_override_{{ loop.index0 }}"><option value="">Use section match above</option>{% for account in accounts %}<option value="{{ account.id }}" {{ 'selected' if row.account_override == account.id }}>{{ account.owner_name }} · {{ account.institution }} · {{ account.name }}{% if account.mask %} · ending {{ account.mask }}{% endif %}</option>{% endfor %}</select></label>
-    <label>Description<input name="description_{{ loop.index0 }}" value="{{ row.description }}" maxlength="300"></label>
-    <div class="statement-fields">
-      <label>Date<input type="date" name="date_{{ loop.index0 }}" value="{{ row.date }}"></label>
-      <label>Amount in USD<input class="statement-amount" name="amount_{{ loop.index0 }}" inputmode="decimal" value="{{ row.amount }}" placeholder="12.34"></label>
-      <label>Direction<select class="statement-direction" name="direction_{{ loop.index0 }}"><option value="">Choose</option><option value="money_out" {{ 'selected' if row.direction == 'money_out' }}>Money out</option><option value="money_in" {{ 'selected' if row.direction == 'money_in' }}>Money in</option></select></label>
-    </div>
-    {% if row.evidence %}<p class="transaction-sub">Source excerpt: {{ row.evidence }}</p>{% endif %}
+  <article class="statement-row" data-attention="{{ '1' if row.error or row.duplicate else '0' }}">
+    <details {{ 'open' if row.error or row.duplicate }}>
+      <summary class="statement-row-summary">
+        <input class="statement-include" type="checkbox" name="include" value="{{ loop.index0 }}" aria-label="Include transaction {{ loop.index }}" {{ 'checked' if row.selected and not row.already_imported }} {{ 'disabled' if row.already_imported }}>
+        <span class="statement-row-title"><strong>{{ row.description or 'Missing description' }}</strong><small>{{ row.date or 'Date needed' }} · {{ row.account_name or row.account_label or 'Choose account' }}{% if row.account_last4 %} · {{ row.account_last4 }}{% endif %}</small></span>
+        <span class="statement-row-value">{{ '+' if row.direction == 'money_in' else '−' if row.direction == 'money_out' else '' }}${{ row.amount or '—' }}{% if row.error or row.duplicate %}<small class="statement-warning">Check row</small>{% endif %}</span>
+      </summary>
+      <div class="statement-row-editor">
+        {% if row.error %}<p class="statement-warning">{{ row.error }}</p>{% endif %}
+        {% if row.duplicate %}<p class="statement-warning">{{ row.duplicate }}</p>{% endif %}
+        <label>Description<input name="description_{{ loop.index0 }}" value="{{ row.description }}" maxlength="300"></label>
+        <div class="statement-fields"><label>Date<input type="date" name="date_{{ loop.index0 }}" value="{{ row.date }}"></label><label>Amount in USD<input class="statement-amount" name="amount_{{ loop.index0 }}" inputmode="decimal" value="{{ row.amount }}" placeholder="12.34"></label><label>Direction<select class="statement-direction" name="direction_{{ loop.index0 }}"><option value="">Choose</option><option value="money_out" {{ 'selected' if row.direction == 'money_out' }}>Money out</option><option value="money_in" {{ 'selected' if row.direction == 'money_in' }}>Money in</option></select></label></div>
+        <label>Account override<select name="account_override_{{ loop.index0 }}"><option value="">Use matched account from step 1</option>{% for account in accounts %}<option value="{{ account.id }}" {{ 'selected' if row.account_override == account.id }}>{{ account.owner_name }} · {{ account.name }}{% if account.mask %} · {{ account.mask }}{% endif %}</option>{% endfor %}</select></label>
+        <p class="transaction-sub">{{ row.evidence }}</p><a class="text-link statement-source-link" href="#source-page-{{ row.page }}">View source page {{ row.page }}</a>
+      </div>
+    </details>
   </article>
-  {% else %}<p>No transaction rows were extracted. Check the source pages, add rows manually, or discard this draft and retry using page images.</p>{% endfor %}
-  <div class="statement-actions"><button class="button secondary" name="action" value="add_row" type="submit" formnovalidate>Add a missing row</button><button class="button secondary" name="action" value="save" type="submit" formnovalidate>Save edits and recheck duplicates</button></div>
-  <p id="statement-totals" role="status"></p>
-  <p class="transaction-sub">Imported rows start as Uncategorized. Existing category rules can still apply. Running local categorization afterward uses the usual category settings.</p>
-  <label class="check-label"><input type="checkbox" name="reviewed"> I checked each selected transaction’s account, date, amount, and direction against the statement.</label>
-  <label class="check-label"><input type="checkbox" name="allow_duplicates"> Any selected possible duplicates are separate transactions that should also be added.</label>
-  <div class="statement-actions"><button class="button primary" name="action" value="confirm" type="submit">Add selected transactions</button><button class="button secondary" name="action" value="discard" type="submit" formnovalidate>Discard draft</button></div>
-</form>
+  {% else %}<p>No transactions were found. Check the source and add any missing rows, or discard this draft.</p>{% endfor %}
+  <div class="statement-actions"><button class="button secondary" name="action" value="add_row" type="submit">Add a missing row</button><button class="button secondary" name="action" value="save" type="submit">Save edits</button></div>
 </section>
-<aside class="statement-source"><h2>Source pages</h2><p class="transaction-sub">Rendered previews are stored only in this encrypted draft and removed when you finish or discard it.</p>
-{% for page in draft.pages %}<details id="source-page-{{ page.number }}" open><summary>Page {{ page.number }}</summary><img loading="lazy" src="{{ url_for('statement_page', token=token, number=page.number) }}" alt="Statement source page {{ page.number }}"></details>{% endfor %}
+<section class="panel statement-finish">
+  <h2>3. Import and categorize</h2>
+  <p id="statement-totals" role="status"></p>
+  <p class="transaction-sub">Saved category rules apply first. Matching transfers are checked against your existing history, then local AI categorizes the remaining transactions. Your existing category choices stay intact.</p>
+  <label class="check-label"><input type="checkbox" name="reviewed"> I checked the selected transactions against the statement.</label>
+  <details class="statement-duplicate-option"><summary>Importing a flagged duplicate?</summary><label class="check-label"><input type="checkbox" name="allow_duplicates"> Selected possible duplicates are separate transactions that should also be added.</label></details>
+  <div class="statement-actions"><button class="button primary" name="action" value="confirm" type="submit">Import and categorize</button><button class="text-button" name="action" value="discard" type="submit">Discard draft</button></div>
+  <p id="statement-importing" role="status" hidden>Importing and categorizing locally. This can take a few minutes. Keep this page open.</p>
+</section>
+</div>
+<aside class="statement-source panel"><h2>Source statement</h2><p class="transaction-sub">Open a page to compare it with the transactions.</p>
+{% for page in draft.pages %}<details id="source-page-{{ page.number }}" {{ 'open' if loop.first }}><summary>Page {{ page.number }}</summary><img loading="lazy" src="{{ url_for('statement_page', token=token, number=page.number) }}" alt="Statement source page {{ page.number }}"></details>{% endfor %}
 </aside>
 </div>
+</form>
 {% endblock %}
 {% block scripts %}<script>
+const reviewForm = document.querySelector('#statement-review-form');
 function updateStatementTotals() {
   let count = 0, moneyIn = 0, moneyOut = 0;
   document.querySelectorAll('.statement-row').forEach(row => {
@@ -66,8 +76,28 @@ function updateStatementTotals() {
     }
   });
   const dollars = cents => (cents / 100).toLocaleString('en-US', {style: 'currency', currency: 'USD'});
-  document.querySelector('#statement-totals').textContent = `${count} rows selected · Money in ${dollars(moneyIn)} · Money out ${dollars(moneyOut)}`;
+  document.querySelector('#statement-totals').textContent = `${count} selected · Money in ${dollars(moneyIn)} · Money out ${dollars(moneyOut)}`;
 }
-document.querySelector('#statement-review-form').addEventListener('input', updateStatementTotals);
+reviewForm.addEventListener('input', updateStatementTotals);
+document.querySelectorAll('.statement-include').forEach(input => input.addEventListener('click', event => event.stopPropagation()));
+document.querySelector('#attention-only').addEventListener('change', event => {
+  document.querySelectorAll('.statement-row').forEach(row => row.hidden = event.target.checked && row.dataset.attention !== '1');
+});
+for (const id of ['select-valid', 'clear-selection']) document.getElementById(id).addEventListener('click', () => {
+  document.querySelectorAll('.statement-row').forEach(row => {
+    const input = row.querySelector('.statement-include');
+    if (!input.disabled) input.checked = id === 'select-valid' && row.dataset.attention === '0';
+  });
+  updateStatementTotals();
+});
+document.querySelectorAll('.statement-source-link').forEach(link => link.addEventListener('click', () => {
+  document.querySelector(link.getAttribute('href')).open = true;
+}));
+reviewForm.addEventListener('submit', event => {
+  if (event.submitter?.value === 'confirm') {
+    document.querySelector('#statement-importing').hidden = false;
+    reviewForm.querySelectorAll('button').forEach(button => button.style.pointerEvents = 'none');
+  }
+});
 updateStatementTotals();
 </script>{% endblock %}

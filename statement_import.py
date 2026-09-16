@@ -334,7 +334,8 @@ def group_accounts(rows, accounts, default_id=''):
             # A user-selected single account is useful only when no account sections were detected.
             if not has_accounts:
                 account_id = default_id
-            group = {'id': str(len(groups)), 'label': label or 'Account needs identification',
+            fallback_name = next((account.get('name', '') for account in accounts if account['id'] == account_id), '')
+            group = {'id': str(len(groups)), 'label': label or fallback_name or 'Account needs identification',
                      'mask': mask, 'type': kind, 'account_id': account_id}
             groups.append(group)
             by_key[key] = group
