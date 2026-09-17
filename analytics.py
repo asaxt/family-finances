@@ -4,23 +4,36 @@ from datetime import date, datetime, timedelta
 
 RAW_CATEGORY_SQL = "COALESCE(t.category_override, mr.category, t.category)"
 
-MATCHED_TRANSFER_SQL = f"""
+MATCHED_TRANSFER_SQL = """
 EXISTS (
-    SELECT 1
-    FROM transactions paired
-    JOIN accounts paired_account ON paired_account.id = paired.account_id
-    WHERE paired.id != t.id
-      AND paired.account_id != t.account_id
-      AND paired.amount = -t.amount
-      AND paired.pending = 0
-      AND paired_account.cash_flow_role = 'cash_flow'
-      AND paired_account.spending_enabled = 1
-      AND ABS(
-          JULIANDAY(paired.transacted_at) - JULIANDAY(t.transacted_at)
-      ) <= 5
-      AND LOWER(COALESCE(paired.category_override, paired.category)) IN (
-          'uncategorized', 'transfer'
-      )
+    WITH eligible AS (
+        SELECT p.id, p.account_id, p.amount, p.currency, p.transacted_at
+        FROM transactions p JOIN accounts pa ON pa.id = p.account_id
+        LEFT JOIN merchant_rules pm ON pm.account_id = p.account_id
+          AND pm.match_type = 'description' AND pm.match_value = TRIM(p.description) COLLATE NOCASE
+        LEFT JOIN category_rules pc ON pc.name = COALESCE(p.category_override, pm.category, p.category) COLLATE NOCASE
+        WHERE p.pending = 0 AND p.excluded = 0 AND p.amount != 0
+          AND pa.cash_flow_role = 'cash_flow' AND pa.spending_enabled = 1
+          AND (
+            (LOWER(COALESCE(p.category_override, pm.category, p.category)) = 'uncategorized'
+             AND COALESCE(p.category_override_source, '') != 'user' AND pm.category IS NULL)
+            OR (pc.flow_type IS NULL AND LOWER(COALESCE(p.category_override, pm.category, p.category)) = 'transfer')
+            OR pc.flow_type = 'transfer'
+          )
+    )
+    SELECT 1 FROM eligible current JOIN eligible paired
+      ON paired.account_id != current.account_id AND paired.amount = -current.amount
+      AND paired.currency = current.currency
+      AND ABS(JULIANDAY(paired.transacted_at) - JULIANDAY(current.transacted_at)) <= 5
+    WHERE current.id = t.id
+      AND (SELECT COUNT(*) FROM eligible candidate
+           WHERE candidate.account_id != current.account_id AND candidate.amount = -current.amount
+             AND candidate.currency = current.currency
+             AND ABS(JULIANDAY(candidate.transacted_at) - JULIANDAY(current.transacted_at)) <= 5) = 1
+      AND (SELECT COUNT(*) FROM eligible candidate
+           WHERE candidate.account_id != paired.account_id AND candidate.amount = -paired.amount
+             AND candidate.currency = paired.currency
+             AND ABS(JULIANDAY(candidate.transacted_at) - JULIANDAY(paired.transacted_at)) <= 5) = 1
 )
 """
 

@@ -60,7 +60,7 @@
         {% if active == "savings" %}
           <a class="button primary" href="#record-balances">Record balances</a>
         {% elif active != "settings" and not plaid_disabled %}
-          <button class="button secondary" id="sync-button"><span>↻</span> Sync</button>
+          {% if connected %}<button class="button secondary" id="sync-button"><span>↻</span> Sync</button>{% endif %}
           <button class="button primary" id="connect-button">{{ "Add bank connection" if connected else "Connect a bank" }}</button>
         {% endif %}
       </div>
@@ -90,7 +90,7 @@
             <option value="">All connections</option>
             {% for profile in profiles %}
               <option value="{{ profile.id }}" {{ "selected" if profile.id == connection_id }}>
-                {{ profile.owner_name }} · {{ profile.institution }}
+                {{ profile.owner_name }} · {{ profile.institution }}{% if profile.unlinked %} · Unlinked history{% endif %}
               </option>
             {% endfor %}
           </select>
@@ -115,7 +115,7 @@
         {% if plaid_disabled %}Plaid is disabled in this environment
         {% elif history_loading %}Historical data is still loading
         {% elif last_synced_at %}Last synced {{ last_synced_at[:10] }}
-        {% else %}Ready to sync with Plaid{% endif %}
+        {% elif connected %}Ready to sync with Plaid{% else %}Add statements to build your history{% endif %}
       </p>
     </section>
     {% endif %}
@@ -144,6 +144,7 @@
       <button class="dialog-close" type="button" aria-label="Close">×</button>
     </div>
     <p class="dialog-copy">Use Plaid to connect the appropriate financial institution and select only accounts that are not already connected.</p>
+    <p class="dialog-copy">For a closed account or statement-only history, <a href="{{ url_for('add_history_account') }}">add an unlinked account</a>.</p>
     <form id="new-connection-form" class="connection-form">
       <label>
         <span>Whose account is this?</span>
@@ -151,10 +152,10 @@
       </label>
       <button class="button primary" type="submit">Continue to Plaid</button>
     </form>
-    {% if profiles %}
+    {% if connected %}
       <div class="connected-list">
         <span class="connected-label">Already connected</span>
-        {% for profile in profiles %}
+        {% for profile in profiles if not profile.unlinked %}
           <div class="connected-person">
             <span><strong>{{ profile.owner_name }}</strong><small>{{ profile.institution }}</small></span>
             <button class="text-button reconnect-button" type="button" data-connection="{{ profile.id }}" data-owner="{{ profile.owner_name }}">Reconnect</button>

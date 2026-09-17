@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Add an unlinked account · {{ app_name }}{% endblock %}
+{% block eyebrow %}Historical statements{% endblock %}
+{% block heading %}Add an unlinked account{% endblock %}
+{% block content %}
+<section class="panel">
+  <div class="panel-header"><div><h2>Keep history from a closed or unlinked account</h2><p>Create an account here, then add its bank or credit-card statements. No Plaid connection or bank login is needed.</p></div></div>
+  {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+  <form class="review-form statement-upload" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Account owner<input name="owner_name" maxlength="40" value="{{ request.form.get('owner_name', '') }}" required></label>
+    <label>Institution<input name="institution" maxlength="100" value="{{ request.form.get('institution', '') }}" required></label>
+    <label>Account name<input name="name" maxlength="100" placeholder="Old checking account (closed)" value="{{ request.form.get('name', '') }}" required></label>
+    <label>Account type<select name="type" required><option value="">Choose type</option><option value="depository" {{ 'selected' if request.form.get('type') == 'depository' }}>Bank account</option><option value="credit" {{ 'selected' if request.form.get('type') == 'credit' }}>Credit card</option></select></label>
+    <label>Last four digits (optional)<input name="mask" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" value="{{ request.form.get('mask', '') }}" autocomplete="off"></label>
+    <p class="transaction-sub">Enter only the last four digits, never the full account number. Account details stay in your encrypted vault. Imported transactions count toward historical reports; this account has no current balance and never syncs with Plaid.</p>
+    <div><button class="button primary" type="submit">{{ 'Save account and return to review' if request.args.get('draft') else 'Save account and add a statement' }}</button> <a class="button secondary" href="{{ url_for('review_statement', token=request.args.get('draft')) if request.args.get('draft') else url_for('statement_import') }}">Cancel</a></div>
+  </form>
+</section>
+{% endblock %}

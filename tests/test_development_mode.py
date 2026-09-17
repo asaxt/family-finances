@@ -36,6 +36,9 @@ class DevelopmentModeTests(unittest.TestCase):
         self.application = importlib.import_module("app")
         self.application.app.config["TESTING"] = True
         self.client = self.application.app.test_client()
+        self.import_classifier = patch.object(self.application, 'classify_statement_import')
+        self.import_classifier_mock = self.import_classifier.start()
+        self.addCleanup(self.import_classifier.stop)
         self.password = "a long development password"
         self.assertEqual(
             self.application.app.config["SESSION_COOKIE_NAME"],
@@ -220,7 +223,101 @@ class DevelopmentModeTests(unittest.TestCase):
         self.assertEqual(coverage['skipped_reasons'], {'Pending transactions': 2})
         self.assertIn(b'No eligible transactions needed classification', self.client.get('/local-ai/evaluation').data)
 
-    def upload_synthetic_statement(self):
+    def create_history_account(self, **overrides):
+        data = {'csrf_token': self.csrf_token(self.client.get('/history-accounts/new')),
+                'owner_name': 'Example Person', 'institution': 'Example Former Bank',
+                'name': 'Private synthetic closed account', 'type': 'depository', 'mask': '1234'}
+        data.update(overrides)
+        return self.client.post('/history-accounts/new', data=data)
+
+    def test_unlinked_account_import_reporting_and_encrypted_persistence(self):
+        self.complete_setup()
+        self.assertIn(b'Add an unlinked account', self.client.get('/statement-import').data)
+        response = self.create_history_account()
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            account = dict(connection.execute('SELECT * FROM accounts').fetchone())
+            self.assertIsNone(account['current_balance'])
+            self.assertIsNone(account['available_balance'])
+            self.assertEqual((account['cash_flow_role'], account['spending_enabled']), ('cash_flow', 1))
+            self.assertEqual(len(self.application.statement_accounts(connection)), 1)
+        self.assertIn(account['id'], response.location)
+        self.assertNotIn(b'Private synthetic closed account', self.application.vault.path.read_bytes())
+        self.application.lock_data()
+        self.application.unlock_data(self.password)
+        self.application.save_setting(self.application.LOCAL_AI_SETTING, '1')
+        self.assertIn(b'Unlinked history', self.client.get(response.location).data)
+        location = self.upload_synthetic_statement(account['id'])
+        response = self.client.post(location, data={
+            'csrf_token': self.csrf_token(self.client.get(location)),
+            'action': 'confirm', 'include': ['0', '1', '2'], 'reviewed': 'on'})
+        self.assertEqual(response.status_code, 302)
+        report = self.client.get('/transactions', query_string={
+            'account': account['id'], 'date_from': '2026-09-01', 'date_to': '2026-09-30'})
+        self.assertIn(b'Private synthetic purchase marker', report.data)
+        with self.application.db() as connection:
+            connection.execute(
+                "UPDATE transactions SET category_override = 'Example expense' WHERE amount > 0"
+            )
+            spending = self.application.rolling_spending_summary(
+                connection, lookback_days=30, account_id=account['id'], today=date(2026, 9, 30))
+            self.assertEqual(spending['total'], 1334)
+        with self.application.app.test_request_context('/'):
+            context = self.application.page_context('overview')
+        self.assertFalse(context['connected'])
+        self.assertTrue(context['accounts'][0]['unlinked'])
+        self.assertEqual(self.client.get('/').status_code, 200)
+        self.assertIn(b'Unlinked history', self.client.get('/settings').data)
+
+    def test_unlinked_account_validation_and_repeated_submit(self):
+        self.complete_setup()
+        self.assertEqual(self.client.post('/history-accounts/new', data={}).status_code, 400)
+        for invalid in ({'owner_name': ''}, {'institution': 'x' * 101}, {'name': ''},
+                        {'type': 'investment'}, {'mask': '123456789'}, {'mask': 'abcd'}):
+            self.assertEqual(self.create_history_account(**invalid).status_code, 200)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM accounts').fetchone()[0], 0)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM connections').fetchone()[0], 0)
+        first = self.create_history_account()
+        second = self.create_history_account(name='private synthetic closed account')
+        self.assertEqual(first.location, second.location)
+        self.assertEqual(self.create_history_account(name='Old credit card', type='credit', mask='').status_code, 302)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM accounts').fetchone()[0], 2)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM connections').fetchone()[0], 1)
+
+    def test_unlinked_accounts_never_use_plaid(self):
+        self.complete_setup()
+        self.create_history_account()
+        with self.application.db() as connection:
+            item = dict(connection.execute('SELECT * FROM connections').fetchone())
+        self.assertEqual(self.application.connection_rows(), [])
+        with patch.object(self.application, 'plaid_client') as client:
+            self.assertEqual(self.application.sync_all_connections(), (0, []))
+            self.assertEqual(self.application.sync_connection(item), 0)
+            client.assert_not_called()
+        self.assertEqual(self.application.plaid_product_status()['connections'], [])
+        token = self.csrf_token(self.client.get('/history-accounts/new'))
+        with patch.object(self.application, 'PLAID_DISABLED', False), \
+             patch.object(self.application, 'plaid_credentials', return_value=('synthetic', 'synthetic')), \
+             patch.object(self.application, 'plaid_client') as client:
+            response = self.client.post('/api/link-token', json={'connection_id': item['id']},
+                                        headers={'X-CSRF-Token': token})
+            self.assertEqual(response.status_code, 404)
+            self.application.audit_plaid_products()
+            client.assert_not_called()
+        with self.application.db() as connection:
+            linked_id = connection.execute(
+                "INSERT INTO connections (owner_name, institution, access_token) "
+                "VALUES ('Example linked owner', 'Example linked bank', 'synthetic-token')"
+            ).lastrowid
+        with patch.object(self.application, 'sync_connection', return_value=2) as sync:
+            self.assertEqual(self.application.sync_all_connections(), (2, []))
+            sync.assert_called_once()
+            self.assertEqual(sync.call_args.args[0]['id'], linked_id)
+        self.assertEqual([row['id'] for row in self.application.connection_rows()], [linked_id])
+
+    def upload_synthetic_statement(self, account_id='example'):
         page = {'number': 1, 'text': 'Example synthetic statement text', 'image': 'ZXhhbXBsZQ=='}
         extraction = {'account_last4': '', 'warnings': [], 'transactions': [
             {'date': '2026-09-01', 'description': 'Example Cafe', 'amount': '1.00', 'direction': 'money_out', 'evidence': 'Example Cafe'},
@@ -230,11 +327,206 @@ class DevelopmentModeTests(unittest.TestCase):
         token = self.csrf_token(self.client.get('/statement-import'))
         with patch.object(self.application.statements, 'document_pages', return_value=[page]), patch.object(self.application.statements, 'extract_page', return_value=extraction):
             response = self.client.post('/statement-import', data={
-                'csrf_token': token, 'account_id': 'example', 'start': '2026-09-01', 'end': '2026-09-30', 'usd': 'on',
+                'csrf_token': token, 'account_id': account_id, 'usd': 'on',
                 'statement': (io.BytesIO(b'%PDF-synthetic-example'), 'example.pdf'),
             })
         self.assertEqual(response.status_code, 302)
         return response.location
+
+    def test_full_statement_without_date_or_page_fields_and_review_date_correction(self):
+        self.seed_review_transactions()
+        page = self.client.get('/statement-import')
+        for field in (b'name="start"', b'name="end"', b'name="first_page"', b'name="last_page"'):
+            self.assertNotIn(field, page.data)
+        pages = [{'number': number, 'text': 'Synthetic page', 'image': 'ZXhhbXBsZQ=='} for number in range(1, 26)]
+        contexts = []
+        def extract(page, account_type, context):
+            contexts.append(dict(context))
+            return {'account_last4': '', 'warnings': [], 'statement_start': '2025-12-15', 'statement_end': '2026-01-14',
+                    'transactions': [{'date': '2026-01-02', 'description': f"Example page {page['number']} row {index}",
+                        'amount': '1.00', 'direction': 'money_out', 'evidence': 'Fictional row'} for index in range(25)]}
+        with patch.object(self.application.statements, 'document_pages', return_value=pages), \
+             patch.object(self.application.statements, 'extract_page', side_effect=extract) as reader:
+            response = self.client.post('/statement-import', data={
+                'csrf_token': self.csrf_token(page), 'account_id': 'example', 'usd': 'on',
+                'statement': (io.BytesIO(b'%PDF-synthetic'), 'example.pdf')})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(reader.call_count, 25)
+        self.assertEqual(contexts[1]['statement_start'], '2025-12-15')
+        location = response.location
+        with self.application.db() as connection:
+            draft = self.application.statements.read_setting(connection, self.application.statements.DRAFT_PREFIX + location.rsplit('/', 1)[1])
+        self.assertEqual(len(draft['rows']), 625)
+        self.assertEqual((draft['start'], draft['end']), ('2026-01-02', '2026-01-02'))
+        # Correcting a date outside the extracted range must work, and history covers only selected rows.
+        response = self.client.post(location, data={'csrf_token': self.csrf_token(self.client.get(location)),
+            'action': 'confirm', 'include': ['0'], 'date_0': '2025-12-30', 'reviewed': 'on'})
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+        self.assertEqual((history[0]['start'], history[0]['end']), ('2025-12-30', '2025-12-30'))
+
+    def test_multi_account_statement_routes_rows_and_checks_duplicates_per_account(self):
+        self.complete_setup()
+        self.create_history_account(name='Checking', mask='1111')
+        self.create_history_account(name='Savings', mask='2222')
+        self.application.save_setting(self.application.LOCAL_AI_SETTING, '1')
+        with self.application.db() as connection:
+            accounts = {row['name']: row['id'] for row in connection.execute('SELECT id, name FROM accounts')}
+        rows = [{'date': '2026-01-02', 'description': 'Example transfer', 'amount': '10.00',
+                 'direction': 'money_out', 'evidence': 'Fictional row', 'account_label': name,
+                 'account_last4': mask, 'account_type': 'depository'}
+                for name, mask in [('Checking', '1111'), ('Savings', '2222'), ('Unknown section', '3333')]]
+        page = {'number': 1, 'text': 'Fictional multi-account statement', 'image': 'ZXhhbXBsZQ=='}
+        csrf = self.csrf_token(self.client.get('/statement-import'))
+        with patch.object(self.application.statements, 'document_pages', return_value=[page]), \
+             patch.object(self.application.statements, 'extract_page', return_value={'transactions': rows, 'warnings': []}):
+            response = self.client.post('/statement-import', data={'csrf_token': csrf, 'usd': 'on',
+                'statement': (io.BytesIO(b'%PDF-multi-example'), 'example.pdf')})
+        self.assertEqual(response.status_code, 302)
+        location = response.location
+        token = location.rsplit('/', 1)[1]
+        key = self.application.statements.DRAFT_PREFIX + token
+        with self.application.db() as connection:
+            draft = self.application.statements.read_setting(connection, key)
+        self.assertEqual([row['account_id'] for row in draft['rows']], [accounts['Checking'], accounts['Savings'], ''])
+        self.assertFalse(draft['rows'][0]['duplicate'])
+        self.assertFalse(draft['rows'][1]['duplicate'])
+        self.assertTrue(draft['rows'][2]['selected'])
+        confirm = {'csrf_token': csrf, 'action': 'confirm', 'include': ['0', '1', '2'], 'reviewed': 'on'}
+        self.assertEqual(self.client.post(location, data=confirm).status_code, 200)
+        self.assertEqual(self.client.post(location, data={**confirm, 'group_account_2': 'missing'}).status_code, 200)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 0)
+        response = self.client.post('/history-accounts/new?draft=' + token, data={
+            'csrf_token': csrf, 'owner_name': 'Example Person', 'institution': 'Example Former Bank',
+            'name': 'Old card', 'mask': '3333', 'type': 'credit'})
+        self.assertEqual(response.location, location)
+        with self.application.db() as connection:
+            card_id = connection.execute("SELECT id FROM accounts WHERE name = 'Old card'").fetchone()[0]
+        response = self.client.post(location, data={**confirm, 'group_account_2': card_id})
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            self.assertEqual({row[0] for row in connection.execute('SELECT account_id FROM transactions')},
+                             {accounts['Checking'], accounts['Savings'], card_id})
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+        self.assertEqual(len(history), 3)
+        self.client.post('/statement-import/history/' + history[0]['id'] + '/exclude', data={'csrf_token': csrf})
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions WHERE excluded = 1').fetchone()[0], 1)
+            # A replay or reassignment cannot bypass already-imported row identities.
+            draft['account_groups'][0]['account_id'] = card_id
+            self.application.refresh_statement_rows(connection, draft)
+            self.assertTrue(all(row['already_imported'] for row in draft['rows']))
+
+    def test_batch_upload_api_keeps_successes_reuses_drafts_and_allows_more_than_three(self):
+        self.seed_review_transactions()
+        csrf = self.client.get('/statement-import', headers={'Accept': 'application/json'}).json['csrf_token']
+        page = {'number': 1, 'text': 'Fictional statement', 'image': 'ZXhhbXBsZQ=='}
+        def upload(data, name='example.pdf'):
+            return self.client.post('/statement-import', headers={'Accept': 'application/json'}, data={
+                'csrf_token': csrf, 'usd': 'on', 'statement': (io.BytesIO(data), name)})
+        with patch.object(self.application.statements, 'document_pages', return_value=[page]) as reader, \
+             patch.object(self.application.statements, 'extract_page', return_value={'transactions': [], 'warnings': []}):
+            first = upload(b'%PDF-one', '../../private-test-statement.pdf')
+            self.assertEqual(first.status_code, 200)
+            repeated = upload(b'%PDF-one')
+            self.assertTrue(repeated.json['reused'])
+            self.assertEqual(first.json['review_url'], repeated.json['review_url'])
+            self.assertEqual(reader.call_count, 1)
+            with patch.object(self.application.statements, 'document_pages', side_effect=RuntimeError('private-detail')):
+                failure = upload(b'broken')
+                self.assertEqual(failure.status_code, 400)
+                self.assertNotIn('private-detail', failure.get_data(as_text=True))
+            for index in range(4):
+                self.assertEqual(upload(f'%PDF-next-{index}'.encode()).status_code, 200)
+        with self.application.db() as connection:
+            drafts = list(connection.execute("SELECT value FROM settings WHERE key LIKE 'statement_draft:%'"))
+            self.assertEqual(len(drafts), 5)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 2)
+            first_draft = self.application.statements.read_setting(connection, self.application.statements.DRAFT_PREFIX + first.json['review_url'].rsplit('/', 1)[1])
+            self.assertEqual(first_draft['filename'], 'private-test-statement.pdf')
+        self.assertNotIn(b'private-test-statement.pdf', self.application.vault.path.read_bytes())
+        self.assertIn(b'private-test-statement.pdf', self.client.get('/statement-import').data)
+        self.application.lock_data()
+        self.assertEqual(self.client.get('/statement-import', headers={'Accept': 'application/json'}).status_code, 302)
+
+    def test_batch_capacity_and_direct_multiple_uploads_are_explicit(self):
+        self.seed_review_transactions()
+        csrf = self.csrf_token(self.client.get('/statement-import'))
+        headers = {'Accept': 'application/json'}
+        multi = self.client.post('/statement-import', headers=headers, data={'csrf_token': csrf, 'usd': 'on',
+            'statement': [(io.BytesIO(b'%PDF-one'), 'one.pdf'), (io.BytesIO(b'%PDF-two'), 'two.pdf')]})
+        self.assertEqual(multi.status_code, 400)
+        with patch.object(self.application.statements, 'MAX_OPEN_DRAFTS', 0), \
+             patch.object(self.application.statements, 'document_pages') as reader:
+            response = self.client.post('/statement-import', headers=headers, data={'csrf_token': csrf, 'usd': 'on',
+                'statement': (io.BytesIO(b'%PDF-one'), 'one.pdf')})
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json['code'], 'capacity')
+            reader.assert_not_called()
+        self.application.OLLAMA_EVALUATION_LOCK.acquire()
+        try:
+            response = self.client.post('/statement-import', headers=headers, data={'csrf_token': csrf, 'usd': 'on',
+                'statement': (io.BytesIO(b'%PDF-one'), 'one.pdf')})
+            self.assertEqual(response.json['code'], 'busy')
+        finally:
+            self.application.OLLAMA_EVALUATION_LOCK.release()
+
+    def test_import_automatically_classifies_and_timeout_can_be_retried_without_reimporting(self):
+        self.seed_review_transactions()
+        self.import_classifier.stop()
+        location = self.upload_synthetic_statement()
+        csrf = self.csrf_token(self.client.get(location))
+        with patch.object(self.application, 'classify_evaluation_rows', side_effect=TimeoutError('private detail')):
+            response = self.client.post(location, data={'csrf_token': csrf, 'action': 'confirm', 'include': ['1'], 'reviewed': 'on'})
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+            self.assertEqual(history[0]['classification'], {'status': 'interrupted', 'remaining': 1})
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM transactions').fetchone()[0], 3)
+        page = self.client.get('/statement-import')
+        self.assertIn(b'Finish categorizing', page.data)
+        self.assertNotIn(b'private detail', page.data)
+        def classify(prepared, rows):
+            self.assertFalse(prepared['targeted'])
+            return [{'status': 'categorized', 'category': 'Dining', 'confidence': 1,
+                     'reason': 'Fictional category example', 'transaction_ids': row['transaction_ids']}
+                    for row in rows]
+        with patch.object(self.application, 'classify_evaluation_rows', side_effect=classify) as model:
+            response = self.client.post('/statement-import/history/' + history[0]['id'] + '/classify', data={'csrf_token': csrf})
+            model.assert_called_once()
+        with self.application.db() as connection:
+            imported = connection.execute("SELECT id, category_override FROM transactions WHERE id LIKE 'statement:%'").fetchone()
+            self.assertEqual(imported['category_override'], 'Dining')
+            self.assertIn(imported['id'], self.application.load_ai_reviews(connection))
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE category_override IS NULL").fetchone()[0], 2)
+            connection.execute("UPDATE transactions SET category_override = 'Groceries', category_override_source = 'user' WHERE id = ?", (imported['id'],))
+        with patch.object(self.application, 'classify_evaluation_rows') as model:
+            self.application.classify_statement_import(history[0]['id'])
+            model.assert_not_called()
+
+    def test_import_classifier_respects_saved_rules_and_busy_model(self):
+        self.seed_review_transactions()
+        location = self.upload_synthetic_statement()
+        csrf = self.csrf_token(self.client.get(location))
+        self.client.post(location, data={'csrf_token': csrf, 'action': 'confirm', 'include': ['1', '2'], 'reviewed': 'on'})
+        self.import_classifier_mock.assert_called_once()
+        self.import_classifier.stop()
+        with self.application.db() as connection:
+            connection.execute("INSERT INTO merchant_rules (account_id, match_type, match_value, category) VALUES ('example', 'description', 'Private synthetic purchase marker', 'Dining')")
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+        self.application.OLLAMA_EVALUATION_LOCK.acquire()
+        try:
+            with patch.object(self.application, 'classify_evaluation_rows') as model:
+                self.application.classify_statement_import(history[0]['id'])
+                model.assert_not_called()
+        finally:
+            self.application.OLLAMA_EVALUATION_LOCK.release()
+        with self.application.db() as connection:
+            history = self.application.statements.read_setting(connection, self.application.statements.HISTORY_KEY)
+            self.assertEqual(history[0]['classification'], {'status': 'busy', 'remaining': 1})
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM merchant_rules').fetchone()[0], 1)
 
     def test_statement_draft_is_encrypted_and_only_confirmed_rows_are_added(self):
         self.seed_review_transactions()
@@ -308,6 +600,7 @@ class DevelopmentModeTests(unittest.TestCase):
             'csrf_token': token, 'action': 'confirm', 'include': ['3'], 'reviewed': 'on',
             'date_3': '2026-09-20', 'description_3': 'Manually checked example',
             'amount_3': '5.20', 'direction_3': 'money_out',
+            'account_override_3': 'example',
         })
         self.assertEqual(response.status_code, 302)
         with self.application.db() as connection:
@@ -322,7 +615,7 @@ class DevelopmentModeTests(unittest.TestCase):
         token = self.csrf_token(self.client.get('/statement-import'))
         with patch.object(self.application.statements, 'document_pages', side_effect=RuntimeError('example-private-source-detail')):
             response = self.client.post('/statement-import', data={
-                'csrf_token': token, 'account_id': 'example', 'start': '2026-09-01', 'end': '2026-09-30',
+                'csrf_token': token, 'account_id': 'example',
                 'usd': 'on', 'statement': (io.BytesIO(b'%PDF-test'), 'example.pdf'),
             })
         self.assertIn(b'No transactions were added', response.data)
