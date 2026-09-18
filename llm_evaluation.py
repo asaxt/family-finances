@@ -69,8 +69,12 @@ def representative_transactions(connection, today=None, transaction_ids=None):
                    EXISTS (
                        SELECT 1 FROM merchant_rules mr
                        WHERE mr.account_id = t.account_id
-                         AND mr.match_type = 'description'
-                         AND mr.match_value = TRIM(t.description) COLLATE NOCASE
+                         AND (
+                           (mr.match_type = 'description'
+                            AND mr.match_value = TRIM(t.description) COLLATE NOCASE)
+                           OR (mr.match_type = 'description_contains'
+                               AND INSTR(LOWER(TRIM(t.description)), LOWER(mr.match_value)) > 0)
+                         )
                    ) AS has_description_rule,
                    a.id AS account_id, a.type AS account_type,
                    a.subtype AS account_subtype
@@ -197,6 +201,20 @@ purchase when that purpose can be inferred. They do not need user review merely
 because their direction is money_in. Incoming interest, gifts, loan proceeds,
 reimbursements, and similar receipts are not refunds; use an appropriate
 existing money-in category or leave the transaction uncategorized.
+
+Credit-card payments are balance movements, not earnings. On an account whose
+type or subtype is credit or credit card, a money_in item described as PAYMENT,
+ONLINE PAYMENT, AUTOPAY, AUTOMATIC PAYMENT, or THANK YOU usually represents a
+payment that reduced the card balance. Likewise, a money_out item from a bank
+account naming a credit-card issuer usually represents the other side of that
+payment. Never categorize either side as wages, income, a reimbursement, a
+refund, or another receipt merely because the card-side direction is money_in.
+When all_occurrences_have_matching_household_transaction is true, prioritize
+Transfer for these payment descriptions with confidence 2, even if category
+examples suggest an income label. If that matching flag is false, do not call
+an apparent credit-card payment income: use confidence 0 unless the description
+clearly identifies a purchase refund or credit that belongs in a purchase
+category.
 
 Use Transfer only when
 all_occurrences_have_matching_household_transaction is true. A transfer is a

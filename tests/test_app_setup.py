@@ -78,7 +78,7 @@ class AppSetupTests(unittest.TestCase):
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
         with self.application.db() as connection:
-            self.assertEqual(schema_version(connection), 13)
+            self.assertEqual(schema_version(connection), 14)
             initial_goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
@@ -432,7 +432,7 @@ class AppSetupTests(unittest.TestCase):
                 INSERT INTO transactions (
                     id, account_id, amount, currency, description, merchant,
                     pending, transacted_at, category, excluded
-                ) VALUES (?, 'checking', 5000, 'USD', 'Payment detail',
+                ) VALUES (?, 'checking', 5000, 'USD', 'Payment detail 100',
                           'Recurring Payment', 0, '2026-08-05', 'Loan Payments', 0)
                 """,
                 (("reviewed",), ("existing-match",)),
@@ -448,6 +448,7 @@ class AppSetupTests(unittest.TestCase):
                 "category_flow_type": "transfer",
                 "return_purpose": "all",
                 "remember_match": "on",
+                "match_value": "Payment detail",
             },
         )
         with self.application.db() as connection:
@@ -457,7 +458,7 @@ class AppSetupTests(unittest.TestCase):
                     id, account_id, amount, currency, description, merchant,
                     pending, transacted_at, category, excluded
                 ) VALUES (
-                    'future-match', 'checking', 6000, 'USD', 'Payment detail',
+                    'future-match', 'checking', 6000, 'USD', 'Payment detail 200',
                     'Recurring Payment', 0, '2026-08-06', 'Loan Payments', 0
                 )
                 """
@@ -469,7 +470,12 @@ class AppSetupTests(unittest.TestCase):
             rule_count = connection.execute(
                 "SELECT COUNT(*) FROM merchant_rules"
             ).fetchone()[0]
+            saved_rule = connection.execute(
+                "SELECT match_type, match_value FROM merchant_rules"
+            ).fetchone()
         self.assertEqual(rule_count, 1)
+        self.assertEqual(saved_rule["match_type"], "description_contains")
+        self.assertEqual(saved_rule["match_value"], "Payment detail")
         for transaction_id in ("existing-match", "future-match"):
             self.assertEqual(rows[transaction_id]["effective_category"], "Transfer")
             self.assertEqual(rows[transaction_id]["flow_type"], "transfer")

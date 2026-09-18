@@ -288,6 +288,113 @@ class CashFlowAnalyticsTests(unittest.TestCase):
         self.assertEqual(overridden["effective_category"], "Housing")
         self.assertEqual(overridden["flow_type"], "spending")
 
+    def test_account_scoped_description_contains_rule_handles_variable_details(self):
+        self.connection.execute(
+            """
+            INSERT INTO merchant_rules (
+                account_id, match_type, match_value, category
+            ) VALUES (
+                'checking', 'description_contains',
+                'EXAMPLE BROKERAGE TRANSFER', 'Transfer'
+            )
+            """
+        )
+        self.connection.executemany(
+            """
+            INSERT INTO transactions (
+                id, account_id, amount, currency, description, merchant,
+                pending, transacted_at, category, excluded
+            ) VALUES (?, 'checking', 10000, 'USD', ?, NULL, 0, ?, 'Uncategorized', 0)
+            """,
+            (
+                (
+                    "brokerage-one",
+                    "EXAMPLE BROKERAGE TRANSFER ~ REFERENCE 1001",
+                    "2025-01-05",
+                ),
+                (
+                    "brokerage-two",
+                    "EXAMPLE BROKERAGE TRANSFER ~ REFERENCE 2002",
+                    "2025-02-06",
+                ),
+            ),
+        )
+
+        rows = {row["id"]: row for row in transaction_list(self.connection)}
+        self.assertEqual(rows["brokerage-one"]["effective_category"], "Transfer")
+        self.assertEqual(rows["brokerage-two"]["effective_category"], "Transfer")
+        self.assertEqual(
+            rows["brokerage-one"]["merchant_rule_match_value"],
+            "EXAMPLE BROKERAGE TRANSFER",
+        )
+
+    def test_earnings_trends_group_each_description_as_its_own_series(self):
+        self.connection.executemany(
+            """
+            INSERT INTO transactions (
+                id, account_id, amount, currency, description, merchant,
+                pending, transacted_at, category, excluded
+            ) VALUES (?, 'checking', ?, 'USD', ?, NULL, 0, ?, ?, 0)
+            """,
+            (
+                ("pay-jan", -123400, "EXAMPLE EMPLOYER PAYROLL", "2025-01-15", "Income"),
+                ("pay-feb", -125600, "EXAMPLE EMPLOYER PAYROLL", "2025-02-15", "Income"),
+                ("bonus", -11100, "EXAMPLE EMPLOYER BONUS", "2025-02-20", "Income"),
+                ("purchase", 900, "SAMPLE CAFE", "2025-02-21", "Dining"),
+            ),
+        )
+
+        trends = long_term_trends(self.connection, kind="earnings")
+
+        self.assertEqual([row["amount"] for row in trends["months"]], [123400, 136700])
+        series = {row["name"]: row["values"] for row in trends["category_series"]}
+        self.assertEqual(series["EXAMPLE EMPLOYER PAYROLL"], [123400, 125600])
+        self.assertEqual(series["EXAMPLE EMPLOYER BONUS"], [0, 11100])
+        self.assertNotIn("SAMPLE CAFE", series)
+
+    def test_earnings_trends_use_saved_short_description_as_series_name(self):
+        self.connection.execute(
+            """
+            INSERT INTO merchant_rules (
+                account_id, match_type, match_value, category
+            ) VALUES (
+                'checking', 'description_contains',
+                'EXAMPLE EMPLOYER REIMBURSEMENT', 'Income'
+            )
+            """
+        )
+        self.connection.executemany(
+            """
+            INSERT INTO transactions (
+                id, account_id, amount, currency, description, merchant,
+                pending, transacted_at, category, excluded
+            ) VALUES (?, 'checking', ?, 'USD', ?, NULL, 0, ?, 'Uncategorized', 0)
+            """,
+            (
+                (
+                    "reimbursement-one",
+                    -1200,
+                    "EXAMPLE EMPLOYER REIMBURSEMENT ~ PERIOD 01",
+                    "2025-01-20",
+                ),
+                (
+                    "reimbursement-two",
+                    -1500,
+                    "EXAMPLE EMPLOYER REIMBURSEMENT ~ PERIOD 02",
+                    "2025-02-20",
+                ),
+            ),
+        )
+
+        trends = long_term_trends(self.connection, kind="earnings")
+
+        self.assertEqual(len(trends["category_series"]), 1)
+        self.assertEqual(
+            trends["category_series"][0]["name"],
+            "EXAMPLE EMPLOYER REIMBURSEMENT",
+        )
+        self.assertEqual(trends["category_series"][0]["values"], [1200, 1500])
+
     def test_refunds_passively_reduce_money_out_and_spending(self):
         self.add("card-purchase", "card", 10_000, "Shopping", "2026-08-03")
         self.add("card-refund", "card", -3_000, "Shopping", "2026-08-04")

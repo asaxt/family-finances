@@ -1242,11 +1242,15 @@ def cash_flow():
 @app.get("/trends")
 def trends():
     context = page_context("trends")
+    context["trend_view"] = (
+        "earnings" if request.args.get("view") == "earnings" else "spending"
+    )
     with db() as connection:
         context["long_term"] = long_term_trends(
             connection,
             context["account_id"],
             context["connection_id"],
+            context["trend_view"],
         )
     return render_template("trends.html", **context)
 
@@ -2149,19 +2153,48 @@ def update_transaction(transaction_id):
                 """,
                 (category, category_flow_type),
             )
-        match_type, match_value = recurring_match(transaction)
+        match_type, full_match_value = recurring_match(transaction)
+        rule_id = request.form.get("merchant_rule_id", "").strip()
         existing_rule = connection.execute(
             """
-            SELECT id, category FROM merchant_rules
-            WHERE account_id = ? AND match_type = ?
-              AND match_value = ? COLLATE NOCASE
+            SELECT id, category, match_type, match_value FROM merchant_rules
+            WHERE id = ? AND account_id = ?
             """,
-            (transaction["account_id"], match_type, match_value),
+            (rule_id, transaction["account_id"]),
+        ).fetchone() if rule_id else connection.execute(
+            """
+            SELECT id, category, match_type, match_value FROM merchant_rules
+            WHERE account_id = ? AND (
+              (match_type = 'description'
+               AND match_value = ? COLLATE NOCASE)
+              OR (match_type = 'description_contains'
+                  AND INSTR(LOWER(?), LOWER(match_value)) > 0)
+            )
+            ORDER BY CASE match_type WHEN 'description' THEN 0 ELSE 1 END,
+                     LENGTH(match_value) DESC, id
+            LIMIT 1
+            """,
+            (transaction["account_id"], full_match_value, full_match_value),
         ).fetchone()
         if request.form.get("remember_match") == "on":
+            match_value = request.form.get("match_value", "").strip() or full_match_value
+            if not match_value or len(match_value) > 255:
+                return transaction_cleanup_redirect()
+            match_type = (
+                "description"
+                if match_value.casefold() == full_match_value.casefold()
+                else "description_contains"
+            )
             recurring_category = category or (
                 existing_rule["category"] if existing_rule else transaction["category"]
             )
+            if existing_rule and (
+                existing_rule["match_type"] != match_type
+                or existing_rule["match_value"].casefold() != match_value.casefold()
+            ):
+                connection.execute(
+                    "DELETE FROM merchant_rules WHERE id = ?", (existing_rule["id"],)
+                )
             connection.execute(
                 """
                 INSERT INTO merchant_rules (

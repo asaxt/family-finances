@@ -14,8 +14,17 @@ def account_rows(connection, transaction_ids=None):
                COALESCE(t.category_override, mr.category, t.category) AS effective_category,
                r.flow_type, mr.category AS rule_category
         FROM transactions t JOIN accounts a ON a.id = t.account_id
-        LEFT JOIN merchant_rules mr ON mr.account_id = t.account_id
-          AND mr.match_type = 'description' AND mr.match_value = TRIM(t.description) COLLATE NOCASE
+        LEFT JOIN merchant_rules mr ON mr.id = (
+          SELECT candidate.id FROM merchant_rules candidate
+          WHERE candidate.account_id = t.account_id AND (
+            (candidate.match_type = 'description' AND candidate.match_value = TRIM(t.description) COLLATE NOCASE)
+            OR (candidate.match_type = 'description_contains'
+                AND INSTR(LOWER(TRIM(t.description)), LOWER(candidate.match_value)) > 0)
+          )
+          ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
+                   LENGTH(candidate.match_value) DESC, candidate.id
+          LIMIT 1
+        )
         LEFT JOIN category_rules r ON r.name = COALESCE(t.category_override, mr.category, t.category) COLLATE NOCASE
         WHERE t.pending = 0 AND t.excluded = 0
     """ + scope, transaction_ids or [])]

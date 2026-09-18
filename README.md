@@ -75,3 +75,12 @@ of Chart.js 4.5.1 with its MIT license.
 This project deliberately contains no container, public hosting, or
 remote-network setup. Do not change the Flask host to `0.0.0.0` without first
 adding and reviewing appropriate network security controls.
+
+## Public fixture policy
+
+Tests, examples, documentation, commit messages, and pull-request text must use
+obviously fictional data. Never copy transaction descriptions, merchants,
+employers, financial institutions, amounts, dates, account details, or other
+personal-life clues supplied by a user or taken from a real financial record.
+Use clear placeholders such as `EXAMPLE EMPLOYER`, `SAMPLE CAFE`, and invented
+amounts and dates that cannot reasonably be mistaken for a person's data.

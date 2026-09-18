@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -523,6 +523,45 @@ def _migrate_twelve_to_thirteen(connection):
     )
 
 
+def _migrate_thirteen_to_fourteen(connection):
+    statements = (
+        """
+        CREATE TABLE merchant_rules_v14 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            match_type TEXT NOT NULL CHECK (
+                match_type IN ('merchant', 'description', 'description_contains')
+            ),
+            match_value TEXT NOT NULL COLLATE NOCASE,
+            category TEXT NOT NULL,
+            flow_type TEXT CHECK (
+                flow_type IN (
+                    'earned_income', 'other_inflow', 'spending', 'transfer'
+                )
+            ),
+            spending_override TEXT CHECK (
+                spending_override IN ('include', 'exclude')
+            ),
+            UNIQUE (account_id, match_type, match_value),
+            FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+        )
+        """,
+        """
+        INSERT INTO merchant_rules_v14 (
+            id, account_id, match_type, match_value, category, flow_type,
+            spending_override
+        )
+        SELECT id, account_id, match_type, match_value, category, flow_type,
+               spending_override
+        FROM merchant_rules
+        """,
+        "DROP TABLE merchant_rules",
+        "ALTER TABLE merchant_rules_v14 RENAME TO merchant_rules",
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
@@ -538,6 +577,7 @@ VALIDATORS = {
     11: _validate_version_eleven,
     12: _validate_version_twelve,
     13: _validate_version_twelve,
+    14: _validate_version_twelve,
 }
 MIGRATIONS = {
     0: _migrate_zero_to_one,
@@ -553,6 +593,7 @@ MIGRATIONS = {
     10: _migrate_ten_to_eleven,
     11: _migrate_eleven_to_twelve,
     12: _migrate_twelve_to_thirteen,
+    13: _migrate_thirteen_to_fourteen,
 }
 
 
@@ -653,7 +694,9 @@ def create_schema(connection):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account_id TEXT NOT NULL,
                 match_type TEXT NOT NULL CHECK (
-                    match_type IN ('merchant', 'description')
+                    match_type IN (
+                        'merchant', 'description', 'description_contains'
+                    )
                 ),
                 match_value TEXT NOT NULL COLLATE NOCASE,
                 category TEXT NOT NULL,
