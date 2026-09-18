@@ -9,8 +9,18 @@ EXISTS (
     WITH eligible AS (
         SELECT p.id, p.account_id, p.amount, p.currency, p.transacted_at
         FROM transactions p JOIN accounts pa ON pa.id = p.account_id
-        LEFT JOIN merchant_rules pm ON pm.account_id = p.account_id
-          AND pm.match_type = 'description' AND pm.match_value = TRIM(p.description) COLLATE NOCASE
+        LEFT JOIN merchant_rules pm ON pm.id = (
+          SELECT candidate.id FROM merchant_rules candidate
+          WHERE candidate.account_id = p.account_id AND (
+            (candidate.match_type = 'description'
+             AND candidate.match_value = TRIM(p.description) COLLATE NOCASE)
+            OR (candidate.match_type = 'description_contains'
+                AND INSTR(LOWER(TRIM(p.description)), LOWER(candidate.match_value)) > 0)
+          )
+          ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
+                   LENGTH(candidate.match_value) DESC, candidate.id
+          LIMIT 1
+        )
         LEFT JOIN category_rules pc ON pc.name = COALESCE(p.category_override, pm.category, p.category) COLLATE NOCASE
         WHERE p.pending = 0 AND p.excluded = 0 AND p.amount != 0
           AND pa.cash_flow_role = 'cash_flow' AND pa.spending_enabled = 1
@@ -72,12 +82,34 @@ CASE WHEN ({SPEND_SQL}) != 0 THEN 1 ELSE 0 END
 """
 
 CATEGORY_RULE_JOIN = f"""
-LEFT JOIN merchant_rules mr
-  ON mr.account_id = t.account_id
- AND mr.match_type = 'description'
- AND mr.match_value = TRIM(t.description) COLLATE NOCASE
+LEFT JOIN merchant_rules mr ON mr.id = (
+  SELECT candidate.id FROM merchant_rules candidate
+  WHERE candidate.account_id = t.account_id AND (
+    (candidate.match_type = 'description'
+     AND candidate.match_value = TRIM(t.description) COLLATE NOCASE)
+    OR (candidate.match_type = 'description_contains'
+        AND INSTR(LOWER(TRIM(t.description)), LOWER(candidate.match_value)) > 0)
+  )
+  ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
+           LENGTH(candidate.match_value) DESC, candidate.id
+  LIMIT 1
+)
 LEFT JOIN category_rules r
   ON r.name = {EFFECTIVE_CATEGORY_SQL} COLLATE NOCASE
+"""
+
+RULED_DESCRIPTION_SQL = """
+CASE
+    WHEN mr.match_type = 'description_contains' THEN mr.match_value
+    ELSE TRIM(t.description)
+END
+"""
+
+DISPLAY_NAME_SQL = f"""
+CASE
+    WHEN mr.match_type = 'description_contains' THEN mr.match_value
+    ELSE COALESCE(NULLIF(t.merchant, ''), t.description)
+END
 """
 
 DEFAULT_OVERVIEW_LOOKBACK_DAYS = 30
@@ -187,7 +219,7 @@ def spending_summary(connection, month, account_id=None, connection_id=None):
 
     merchants = connection.execute(
         f"""
-        SELECT COALESCE(NULLIF(t.merchant, ''), t.description) AS name,
+        SELECT {DISPLAY_NAME_SQL} AS name,
                SUM({SPEND_SQL}) AS amount,
                SUM({SPEND_COUNT_SQL}) AS transaction_count
         FROM transactions t
@@ -196,7 +228,7 @@ def spending_summary(connection, month, account_id=None, connection_id=None):
         WHERE t.pending = 0 AND t.excluded = 0
           AND substr(t.transacted_at, 1, 7) = ?
           {account_sql}
-        GROUP BY COALESCE(NULLIF(t.merchant, ''), t.description)
+        GROUP BY {DISPLAY_NAME_SQL}
         HAVING SUM({SPEND_SQL}) > 0
         ORDER BY amount DESC
         LIMIT 8
@@ -223,7 +255,7 @@ def spending_summary(connection, month, account_id=None, connection_id=None):
 
     largest = connection.execute(
         f"""
-        SELECT COALESCE(NULLIF(t.merchant, ''), t.description) AS name,
+        SELECT {DISPLAY_NAME_SQL} AS name,
                {SPEND_SQL} AS amount,
                t.transacted_at AS date
         FROM transactions t
@@ -301,7 +333,7 @@ def rolling_spending_summary(
             f"""
             SELECT t.transacted_at AS date,
                    {EFFECTIVE_CATEGORY_SQL} AS category,
-                   COALESCE(NULLIF(t.merchant, ''), t.description) AS merchant,
+                   {DISPLAY_NAME_SQL} AS merchant,
                    t.description,
                    a.id AS account_id,
                    a.name AS account_name,
@@ -605,19 +637,27 @@ def daily_trends(connection, account_id=None, connection_id=None):
     return [dict(row) for row in rows]
 
 
-def long_term_trends(connection, account_id=None, connection_id=None):
+def long_term_trends(connection, account_id=None, connection_id=None, kind="spending"):
     scope_sql, scope_params = scope_filter(account_id, connection_id)
+    earnings = kind == "earnings"
+    amount_sql = (
+        f"CASE WHEN ({EFFECTIVE_CASH_FLOW_SQL}) = 'earned_income' "
+        "AND t.amount < 0 THEN -t.amount ELSE 0 END"
+        if earnings
+        else SPEND_SQL
+    )
+    series_sql = RULED_DESCRIPTION_SQL if earnings else EFFECTIVE_CATEGORY_SQL
     monthly_rows = connection.execute(
         f"""
         SELECT substr(t.transacted_at, 1, 7) AS month,
-               SUM({SPEND_SQL}) AS amount
+               SUM({amount_sql}) AS amount
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         {CATEGORY_RULE_JOIN}
         WHERE t.pending = 0 AND t.excluded = 0
           {scope_sql}
         GROUP BY substr(t.transacted_at, 1, 7)
-        HAVING SUM({SPEND_SQL}) != 0
+        HAVING SUM({amount_sql}) != 0
         ORDER BY month
         """,
         scope_params,
@@ -630,7 +670,7 @@ def long_term_trends(connection, account_id=None, connection_id=None):
         JOIN accounts a ON a.id = t.account_id
         {CATEGORY_RULE_JOIN}
         WHERE t.pending = 0 AND t.excluded = 0
-          AND ({SPEND_SQL}) != 0
+          AND ({amount_sql}) != 0
           {scope_sql}
         """,
         scope_params,
@@ -640,7 +680,7 @@ def long_term_trends(connection, account_id=None, connection_id=None):
             "months": [],
             "metrics": {},
             "category_series": [],
-            "coverage_label": "No spending history",
+            "coverage_label": f"No {'earnings' if earnings else 'spending'} history",
         }
 
     first_date = datetime.strptime(coverage["first_date"], "%Y-%m-%d").date()
@@ -718,16 +758,16 @@ def long_term_trends(connection, account_id=None, connection_id=None):
     category_rows = connection.execute(
         f"""
         SELECT substr(t.transacted_at, 1, 7) AS month,
-               {EFFECTIVE_CATEGORY_SQL} AS category,
-               SUM({SPEND_SQL}) AS amount
+               {series_sql} AS category,
+               SUM({amount_sql}) AS amount
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         {CATEGORY_RULE_JOIN}
         WHERE t.pending = 0 AND t.excluded = 0
           {scope_sql}
         GROUP BY substr(t.transacted_at, 1, 7),
-                 {EFFECTIVE_CATEGORY_SQL}
-        HAVING SUM({SPEND_SQL}) > 0
+                 {series_sql}
+        HAVING SUM({amount_sql}) > 0
         ORDER BY month, amount DESC
         """,
         scope_params,
@@ -785,6 +825,7 @@ def long_term_trends(connection, account_id=None, connection_id=None):
             "twenty_four_month_average": latest["ma_24"],
         },
         "category_series": category_series,
+        "kind": kind,
         "coverage_label": (
             f"{month_label(usable_points[0]['month'])}–{month_label(usable_points[-1]['month'])}"
         ),
@@ -798,7 +839,7 @@ def category_details(connection, month, account_id=None, connection_id=None):
     for category in summary["categories"]:
         recent_transactions = connection.execute(
             f"""
-            SELECT COALESCE(NULLIF(t.merchant, ''), t.description) AS name,
+            SELECT {DISPLAY_NAME_SQL} AS name,
                    t.transacted_at,
                    {SPEND_SQL} AS amount
             FROM transactions t
@@ -916,7 +957,9 @@ def transaction_list(
                c.owner_name,
                {EFFECTIVE_CATEGORY_SQL} AS effective_category,
                r.flow_type AS category_flow_type,
-               mr.id AS merchant_rule_id
+               mr.id AS merchant_rule_id,
+               mr.match_type AS merchant_rule_match_type,
+               mr.match_value AS merchant_rule_match_value
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         JOIN connections c ON c.id = a.connection_id

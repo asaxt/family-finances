@@ -131,6 +131,10 @@ class OverviewTests(unittest.TestCase):
         trends = self.client.get("/trends").get_data(as_text=True)
         self.assertIn("Monthly spending and moving averages", trends)
         self.assertIn("Category trend", trends)
+        self.assertIn("Earnings", trends)
+        earnings = self.client.get("/trends?view=earnings").get_data(as_text=True)
+        self.assertIn("Earnings trends", earnings)
+        self.assertIn("No earnings history", earnings)
         for removed in (
             "Year-over-year change",
             "How to read this",

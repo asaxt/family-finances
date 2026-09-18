@@ -22,7 +22,7 @@ class SchemaTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         try:
             schema.create_schema(connection)
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
             self.assertNotIn("budgets", schema.user_tables(connection))
             schema.validate_schema(connection)
             goal = connection.execute(
@@ -64,10 +64,10 @@ class SchemaTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_a_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         with database.connection() as connection:
-            connection.execute("PRAGMA user_version = 14")
+            connection.execute("PRAGMA user_version = 15")
         database.persist()
 
-        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 13"):
+        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 14"):
             schema.prepare_encrypted_database(database, key, auth_path)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -148,7 +148,7 @@ class SchemaTests(unittest.TestCase):
                 "SELECT flow_type FROM merchant_rules WHERE match_value = 'Example'"
             ).fetchone()[0]
             self.assertIsNone(category_only_flow)
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
             schema.validate_schema(connection)
         finally:
             connection.close()
@@ -363,7 +363,7 @@ class SchemaTests(unittest.TestCase):
                 ).fetchone()[0],
                 "spending",
             )
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
             schema.validate_schema(connection)
         finally:
             connection.close()
@@ -373,7 +373,7 @@ class SchemaTests(unittest.TestCase):
         changed = schema.prepare_encrypted_database(database, key, auth_path)
         self.assertTrue(changed)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
             account_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(accounts)")
             }
@@ -486,7 +486,7 @@ class SchemaTests(unittest.TestCase):
             venmo_rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
         self.assertEqual(rows["venmo-in"], (None, None))
         self.assertEqual(rows["venmo-out"], (None, None))
         self.assertEqual(rows["bank-transfer"], (None, None))
@@ -540,7 +540,7 @@ class SchemaTests(unittest.TestCase):
             rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
         self.assertEqual(tuple(transaction), (None, None))
         self.assertIsNone(rule)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
@@ -563,7 +563,7 @@ class SchemaTests(unittest.TestCase):
                 row[1]
                 for row in connection.execute("PRAGMA table_info(merchant_rules)")
             }
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
         self.assertEqual(columns, schema.EXPECTED_COLUMNS["merchant_rules"])
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -580,7 +580,7 @@ class SchemaTests(unittest.TestCase):
 
         schema.prepare_encrypted_database(database, key, auth_path)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
             self.assertNotIn("budgets", schema.user_tables(connection))
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -618,7 +618,7 @@ class SchemaTests(unittest.TestCase):
                     "SELECT id, cash_flow_role FROM accounts ORDER BY id"
                 ).fetchall()
             )
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
         self.assertEqual(
             roles,
             {
@@ -663,7 +663,7 @@ class SchemaTests(unittest.TestCase):
                     "SELECT id, cash_flow_role, spending_enabled FROM accounts"
                 )
             }
-            self.assertEqual(schema.schema_version(connection), 13)
+            self.assertEqual(schema.schema_version(connection), 14)
         self.assertEqual(settings["checking"], ("cash_flow", 1))
         self.assertEqual(settings["card"], ("cash_flow", 1))
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
