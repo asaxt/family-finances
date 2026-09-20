@@ -191,6 +191,9 @@
                 data-category="{{ '' if transaction.effective_category == 'Uncategorized' else transaction.effective_category }}"
                 data-flow-type="{{ transaction.flow_type or '' }}"
                 data-recurring-rule="{{ 1 if transaction.merchant_rule_id else 0 }}"
+                data-rule-id="{{ transaction.merchant_rule_id or '' }}"
+                data-rule-match="{{ transaction.merchant_rule_match_value or '' }}"
+                data-description="{{ transaction.description }}"
                 data-excluded="{{ transaction.excluded }}"
               >{{ "Change category" if transaction.ai_review else "Review" }}</button>
               {% if transaction.ai_review %}<button class="text-button" type="submit" form="confirm-ai-form" formaction="{{ url_for('confirm_ai_review', transaction_id=transaction.id) }}">Keep category</button>{% endif %}
@@ -255,8 +258,12 @@
         {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
       </select>
     </label>
-    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category for the exact same description on this account</label>
-    <p class="transaction-sub">This applies to existing and future exact-description matches. Clear it and save to remove the rule.</p>
+    <input id="review-rule-id" type="hidden" name="merchant_rule_id">
+    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category for matching descriptions on this account</label>
+    <label id="review-match-label" hidden>Description text to match
+      <input id="review-match-value" name="match_value" maxlength="255" disabled>
+    </label>
+    <p class="transaction-sub">Use the full description for an exact match, or shorten it to a distinctive phrase that appears in similar descriptions. Clear the checkbox and save to remove the rule.</p>
     <label class="check-label"><input id="review-excluded" type="checkbox" name="excluded"> Exclude from all reporting</label>
     <button class="button primary" type="submit">Save changes</button>
   </form>
@@ -277,6 +284,9 @@
   const reviewTreatmentSummary = document.querySelector("#review-treatment-summary");
   const reviewTreatmentName = document.querySelector("#review-treatment-name");
   const reviewRememberMatch = document.querySelector("#review-remember-match");
+  const reviewRuleId = document.querySelector("#review-rule-id");
+  const reviewMatchLabel = document.querySelector("#review-match-label");
+  const reviewMatchValue = document.querySelector("#review-match-value");
   const reviewExcluded = document.querySelector("#review-excluded");
   const bulkCategory = document.querySelector("#bulk-category");
   const bulkNewCategory = document.querySelector("#bulk-new-category");
@@ -358,6 +368,12 @@
     reviewCategoryFlow.required = editing;
   }
   reviewEditTreatment.addEventListener("change", showTreatmentEditor);
+  function showMatchEditor() {
+    reviewMatchLabel.hidden = !reviewRememberMatch.checked;
+    reviewMatchValue.disabled = !reviewRememberMatch.checked;
+    reviewMatchValue.required = reviewRememberMatch.checked;
+  }
+  reviewRememberMatch.addEventListener("change", showMatchEditor);
   function showReviewNewCategory() {
     const show = reviewCategory.value === "__new__";
     reviewNewCategoryLabel.hidden = !show;
@@ -386,6 +402,9 @@
       reviewCategory.value = button.dataset.category;
       reviewNewCategory.value = "";
       reviewRememberMatch.checked = button.dataset.recurringRule === "1";
+      reviewRuleId.value = button.dataset.ruleId;
+      reviewMatchValue.value = button.dataset.ruleMatch || button.dataset.description;
+      showMatchEditor();
       reviewExcluded.checked = button.dataset.excluded === "1";
       showReviewNewCategory();
       reviewDialog.showModal();

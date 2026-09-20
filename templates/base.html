@@ -78,6 +78,7 @@
           </label>
         {% elif active == "trends" %}
           <input type="hidden" name="month" value="{{ month }}">
+          <input type="hidden" name="view" value="{{ trend_view }}">
         {% elif active != "transactions" %}
           <label>
             <span>Month</span>
