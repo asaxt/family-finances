@@ -24,7 +24,7 @@ def account_rows(connection, transaction_ids=None):
           )
           ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
                    LENGTH(candidate.match_value) DESC,
-                   (candidate.account_id = t.account_id) DESC, candidate.id
+                   candidate.applies_all_accounts, candidate.id
           LIMIT 1
         )
         LEFT JOIN category_rules r ON r.name = COALESCE(t.category_override, mr.category, t.category) COLLATE NOCASE

@@ -2354,12 +2354,11 @@ def update_transaction(transaction_id):
             )
             ORDER BY CASE match_type WHEN 'description' THEN 0 ELSE 1 END,
                      LENGTH(match_value) DESC,
-                     (account_id = ?) DESC, id
+                     applies_all_accounts, id
             LIMIT 1
             """,
             (
                 transaction["account_id"], full_match_value, full_match_value,
-                transaction["account_id"],
             ),
         ).fetchone()
         if request.form.get("remember_match") == "on":

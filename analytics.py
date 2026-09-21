@@ -20,7 +20,7 @@ EXISTS (
           )
           ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
                    LENGTH(candidate.match_value) DESC,
-                   (candidate.account_id = p.account_id) DESC, candidate.id
+                   candidate.applies_all_accounts, candidate.id
           LIMIT 1
         )
         LEFT JOIN category_rules pc ON pc.name = COALESCE(p.category_override, pm.category, p.category) COLLATE NOCASE
@@ -95,7 +95,7 @@ LEFT JOIN merchant_rules mr ON mr.id = (
   )
   ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
            LENGTH(candidate.match_value) DESC,
-           (candidate.account_id = t.account_id) DESC, candidate.id
+           candidate.applies_all_accounts, candidate.id
   LIMIT 1
 )
 LEFT JOIN category_rules r
