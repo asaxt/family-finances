@@ -5,7 +5,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 15
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -107,10 +107,15 @@ VERSION_TEN_COLUMNS = {
     "transactions": VERSION_SEVEN_COLUMNS["transactions"] | {"spending_override"},
     "merchant_rules": VERSION_SEVEN_COLUMNS["merchant_rules"] | {"spending_override"},
 }
-EXPECTED_COLUMNS = {
+VERSION_FOURTEEN_COLUMNS = {
     **VERSION_TEN_COLUMNS,
     "transactions": VERSION_TEN_COLUMNS["transactions"]
     | {"category_override_source"},
+}
+EXPECTED_COLUMNS = {
+    **VERSION_FOURTEEN_COLUMNS,
+    "merchant_rules": VERSION_TEN_COLUMNS["merchant_rules"]
+    | {"applies_all_accounts"},
 }
 
 
@@ -200,11 +205,15 @@ def _validate_version_ten(connection):
 
 
 def _validate_version_eleven(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 11)
+    _validate_columns(connection, VERSION_FOURTEEN_COLUMNS, 11)
 
 
 def _validate_version_twelve(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 12)
+    _validate_columns(connection, VERSION_FOURTEEN_COLUMNS, 12)
+
+
+def _validate_version_fifteen(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 15)
 
 
 def _migrate_zero_to_one(connection):
@@ -562,6 +571,15 @@ def _migrate_thirteen_to_fourteen(connection):
         connection.execute(statement)
 
 
+def _migrate_fourteen_to_fifteen(connection):
+    connection.execute(
+        """
+        ALTER TABLE merchant_rules ADD COLUMN applies_all_accounts INTEGER
+        NOT NULL DEFAULT 0 CHECK (applies_all_accounts IN (0, 1))
+        """
+    )
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
@@ -578,6 +596,7 @@ VALIDATORS = {
     12: _validate_version_twelve,
     13: _validate_version_twelve,
     14: _validate_version_twelve,
+    15: _validate_version_fifteen,
 }
 MIGRATIONS = {
     0: _migrate_zero_to_one,
@@ -594,6 +613,7 @@ MIGRATIONS = {
     11: _migrate_eleven_to_twelve,
     12: _migrate_twelve_to_thirteen,
     13: _migrate_thirteen_to_fourteen,
+    14: _migrate_fourteen_to_fifteen,
 }
 
 
@@ -707,6 +727,9 @@ def create_schema(connection):
                 ),
                 spending_override TEXT CHECK (
                     spending_override IN ('include', 'exclude')
+                ),
+                applies_all_accounts INTEGER NOT NULL DEFAULT 0 CHECK (
+                    applies_all_accounts IN (0, 1)
                 ),
                 UNIQUE (account_id, match_type, match_value),
                 FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE

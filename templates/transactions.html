@@ -193,6 +193,7 @@
                 data-recurring-rule="{{ 1 if transaction.merchant_rule_id else 0 }}"
                 data-rule-id="{{ transaction.merchant_rule_id or '' }}"
                 data-rule-match="{{ transaction.merchant_rule_match_value or '' }}"
+                data-rule-all-accounts="{{ transaction.merchant_rule_applies_all_accounts or 0 }}"
                 data-description="{{ transaction.description }}"
                 data-excluded="{{ transaction.excluded }}"
               >{{ "Change category" if transaction.ai_review else "Review" }}</button>
@@ -259,7 +260,8 @@
       </select>
     </label>
     <input id="review-rule-id" type="hidden" name="merchant_rule_id">
-    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category for matching descriptions on this account</label>
+    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category for matching descriptions</label>
+    <label id="review-all-accounts-label" class="check-label" hidden><input id="review-all-accounts" type="checkbox" name="apply_all_accounts" checked> Apply this rule to matching transactions in all accounts</label>
     <label id="review-match-label" hidden>Description text to match
       <input id="review-match-value" name="match_value" maxlength="255" disabled>
     </label>
@@ -285,6 +287,8 @@
   const reviewTreatmentName = document.querySelector("#review-treatment-name");
   const reviewRememberMatch = document.querySelector("#review-remember-match");
   const reviewRuleId = document.querySelector("#review-rule-id");
+  const reviewAllAccountsLabel = document.querySelector("#review-all-accounts-label");
+  const reviewAllAccounts = document.querySelector("#review-all-accounts");
   const reviewMatchLabel = document.querySelector("#review-match-label");
   const reviewMatchValue = document.querySelector("#review-match-value");
   const reviewExcluded = document.querySelector("#review-excluded");
@@ -372,6 +376,8 @@
     reviewMatchLabel.hidden = !reviewRememberMatch.checked;
     reviewMatchValue.disabled = !reviewRememberMatch.checked;
     reviewMatchValue.required = reviewRememberMatch.checked;
+    reviewAllAccountsLabel.hidden = !reviewRememberMatch.checked;
+    reviewAllAccounts.disabled = !reviewRememberMatch.checked;
   }
   reviewRememberMatch.addEventListener("change", showMatchEditor);
   function showReviewNewCategory() {
@@ -402,6 +408,8 @@
       reviewCategory.value = button.dataset.category;
       reviewNewCategory.value = "";
       reviewRememberMatch.checked = button.dataset.recurringRule === "1";
+      reviewAllAccounts.checked = button.dataset.recurringRule !== "1"
+        || button.dataset.ruleAllAccounts === "1";
       reviewRuleId.value = button.dataset.ruleId;
       reviewMatchValue.value = button.dataset.ruleMatch || button.dataset.description;
       showMatchEditor();

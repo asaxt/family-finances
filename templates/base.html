@@ -25,6 +25,9 @@
       <a class="{{ 'active' if active == 'categories' }}" href="/categories?month={{ month }}{{ person_query }}{{ account_query }}">
         <span>◫</span> Categories
       </a>
+      <a class="{{ 'active' if active == 'category_rules' }}" href="/category-rules">
+        <span>✓</span> Category Rules
+      </a>
       <a class="{{ 'active' if active == 'transactions' }}" href="/transactions?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">
         <span>≡</span> Transactions
       </a>
@@ -66,7 +69,7 @@
       </div>
     </header>
 
-    {% if active not in ["savings", "settings", "transactions"] %}
+    {% if active not in ["savings", "settings", "transactions", "category_rules"] %}
     <section class="filterbar">
       <form method="{{ 'post' if active in ['overview', 'cash_flow'] else 'get' }}" class="filter-form"{% if active in ["overview", "cash_flow"] %} action="{{ url_for('update_overview_lookback') }}"{% endif %}>
         {% if active in ["overview", "cash_flow"] %}
