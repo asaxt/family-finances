@@ -1274,6 +1274,188 @@ def categories():
     return render_template("categories.html", **context)
 
 
+@app.get("/category-rules")
+def category_rules():
+    context = page_context("category_rules")
+    search_query = (request.args.get("q") or "").strip()
+    category = request.args.get("category") or ""
+    scope = request.args.get("scope") or ""
+    rule_account = request.args.get("rule_account") or ""
+    match_type = request.args.get("match_type") or ""
+    sort = request.args.get("sort") or "match_asc"
+    if scope not in {"", "all", "account"}:
+        scope = ""
+    if match_type not in {"", "exact", "contains"}:
+        match_type = ""
+    order_by = {
+        "match_asc": "mr.match_value COLLATE NOCASE, mr.id",
+        "match_desc": "mr.match_value COLLATE NOCASE DESC, mr.id",
+        "category_asc": "mr.category COLLATE NOCASE, mr.match_value COLLATE NOCASE",
+        "matches_desc": "match_count DESC, mr.match_value COLLATE NOCASE",
+        "account_asc": "c.owner_name COLLATE NOCASE, a.name COLLATE NOCASE, mr.match_value COLLATE NOCASE",
+    }.get(sort, "mr.match_value COLLATE NOCASE, mr.id")
+    conditions = []
+    parameters = []
+    if search_query:
+        conditions.append("mr.match_value LIKE ? ESCAPE '\\'")
+        parameters.append(
+            f"%{search_query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')}%"
+        )
+    if category:
+        conditions.append("mr.category = ? COLLATE NOCASE")
+        parameters.append(category)
+    if scope == "all":
+        conditions.append("mr.applies_all_accounts = 1")
+    elif scope == "account":
+        conditions.append("mr.applies_all_accounts = 0")
+    if rule_account:
+        conditions.append("mr.account_id = ?")
+        parameters.append(rule_account)
+    if match_type == "exact":
+        conditions.append("mr.match_type IN ('merchant', 'description')")
+    elif match_type == "contains":
+        conditions.append("mr.match_type = 'description_contains'")
+    where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+    with db() as connection:
+        context["category_rules"] = connection.execute(
+            f"""
+            SELECT mr.id, mr.match_type, mr.match_value, mr.category,
+                   mr.applies_all_accounts, a.name AS account_name,
+                   a.mask, c.owner_name, c.institution,
+                   (
+                     SELECT COUNT(*) FROM transactions t
+                     WHERE (mr.applies_all_accounts = 1
+                            OR t.account_id = mr.account_id)
+                       AND (
+                         (mr.match_type IN ('merchant', 'description')
+                          AND mr.match_value = CASE
+                            WHEN mr.match_type = 'merchant'
+                              THEN COALESCE(NULLIF(t.merchant, ''), t.description)
+                            ELSE TRIM(t.description)
+                          END COLLATE NOCASE)
+                         OR (mr.match_type = 'description_contains'
+                             AND INSTR(LOWER(TRIM(t.description)),
+                                       LOWER(mr.match_value)) > 0)
+                       )
+                   ) AS match_count
+            FROM merchant_rules mr
+            JOIN accounts a ON a.id = mr.account_id
+            JOIN connections c ON c.id = a.connection_id
+            {where_clause}
+            ORDER BY {order_by}
+            """,
+            parameters,
+        ).fetchall()
+        context["category_options"] = [
+            row["name"]
+            for row in connection.execute(
+                """
+                SELECT name FROM (
+                    SELECT name FROM category_rules
+                    UNION SELECT category AS name FROM merchant_rules
+                ) ORDER BY name COLLATE NOCASE
+                """
+            )
+        ]
+    context["rule_error"] = request.args.get("error")
+    context.update(
+        search_query=search_query,
+        selected_category=category,
+        rule_scope=scope,
+        rule_account=rule_account,
+        rule_match_type=match_type,
+        rule_sort=sort,
+        table_filters_active=bool(
+            search_query or category or scope or rule_account or match_type
+            or sort != "match_asc"
+        ),
+    )
+    return render_template("category_rules.html", **context)
+
+
+@app.post("/api/category-rules/bulk")
+def bulk_update_category_rules():
+    rule_ids = list(dict.fromkeys(request.form.getlist("rule_ids")))
+    try:
+        rule_ids = [int(rule_id) for rule_id in rule_ids]
+    except ValueError:
+        rule_ids = []
+    if not rule_ids:
+        return redirect(url_for("category_rules"))
+    scope = request.form.get("scope_change", "__no_change__")
+    category = request.form.get("category_change", "__no_change__")
+    assignments = []
+    parameters = []
+    if scope in {"all", "account"}:
+        assignments.append("applies_all_accounts = ?")
+        parameters.append(int(scope == "all"))
+    if category != "__no_change__":
+        category = normalized_category(category or "")
+        with db() as connection:
+            canonical = canonical_category(connection, category) if category else None
+        if not canonical:
+            return redirect(url_for("category_rules", error="invalid"))
+        assignments.extend(
+            ["category = ?", "flow_type = NULL", "spending_override = NULL"]
+        )
+        parameters.append(canonical[0])
+    if assignments:
+        placeholders = ",".join("?" for _ in rule_ids)
+        with db() as connection:
+            connection.execute(
+                f"UPDATE merchant_rules SET {', '.join(assignments)} "
+                f"WHERE id IN ({placeholders})",
+                [*parameters, *rule_ids],
+            )
+    return redirect(
+        url_for(
+            "category_rules",
+            q=request.form.get("return_q", ""),
+            category=request.form.get("return_category", ""),
+            scope=request.form.get("return_scope", ""),
+            rule_account=request.form.get("return_account", ""),
+            match_type=request.form.get("return_match_type", ""),
+            sort=request.form.get("return_sort", "match_asc"),
+        )
+    )
+
+
+@app.post("/api/category-rule/<int:rule_id>")
+def update_category_rule(rule_id):
+    match_value = request.form.get("match_value", "").strip()
+    category = normalized_category(request.form.get("category", ""))
+    if not match_value or len(match_value) > 255 or not category:
+        return redirect(url_for("category_rules", error="invalid"))
+    with db() as connection:
+        if not canonical_category(connection, category):
+            return redirect(url_for("category_rules", error="invalid"))
+        try:
+            connection.execute(
+                """
+                UPDATE merchant_rules
+                SET match_value = ?, category = ?, applies_all_accounts = ?,
+                    flow_type = NULL, spending_override = NULL
+                WHERE id = ?
+                """,
+                (
+                    match_value,
+                    category,
+                    int(request.form.get("apply_all_accounts") == "on"),
+                    rule_id,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return redirect(url_for("category_rules", error="duplicate"))
+    return redirect(url_for("category_rules"))
+
+
+@app.post("/api/category-rule/<int:rule_id>/delete")
+def delete_category_rule(rule_id):
+    with db() as connection:
+        connection.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
+    return redirect(url_for("category_rules"))
+
+
 @app.get("/transactions")
 def transactions():
     context = page_context("transactions")
@@ -2158,25 +2340,31 @@ def update_transaction(transaction_id):
         existing_rule = connection.execute(
             """
             SELECT id, category, match_type, match_value FROM merchant_rules
-            WHERE id = ? AND account_id = ?
+            WHERE id = ? AND (account_id = ? OR applies_all_accounts = 1)
             """,
             (rule_id, transaction["account_id"]),
         ).fetchone() if rule_id else connection.execute(
             """
             SELECT id, category, match_type, match_value FROM merchant_rules
-            WHERE account_id = ? AND (
+            WHERE (account_id = ? OR applies_all_accounts = 1) AND (
               (match_type = 'description'
                AND match_value = ? COLLATE NOCASE)
               OR (match_type = 'description_contains'
                   AND INSTR(LOWER(?), LOWER(match_value)) > 0)
             )
             ORDER BY CASE match_type WHEN 'description' THEN 0 ELSE 1 END,
-                     LENGTH(match_value) DESC, id
+                     LENGTH(match_value) DESC,
+                     applies_all_accounts, id
             LIMIT 1
             """,
-            (transaction["account_id"], full_match_value, full_match_value),
+            (
+                transaction["account_id"], full_match_value, full_match_value,
+            ),
         ).fetchone()
         if request.form.get("remember_match") == "on":
+            applies_all_accounts = int(
+                request.form.get("apply_all_accounts") == "on"
+            )
             match_value = request.form.get("match_value", "").strip() or full_match_value
             if not match_value or len(match_value) > 255:
                 return transaction_cleanup_redirect()
@@ -2188,30 +2376,46 @@ def update_transaction(transaction_id):
             recurring_category = category or (
                 existing_rule["category"] if existing_rule else transaction["category"]
             )
-            if existing_rule and (
-                existing_rule["match_type"] != match_type
-                or existing_rule["match_value"].casefold() != match_value.casefold()
-            ):
-                connection.execute(
-                    "DELETE FROM merchant_rules WHERE id = ?", (existing_rule["id"],)
-                )
-            connection.execute(
-                """
-                INSERT INTO merchant_rules (
-                    account_id, match_type, match_value, category
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
-                    category = excluded.category,
-                    flow_type = NULL,
-                    spending_override = NULL
-                """,
-                (
-                    transaction["account_id"],
-                    match_type,
-                    match_value,
-                    recurring_category,
-                ),
+            same_rule = existing_rule and (
+                existing_rule["match_type"] == match_type
+                and existing_rule["match_value"].casefold() == match_value.casefold()
             )
+            if same_rule:
+                connection.execute(
+                    """
+                    UPDATE merchant_rules
+                    SET category = ?, flow_type = NULL, spending_override = NULL,
+                        applies_all_accounts = ?
+                    WHERE id = ?
+                    """,
+                    (recurring_category, applies_all_accounts, existing_rule["id"]),
+                )
+            else:
+                if existing_rule:
+                    connection.execute(
+                        "DELETE FROM merchant_rules WHERE id = ?",
+                        (existing_rule["id"],),
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO merchant_rules (
+                        account_id, match_type, match_value, category,
+                        applies_all_accounts
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
+                        category = excluded.category,
+                        flow_type = NULL,
+                        spending_override = NULL,
+                        applies_all_accounts = excluded.applies_all_accounts
+                    """,
+                    (
+                        transaction["account_id"],
+                        match_type,
+                        match_value,
+                        recurring_category,
+                        applies_all_accounts,
+                    ),
+                )
         elif existing_rule:
             connection.execute(
                 "DELETE FROM merchant_rules WHERE id = ?",

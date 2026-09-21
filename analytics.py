@@ -11,14 +11,16 @@ EXISTS (
         FROM transactions p JOIN accounts pa ON pa.id = p.account_id
         LEFT JOIN merchant_rules pm ON pm.id = (
           SELECT candidate.id FROM merchant_rules candidate
-          WHERE candidate.account_id = p.account_id AND (
+          WHERE (candidate.account_id = p.account_id
+                 OR candidate.applies_all_accounts = 1) AND (
             (candidate.match_type = 'description'
              AND candidate.match_value = TRIM(p.description) COLLATE NOCASE)
             OR (candidate.match_type = 'description_contains'
                 AND INSTR(LOWER(TRIM(p.description)), LOWER(candidate.match_value)) > 0)
           )
           ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
-                   LENGTH(candidate.match_value) DESC, candidate.id
+                   LENGTH(candidate.match_value) DESC,
+                   candidate.applies_all_accounts, candidate.id
           LIMIT 1
         )
         LEFT JOIN category_rules pc ON pc.name = COALESCE(p.category_override, pm.category, p.category) COLLATE NOCASE
@@ -84,14 +86,16 @@ CASE WHEN ({SPEND_SQL}) != 0 THEN 1 ELSE 0 END
 CATEGORY_RULE_JOIN = f"""
 LEFT JOIN merchant_rules mr ON mr.id = (
   SELECT candidate.id FROM merchant_rules candidate
-  WHERE candidate.account_id = t.account_id AND (
+  WHERE (candidate.account_id = t.account_id
+         OR candidate.applies_all_accounts = 1) AND (
     (candidate.match_type = 'description'
      AND candidate.match_value = TRIM(t.description) COLLATE NOCASE)
     OR (candidate.match_type = 'description_contains'
         AND INSTR(LOWER(TRIM(t.description)), LOWER(candidate.match_value)) > 0)
   )
   ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
-           LENGTH(candidate.match_value) DESC, candidate.id
+           LENGTH(candidate.match_value) DESC,
+           candidate.applies_all_accounts, candidate.id
   LIMIT 1
 )
 LEFT JOIN category_rules r
@@ -959,7 +963,8 @@ def transaction_list(
                r.flow_type AS category_flow_type,
                mr.id AS merchant_rule_id,
                mr.match_type AS merchant_rule_match_type,
-               mr.match_value AS merchant_rule_match_value
+               mr.match_value AS merchant_rule_match_value,
+               mr.applies_all_accounts AS merchant_rule_applies_all_accounts
         FROM transactions t
         JOIN accounts a ON a.id = t.account_id
         JOIN connections c ON c.id = a.connection_id

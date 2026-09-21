@@ -68,8 +68,8 @@ def representative_transactions(connection, today=None, transaction_ids=None):
                    t.category, t.category_override,
                    EXISTS (
                        SELECT 1 FROM merchant_rules mr
-                       WHERE mr.account_id = t.account_id
-                         AND (
+                       WHERE (mr.account_id = t.account_id
+                              OR mr.applies_all_accounts = 1) AND (
                            (mr.match_type = 'description'
                             AND mr.match_value = TRIM(t.description) COLLATE NOCASE)
                            OR (mr.match_type = 'description_contains'

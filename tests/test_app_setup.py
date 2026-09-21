@@ -68,6 +68,7 @@ class AppSetupTests(unittest.TestCase):
             "/",
             "/trends",
             "/categories",
+            "/category-rules",
             "/transactions",
             "/cash-flow",
             "/savings",
@@ -78,7 +79,7 @@ class AppSetupTests(unittest.TestCase):
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
         with self.application.db() as connection:
-            self.assertEqual(schema_version(connection), 14)
+            self.assertEqual(schema_version(connection), 15)
             initial_goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
@@ -427,6 +428,17 @@ class AppSetupTests(unittest.TestCase):
                 )
                 """
             )
+            connection.execute(
+                """
+                INSERT INTO accounts (
+                    id, connection_id, institution, name, type,
+                    cash_flow_role, spending_enabled
+                ) VALUES (
+                    'savings', 1, 'Example Bank', 'Savings', 'depository',
+                    'cash_flow', 1
+                )
+                """
+            )
             connection.executemany(
                 """
                 INSERT INTO transactions (
@@ -436,6 +448,18 @@ class AppSetupTests(unittest.TestCase):
                           'Recurring Payment', 0, '2026-08-05', 'Loan Payments', 0)
                 """,
                 (("reviewed",), ("existing-match",)),
+            )
+            connection.execute(
+                """
+                INSERT INTO transactions (
+                    id, account_id, amount, currency, description, merchant,
+                    pending, transacted_at, category, excluded
+                ) VALUES (
+                    'other-account-match', 'savings', 5000, 'USD',
+                    'Payment detail 300', 'Recurring Payment', 0,
+                    '2026-08-05', 'Loan Payments', 0
+                )
+                """
             )
 
         page = self.client.get("/transactions?purpose=all")
@@ -448,6 +472,7 @@ class AppSetupTests(unittest.TestCase):
                 "category_flow_type": "transfer",
                 "return_purpose": "all",
                 "remember_match": "on",
+                "apply_all_accounts": "on",
                 "match_value": "Payment detail",
             },
         )
@@ -471,12 +496,18 @@ class AppSetupTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM merchant_rules"
             ).fetchone()[0]
             saved_rule = connection.execute(
-                "SELECT match_type, match_value FROM merchant_rules"
+                """
+                SELECT match_type, match_value, applies_all_accounts
+                FROM merchant_rules
+                """
             ).fetchone()
         self.assertEqual(rule_count, 1)
         self.assertEqual(saved_rule["match_type"], "description_contains")
         self.assertEqual(saved_rule["match_value"], "Payment detail")
-        for transaction_id in ("existing-match", "future-match"):
+        self.assertEqual(saved_rule["applies_all_accounts"], 1)
+        for transaction_id in (
+            "existing-match", "future-match", "other-account-match"
+        ):
             self.assertEqual(rows[transaction_id]["effective_category"], "Transfer")
             self.assertEqual(rows[transaction_id]["flow_type"], "transfer")
             self.assertFalse(rows[transaction_id]["spending_included"])
@@ -484,6 +515,14 @@ class AppSetupTests(unittest.TestCase):
             b'data-recurring-rule="1"',
             self.client.get("/transactions?purpose=all").data,
         )
+        self.assertIn(
+            b'data-rule-all-accounts="1"',
+            self.client.get("/transactions?purpose=all").data,
+        )
+        rules_page = self.client.get("/category-rules")
+        self.assertIn(b"Payment detail", rules_page.data)
+        self.assertIn(b"All accounts", rules_page.data)
+        self.assertIn(b"4 transactions", rules_page.data)
         self.assertNotIn(
             b"Recurring Payment",
             self.application.VAULT_PATH.read_bytes(),
@@ -524,6 +563,105 @@ class AppSetupTests(unittest.TestCase):
         self.assertEqual(reverted["effective_category"], "Loan Payments")
         self.assertEqual(reverted["flow_type"], "spending")
         self.assertTrue(reverted["spending_included"])
+
+        page = self.client.get("/transactions?purpose=all")
+        self.client.post(
+            "/api/transaction/reviewed",
+            data={
+                "csrf_token": self.csrf_token(page),
+                "category_choice": "Transfer",
+                "category_flow_type": "transfer",
+                "return_purpose": "all",
+                "remember_match": "on",
+                "match_value": "Payment detail",
+            },
+        )
+        with self.application.db() as connection:
+            local_rule = connection.execute(
+                "SELECT applies_all_accounts FROM merchant_rules"
+            ).fetchone()
+            other_account = {
+                row["id"]: row
+                for row in self.application.transaction_list(connection)
+            }["other-account-match"]
+        self.assertEqual(local_rule["applies_all_accounts"], 0)
+        self.assertEqual(other_account["effective_category"], "Loan Payments")
+
+        with self.application.db() as connection:
+            connection.execute(
+                """
+                INSERT INTO merchant_rules (
+                    account_id, match_type, match_value, category
+                ) VALUES ('savings', 'description', 'Example deposit', 'Income')
+                """
+            )
+            rule_ids = dict(
+                connection.execute("SELECT match_value, id FROM merchant_rules")
+            )
+        filtered = self.client.get("/category-rules?q=Payment&scope=account")
+        self.assertIn(b"Payment detail", filtered.data)
+        self.assertNotIn(b"Example deposit", filtered.data)
+        self.assertEqual(filtered.data.count(b'class="rule-select"'), 1)
+        category_filtered = self.client.get("/category-rules?category=Income")
+        self.assertIn(b"Example deposit", category_filtered.data)
+        self.assertNotIn(b"Payment detail", category_filtered.data)
+
+        rules_page = self.client.get("/category-rules")
+        self.client.post(
+            "/api/category-rules/bulk",
+            data={
+                "csrf_token": self.csrf_token(rules_page),
+                "rule_ids": list(rule_ids.values()),
+                "scope_change": "all",
+                "category_change": "Transfer",
+            },
+        )
+        with self.application.db() as connection:
+            updated = connection.execute(
+                """
+                SELECT category, applies_all_accounts FROM merchant_rules
+                ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual(
+            [tuple(row) for row in updated],
+            [("Transfer", 1), ("Transfer", 1)],
+        )
+
+        rule_id = rule_ids["Payment detail"]
+        rules_page = self.client.get("/category-rules")
+        self.client.post(
+            f"/api/category-rule/{rule_id}",
+            data={
+                "csrf_token": self.csrf_token(rules_page),
+                "match_value": "Payment detail",
+                "category": "Transfer",
+                "apply_all_accounts": "on",
+            },
+        )
+        with self.application.db() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT applies_all_accounts FROM merchant_rules WHERE id = ?",
+                    (rule_id,),
+                ).fetchone()[0],
+                1,
+            )
+        rules_page = self.client.get("/category-rules")
+        self.client.post(
+            f"/api/category-rule/{rule_id}/delete",
+            data={"csrf_token": self.csrf_token(rules_page)},
+        )
+        rules_page = self.client.get("/category-rules")
+        self.client.post(
+            f"/api/category-rule/{rule_ids['Example deposit']}/delete",
+            data={"csrf_token": self.csrf_token(rules_page)},
+        )
+        with self.application.db() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0],
+                0,
+            )
 
 
 if __name__ == "__main__":
