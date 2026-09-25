@@ -967,119 +967,29 @@ class DevelopmentModeTests(unittest.TestCase):
         self.assertIn("exclude_category=Travel", response.location)
         self.assertIn("sort=amount_desc", response.location)
 
-    def test_refreshed_data_becomes_a_blank_slate_once(self):
+    def test_development_unlock_preserves_categories_rules_and_account_choices(self):
         self.complete_setup()
         with self.application.vault.connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO connections (id, owner_name, institution, access_token)
-                VALUES (1, 'Household', 'Example Bank', 'test-token')
-                """
-            )
-            connection.execute(
-                """
-                INSERT INTO accounts (
-                    id, connection_id, institution, name, type,
-                    cash_flow_role, spending_enabled
-                ) VALUES (
-                    'checking', 1, 'Example Bank', 'Checking', 'depository',
-                    'credit_card', 0
-                )
-                """
-            )
-            connection.execute(
-                """
-                INSERT INTO transactions (
-                    id, account_id, amount, currency, description, merchant,
-                    pending, transacted_at, category, category_override,
-                    flow_override, spending_override, excluded
-                ) VALUES (
-                    'venmo', 'checking', 2500, 'USD', 'Venmo payment', 'Venmo',
-                    0, '2026-08-15', 'Transfer Out', 'Dining',
-                    'spending', 'include', 1
-                )
-                """
-            )
-            connection.execute(
-                "INSERT INTO category_rules VALUES ('Dining', 'spending')"
-            )
-            connection.execute(
-                """
-                INSERT INTO merchant_rules (
-                    account_id, match_type, match_value, category, flow_type,
-                    spending_override
-                ) VALUES (
-                    'checking', 'merchant', 'Venmo', 'Venmo', 'transfer', 'exclude'
-                )
-                """
-            )
-            connection.execute(
-                "DELETE FROM settings WHERE key IN (?, ?)",
-                (
-                    self.application.DEVELOPMENT_RESET_MARKER,
-                    "classification_mode",
-                ),
-            )
+            connection.execute("INSERT INTO connections (id, owner_name, institution, access_token) VALUES (1, 'EXAMPLE PERSON', 'EXAMPLE BANK', '')")
+            connection.execute("INSERT INTO accounts (id, connection_id, institution, name, type, cash_flow_role, spending_enabled) VALUES ('sample', 1, 'EXAMPLE BANK', 'SAMPLE ACCOUNT', 'depository', 'other', 0)")
+            connection.execute("INSERT INTO transactions (id, account_id, amount, currency, description, merchant, pending, transacted_at, category, category_override, category_override_source, flow_override, spending_override, excluded) VALUES ('sample-record', 'sample', 1234, 'USD', 'SAMPLE CAFE', 'SAMPLE CAFE', 0, '2040-01-15', 'SAMPLE ORIGINAL', 'SAMPLE FOOD', 'user', 'spending', 'exclude', 1)")
+            connection.execute("INSERT INTO category_rules (name, flow_type) VALUES ('SAMPLE FOOD', 'spending')")
+            connection.execute("INSERT INTO merchant_rules (account_id, match_type, match_value, category) VALUES ('sample', 'description', 'SAMPLE CAFE', 'SAMPLE FOOD')")
+            connection.execute("DELETE FROM settings WHERE key IN ('development_blank_slate_v3', 'classification_mode')")
+            expected = {
+                table: [tuple(row) for row in connection.execute(f'SELECT * FROM {table}')]
+                for table in ('transactions', 'accounts', 'merchant_rules', 'category_rules')
+            }
 
-        self.assertTrue(self.application.prepare_development_blank_slate())
-        with self.application.vault.connection() as connection:
-            account = connection.execute(
-                "SELECT cash_flow_role, spending_enabled FROM accounts"
-            ).fetchone()
-            transaction = connection.execute(
-                """
-                SELECT category, category_override, flow_override,
-                       spending_override, excluded
-                FROM transactions
-                """
-            ).fetchone()
-            rule_counts = (
-                connection.execute("SELECT COUNT(*) FROM category_rules").fetchone()[0],
-                connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0],
-            )
-            settings = dict(
-                connection.execute(
-                    """
-                    SELECT key, value FROM settings
-                    WHERE key IN ('classification_mode', ?)
-                    """,
-                    (self.application.DEVELOPMENT_RESET_MARKER,),
-                ).fetchall()
-            )
-            rows = self.application.transaction_list(
-                connection, include_excluded=True
-            )
-
-        self.assertEqual(tuple(account), ("cash_flow", 1))
-        self.assertEqual(tuple(transaction), ("Uncategorized", None, None, None, 0))
-        self.assertEqual(rule_counts, (5, 0))
-        self.assertEqual(settings["classification_mode"], "category_mapping_v1")
-        self.assertEqual(settings[self.application.DEVELOPMENT_RESET_MARKER], "1")
-        self.assertEqual(rows[0]["effective_category"], "Uncategorized")
-        self.assertIsNone(rows[0]["flow_type"])
-        self.assertFalse(rows[0]["spending_included"])
-
-        with self.application.vault.connection() as connection:
-            connection.execute(
-                "UPDATE transactions SET category_override = 'Groceries' WHERE id = 'venmo'"
-            )
-            connection.execute(
-                "UPDATE accounts SET cash_flow_role = 'cash_flow', spending_enabled = 1"
-            )
-            connection.execute(
-                "INSERT INTO category_rules VALUES ('Groceries', 'spending')"
-            )
-        self.application.lock_data()
-        self.application.unlock_data(self.password)
-        with self.application.vault.connection() as connection:
-            override = connection.execute(
-                "SELECT category_override FROM transactions WHERE id = 'venmo'"
-            ).fetchone()[0]
-            reviewed = self.application.transaction_list(connection)[0]
-        self.assertEqual(override, "Groceries")
-        self.assertEqual(reviewed["flow_type"], "spending")
-        self.assertTrue(reviewed["spending_included"])
-        self.assertFalse(self.application.prepare_development_blank_slate())
+        # A copied production vault has no development reset marker. Neither its
+        # first unlock nor later restarts may discard categorization or rules.
+        for _ in range(2):
+            self.application.lock_data()
+            self.application.unlock_data(self.password)
+            with self.application.vault.connection() as connection:
+                for table, rows in expected.items():
+                    self.assertEqual([tuple(row) for row in connection.execute(f'SELECT * FROM {table}')], rows)
+                self.assertIsNone(connection.execute("SELECT value FROM settings WHERE key = 'development_blank_slate_v3'").fetchone())
 
     def test_new_development_imports_have_no_automatic_designations(self):
         self.complete_setup()
