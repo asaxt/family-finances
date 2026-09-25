@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
-from flask import Flask, Request, Response, abort, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, Request, Response, abort, has_request_context, jsonify, redirect, render_template, request, session, url_for
 from plaid.api import plaid_api
 from plaid.api_client import ApiClient
 from plaid.configuration import Configuration
@@ -31,6 +31,7 @@ from plaid.model.transactions_sync_request import TransactionsSyncRequest
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import statement_import as statements
+import local_chat
 from statement_classification import eligible_import_ids, match_import_transfers
 
 from schema import SchemaError, prepare_encrypted_database
@@ -90,6 +91,9 @@ def local_port():
 
 APP_MODE = os.environ.get("FAMILY_FINANCES_MODE", "stable").strip().lower()
 DEVELOPMENT_MODE = APP_MODE == "development"
+READ_ONLY_MIRROR = environment_flag("FAMILY_FINANCES_READ_ONLY_MIRROR")
+if READ_ONLY_MIRROR and not DEVELOPMENT_MODE:
+    raise RuntimeError("Production mirror mode is only available in development.")
 PLAID_DISABLED = DEVELOPMENT_MODE or environment_flag("FAMILY_FINANCES_DISABLE_PLAID")
 APP_PORT = local_port()
 DATA_ROOT = Path(
@@ -98,6 +102,9 @@ DATA_ROOT = Path(
 )
 VAULT_PATH = DATA_ROOT / "family-finances.vault"
 AUTH_PATH = DATA_ROOT / ".auth.json"
+MIRROR_METADATA = DATA_ROOT / ".production-mirror.json"
+if READ_ONLY_MIRROR and not MIRROR_METADATA.is_file():
+    raise RuntimeError("Start the development mirror through its snapshot launcher.")
 DEFAULT_APP_NAME = "Family Finances"
 VAULT_IDLE_SECONDS = 12 * 60 * 60
 SAVINGS_CLASSIFICATIONS = {
@@ -106,11 +113,10 @@ SAVINGS_CLASSIFICATIONS = {
     "taxable": "Taxable",
 }
 EXPECTED_PLAID_PRODUCTS = {"transactions"}
-DEVELOPMENT_CLASSIFICATION_MODE = "category_mapping_v1"
-DEVELOPMENT_RESET_MARKER = "development_blank_slate_v3"
 LOCAL_AI_SETTING = "local_ai_enabled_v1"
 OLLAMA_RESULT_SETTING = "local_ai_result_v1"
 OLLAMA_EVALUATION_LOCK = threading.Lock()
+CHAT_LOCK = threading.Lock()
 CATEGORY_SETUP_SETTING = "category_setup_completed_v1"
 CATEGORY_SUGGESTIONS = (
     "Grocery",
@@ -216,6 +222,8 @@ def template_branding():
         "app_name": display_name(),
         "development_mode": DEVELOPMENT_MODE,
         "plaid_disabled": PLAID_DISABLED,
+        "read_only_mirror": READ_ONLY_MIRROR,
+        "mirror_copied_at": json.loads(MIRROR_METADATA.read_text()).get("copied_at", "") if READ_ONLY_MIRROR else "",
     }
 
 
@@ -230,87 +238,11 @@ def unlock_data(password):
     data_key = unlock_key(password, key_record)
     vault.unlock(data_key)
     prepare_encrypted_database(vault, data_key, AUTH_PATH)
-    prepare_development_blank_slate()
-    reconcile_saved_model_rules()
+    if READ_ONLY_MIRROR:
+        vault.make_read_only()
+    else:
+        reconcile_saved_model_rules()
     vault_last_activity = time.monotonic()
-
-
-def prepare_development_blank_slate():
-    if not DEVELOPMENT_MODE:
-        return False
-    with vault.connection() as connection:
-        marker = connection.execute(
-            "SELECT value FROM settings WHERE key = ?",
-            (DEVELOPMENT_RESET_MARKER,),
-        ).fetchone()
-        if marker and marker[0] == "1":
-            return False
-        category_names = {
-            row[0]
-            for row in connection.execute(
-                """
-                SELECT category FROM transactions
-                UNION SELECT category_override FROM transactions
-                UNION SELECT category FROM merchant_rules
-                UNION SELECT name FROM category_rules
-                """
-            )
-            if row[0]
-        }
-        normalized_categories = set()
-        for name in category_names:
-            if name.casefold() in {"venmo", "uncategorized"}:
-                continue
-            normalized_categories.add(
-                "Transfer"
-                if name.casefold() in {"transfer in", "transfer out"}
-                else name
-            )
-        connection.execute(
-            """
-            UPDATE transactions
-            SET category = 'Uncategorized', category_override = NULL,
-                category_override_source = NULL,
-                flow_override = NULL, spending_override = NULL, excluded = 0
-            """
-        )
-        connection.execute("DELETE FROM merchant_rules")
-        connection.execute("DELETE FROM category_rules")
-        connection.execute(
-            """
-            UPDATE accounts
-            SET cash_flow_role = CASE
-                    WHEN type IN ('depository', 'credit') THEN 'cash_flow'
-                    ELSE 'other'
-                END,
-                spending_enabled = CASE
-                    WHEN type IN ('depository', 'credit') THEN 1
-                    ELSE 0
-                END
-            """
-        )
-        connection.execute(
-            "DELETE FROM settings WHERE key IN (?, ?)",
-            (OLLAMA_RESULT_SETTING, AI_REVIEW_SETTING),
-        )
-        connection.executemany(
-            "INSERT INTO category_rules (name, flow_type) VALUES (?, ?)",
-            (
-                (name, default_category_flow_type(name))
-                for name in sorted(normalized_categories, key=str.casefold)
-            ),
-        )
-        connection.executemany(
-            """
-            INSERT INTO settings (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (
-                ("classification_mode", DEVELOPMENT_CLASSIFICATION_MODE),
-                (DEVELOPMENT_RESET_MARKER, "1"),
-            ),
-        )
-    return True
 
 
 def lock_data():
@@ -371,6 +303,10 @@ def require_login():
         expected = session.get("csrf_token")
         if not expected or not submitted or not secrets.compare_digest(expected, submitted):
             abort(400, "The form expired. Reload the page and try again.")
+    if READ_ONLY_MIRROR and request.method == "POST" and request.endpoint not in {
+        "login", "logout", "assistant_answer", "update_local_ai", "update_overview_lookback",
+    }:
+        return jsonify(error="Development is a read-only production snapshot. Make data and categorization changes in the production app."), 403
     if request.endpoint in {"static", "favicon", "health", "login", "setup"}:
         return None
     if not load_auth_config().get("password_hash"):
@@ -404,6 +340,7 @@ def health():
         ok=True,
         mode="development" if DEVELOPMENT_MODE else "stable",
         plaid_enabled=not PLAID_DISABLED,
+        read_only_mirror=READ_ONLY_MIRROR,
     )
 
 
@@ -443,7 +380,6 @@ def setup():
             app.secret_key = config["secret_key"]
             vault.unlock(data_key)
             prepare_encrypted_database(vault, data_key, AUTH_PATH)
-            prepare_development_blank_slate()
             vault_last_activity = time.monotonic()
             session.clear()
             session["authenticated"] = True
@@ -543,6 +479,8 @@ def save_setting(key, value):
 
 
 def local_ai_enabled(connection=None):
+    if READ_ONLY_MIRROR and has_request_context() and "mirror_local_ai_enabled" in session:
+        return session["mirror_local_ai_enabled"]
     if connection is None:
         with db() as saved_connection:
             return local_ai_enabled(saved_connection)
@@ -592,6 +530,8 @@ def reconcile_saved_model_rules():
 
 
 def overview_lookback_days():
+    if READ_ONLY_MIRROR and has_request_context() and "mirror_lookback_days" in session:
+        return session["mirror_lookback_days"]
     try:
         value = int(setting("overview_lookback_days"))
     except (TypeError, ValueError):
@@ -1616,6 +1556,53 @@ def savings():
     return render_template("savings.html", **context)
 
 
+@app.get("/assistant")
+def assistant_page():
+    context = page_context("assistant")
+    context.update(local_ai_enabled=local_ai_enabled(), chat_model=local_chat.MODEL)
+    return render_template("assistant.html", **context)
+
+
+@app.post("/api/assistant")
+def assistant_answer():
+    if not local_ai_enabled():
+        return jsonify(error="Enable local AI in Settings before asking a question."), 403
+    if request.content_length and request.content_length > 60000:
+        return jsonify(error="The conversation is too long. Start a new chat."), 413
+    try:
+        messages = local_chat.validate_messages(request.get_json(silent=True))
+    except local_chat.ChatError as error:
+        return jsonify(error=str(error)), 400
+    if not CHAT_LOCK.acquire(blocking=False):
+        return jsonify(error="The assistant is answering another question. Please try again shortly."), 409
+    try:
+        with db() as connection:
+            categories = [row[0] for row in connection.execute("""
+                SELECT name FROM category_rules UNION SELECT category FROM transactions
+                UNION SELECT category_override FROM transactions WHERE category_override IS NOT NULL
+                UNION SELECT category FROM merchant_rules ORDER BY 1
+            """)]
+        plan = local_chat.plan_question(messages, categories)
+        evidence = {"filters": plan}
+        if plan["scope"] in {"transactions", "both"}:
+            with db() as connection:
+                evidence["transactions"] = local_chat.transaction_context(connection, plan)
+        if plan["scope"] in {"savings", "both"}:
+            evidence["savings"] = local_chat.savings_context(savings_data())
+        answer = local_chat.explain(messages, evidence)
+        if not vault.unlocked:
+            return jsonify(error="The app was locked. Unlock it and ask again."), 401
+        return jsonify(answer=answer, evidence=evidence, model=local_chat.MODEL)
+    except local_chat.ChatError as error:
+        return jsonify(error=str(error)), 422
+    except (OSError, ValueError, KeyError, TypeError, VaultError):
+        # Never echo model responses, transaction text, or private service errors.
+        return jsonify(error="The local assistant is unavailable. Make sure Ollama is running with "
+                       + local_chat.MODEL + " installed, then try again."), 503
+    finally:
+        CHAT_LOCK.release()
+
+
 @app.get("/settings")
 def settings_page():
     context = page_context("settings")
@@ -1643,6 +1630,9 @@ def settings_page():
 @app.post("/api/local-ai")
 def update_local_ai():
     enabled = request.form.get("enabled") == "on"
+    if READ_ONLY_MIRROR:
+        session["mirror_local_ai_enabled"] = enabled
+        return redirect(url_for("settings_page", saved="local_ai"))
     save_setting(LOCAL_AI_SETTING, "1" if enabled else "0")
     return redirect(url_for("settings_page", saved="local_ai"))
 
@@ -1770,7 +1760,10 @@ def update_overview_lookback():
     if not 1 <= lookback_days <= MAX_OVERVIEW_LOOKBACK_DAYS:
         redirect_arguments["error"] = "lookback"
         return redirect(url_for(destination, **redirect_arguments))
-    save_setting("overview_lookback_days", str(lookback_days))
+    if READ_ONLY_MIRROR:
+        session["mirror_lookback_days"] = lookback_days
+    else:
+        save_setting("overview_lookback_days", str(lookback_days))
     return redirect(url_for(destination, **redirect_arguments))
 
 
@@ -3028,6 +3021,7 @@ def ollama_evaluation_report():
             result
             and result.get("status") == "running"
             and not OLLAMA_EVALUATION_LOCK.locked()
+            and not READ_ONLY_MIRROR
         ):
             result["status"] = "interrupted"
             result["error"] = (

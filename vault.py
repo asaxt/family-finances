@@ -134,6 +134,7 @@ class EncryptedDatabase:
         self._connection = None
         self._key = None
         self._lock = threading.RLock()
+        self._read_only = False
 
     @property
     def exists(self):
@@ -184,6 +185,15 @@ class EncryptedDatabase:
                 self._connection.close()
             self._connection = None
             self._key = None
+            self._read_only = False
+
+    def make_read_only(self):
+        """Freeze a translated development snapshot after schema preparation."""
+        with self._lock:
+            if not self.unlocked:
+                raise VaultError("Unlock the app before accessing its data.")
+            self._connection.execute("PRAGMA query_only = ON")
+            self._read_only = True
 
     @contextmanager
     def connection(self):
@@ -228,6 +238,8 @@ class EncryptedDatabase:
             raise VaultError("The vault is damaged or the key is incorrect.") from error
 
     def _write_encrypted(self, key, raw_database):
+        if self._read_only:
+            raise VaultError("This production snapshot is read-only.")
         nonce = os.urandom(12)
         ciphertext = AESGCM(key).encrypt(nonce, raw_database, DATABASE_AAD)
         payload = MAGIC + nonce + ciphertext

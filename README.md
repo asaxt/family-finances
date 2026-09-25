@@ -45,8 +45,44 @@ Plaid or any financial institution.
 - User-created accounts classified as pre-tax, post-tax, or taxable
 - An editable savings goal, initially `$10,000`, with per-account eligibility
 - A user-editable app name
+- A read-only local Ollama assistant with calculated summaries and visible supporting data
+
+## Ask AI (preview)
+
+Enable **Local AI assistance** in Settings, then open **Ask AI**. The preview
+uses the locally installed `qwen3.8:27b` model through Ollama on this computer.
+Ask about spending by category, income over time, matching transaction
+descriptions, or the latest manually recorded savings balances and goal.
+Follow-up questions retain the last three exchanges while the page is open.
+
+The app calculates totals using its reporting rules before asking the model to
+explain them. Expand **View supporting data** to check the selected dates,
+category, description filter, counts, totals, and sample records. Questions use
+all included accounts; account-specific analysis and historical savings
+comparisons are not supported in this preview. Missing records do not prove
+zero activity. Large requests ask for a narrower period rather than silently
+calculating incomplete totals. AI explanations can still be inaccurate.
+
+Questions and allowlisted financial context are sent only to the loopback
+Ollama service, with proxies and redirects disabled. The assistant cannot run
+SQL, modify records, or initiate bank operations. The app does not save chat
+history or log prompt/answer text. Leaving the page or choosing **New chat**
+clears the conversation. The existing local AI switch also disables chat.
 
 ## Developer setup
+
+Development never clears categories or rules on unlock. A configured production
+mirror uses a fresh, separately encrypted snapshot on every server launch;
+production is read only as a source of encrypted files. Schema migrations apply
+only to the copy, after which database writes and data-changing requests are
+blocked. The snapshot banner shows when the data was copied. Relaunch development
+to load newer production changes. Categorization and other financial edits must
+be made in production. Chat and session-only AI/display preferences still work.
+
+The original independent development vault is preserved when switching to mirror
+mode. Mirror startup uses separate snapshot directories instead of overwriting
+that vault. Without mirror mode, development keeps its independent working copy
+across restarts; code updates never implicitly discard its edits.
 
 ```sh
 python3 -m venv .venv

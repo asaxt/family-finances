@@ -37,6 +37,9 @@
       <a class="{{ 'active' if active == 'savings' }}" href="/savings">
         <span>◇</span> Savings
       </a>
+      <a class="{{ 'active' if active == 'assistant' }}" href="/assistant">
+        <span>✧</span> Ask AI
+      </a>
       <a class="{{ 'active' if active == 'settings' }}" href="/settings">
         <span>⚙</span> Settings
       </a>
@@ -60,7 +63,7 @@
         <h1>{% block heading %}Overview{% endblock %}</h1>
       </div>
       <div class="top-actions">
-        {% if active == "savings" %}
+        {% if active == "savings" and not read_only_mirror %}
           <a class="button primary" href="#record-balances">Record balances</a>
         {% elif active != "settings" and not plaid_disabled %}
           {% if connected %}<button class="button secondary" id="sync-button"><span>↻</span> Sync</button>{% endif %}
@@ -69,7 +72,7 @@
       </div>
     </header>
 
-    {% if active not in ["savings", "settings", "transactions", "category_rules"] %}
+    {% if active not in ["savings", "settings", "transactions", "category_rules", "assistant"] %}
     <section class="filterbar">
       <form method="{{ 'post' if active in ['overview', 'cash_flow'] else 'get' }}" class="filter-form"{% if active in ["overview", "cash_flow"] %} action="{{ url_for('update_overview_lookback') }}"{% endif %}>
         {% if active in ["overview", "cash_flow"] %}
@@ -139,6 +142,13 @@
     {% endif %}
 
     <div id="notice" class="notice" hidden></div>
+    {% if read_only_mirror %}
+    <section class="panel mirror-notice" role="note">
+      <strong>Read-only production snapshot</strong>
+      <p>Categories, rules, and financial records come from production. Make changes in the production app, then relaunch development to load them here. You can browse, filter, and use Ask AI.</p>
+      <small>Copied <time id="mirror-copy-time" datetime="{{ mirror_copied_at }}">{{ mirror_copied_at }}</time>.</small>
+    </section>
+    {% endif %}
     {% block content %}{% endblock %}
   </main>
 
@@ -302,5 +312,6 @@
     });
   </script>
   {% block scripts %}{% endblock %}
+  {% if read_only_mirror %}<script src="{{ url_for('static', filename='production-mirror.js') }}" defer></script>{% endif %}
 </body>
 </html>

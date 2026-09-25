@@ -15,14 +15,8 @@ log_name="${FAMILY_FINANCES_LOG_NAME:-Family Finances}"
 app_url="http://127.0.0.1:$FAMILY_FINANCES_PORT"
 log_file="$HOME/Library/Logs/$log_name.log"
 
-if [[ "${FAMILY_FINANCES_REFRESH_ON_LAUNCH:-0}" == "1" ]]; then
-  refresh_script="${FAMILY_FINANCES_REFRESH_SCRIPT:-}"
-  if [[ -z "$refresh_script" || ! -x "$refresh_script" ]]; then
-    /usr/bin/osascript -e 'display alert "Development refresh is not configured" as critical'
-    exit 1
-  fi
-  "$refresh_script"
-fi
+# Launching or updating code must never replace an existing development vault.
+# Mirror snapshots are prepared separately by the server launcher.
 
 /bin/launchctl remove "$launch_label" >/dev/null 2>&1 || true
 /bin/launchctl submit \
