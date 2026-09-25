@@ -32,6 +32,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 import statement_import as statements
 import local_chat
+import projections
 from statement_classification import eligible_import_ids, match_import_transfers
 
 from schema import SchemaError, prepare_encrypted_database
@@ -304,7 +305,7 @@ def require_login():
         if not expected or not submitted or not secrets.compare_digest(expected, submitted):
             abort(400, "The form expired. Reload the page and try again.")
     if READ_ONLY_MIRROR and request.method == "POST" and request.endpoint not in {
-        "login", "logout", "assistant_answer", "update_local_ai", "update_overview_lookback",
+        "login", "logout", "assistant_answer", "projection_compare", "update_local_ai", "update_overview_lookback",
     }:
         return jsonify(error="Development is a read-only production snapshot. Make data and categorization changes in the production app."), 403
     if request.endpoint in {"static", "favicon", "health", "login", "setup"}:
@@ -1554,6 +1555,36 @@ def savings():
     context["saved_count"] = request.args.get("saved")
     context["savings_error"] = request.args.get("error")
     return render_template("savings.html", **context)
+
+
+@app.get("/plan")
+def planning_page():
+    context = page_context("plan")
+    context.update(savings_data())
+    context["plan_starting_assets"] = (
+        context["all_savings_total"]
+        if any(account["recorded_on"] for account in context["savings_accounts"])
+        else None
+    )
+    return render_template("plan.html", **context)
+
+
+@app.post("/api/projections")
+def projection_compare():
+    if request.content_length and request.content_length > 10000:
+        return jsonify(error="The planning request is too large."), 413
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) != {"baseline", "comparison"}:
+        return jsonify(error="Send a baseline and a comparison plan."), 400
+    try:
+        baseline = projections.validate(payload["baseline"])
+        comparison = projections.validate(payload["comparison"])
+        for key in ("current_age", "end_age", "starting_assets", "inflation_rate"):
+            if baseline[key] != comparison[key]:
+                raise projections.ProjectionError("Scenarios must share a starting point, horizon, and inflation assumption.")
+        return jsonify(baseline=projections.project(baseline), comparison=projections.project(comparison))
+    except projections.ProjectionError as error:
+        return jsonify(error=str(error)), 400
 
 
 @app.get("/assistant")

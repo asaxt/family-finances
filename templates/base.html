@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
-  {% if active in ["trends", "categories", "savings", "cash_flow"] %}<script src="/static/vendor/chart.umd.min.js"></script>{% endif %}
+  {% if active in ["trends", "categories", "savings", "cash_flow", "plan"] %}<script src="/static/vendor/chart.umd.min.js"></script>{% endif %}
 </head>
 <body>
   {% set person_query = '&person=' ~ connection_id if connection_id else '' %}
@@ -36,6 +36,9 @@
       </a>
       <a class="{{ 'active' if active == 'savings' }}" href="/savings">
         <span>◇</span> Savings
+      </a>
+      <a class="{{ 'active' if active == 'plan' }}" href="/plan">
+        <span>↗</span> Plan
       </a>
       <a class="{{ 'active' if active == 'assistant' }}" href="/assistant">
         <span>✧</span> Ask AI
@@ -72,7 +75,7 @@
       </div>
     </header>
 
-    {% if active not in ["savings", "settings", "transactions", "category_rules", "assistant"] %}
+    {% if active not in ["savings", "settings", "transactions", "category_rules", "assistant", "plan"] %}
     <section class="filterbar">
       <form method="{{ 'post' if active in ['overview', 'cash_flow'] else 'get' }}" class="filter-form"{% if active in ["overview", "cash_flow"] %} action="{{ url_for('update_overview_lookback') }}"{% endif %}>
         {% if active in ["overview", "cash_flow"] %}

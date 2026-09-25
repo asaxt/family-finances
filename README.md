@@ -69,6 +69,26 @@ SQL, modify records, or initiate bank operations. The app does not save chat
 history or log prompt/answer text. Leaving the page or choosing **New chat**
 clears the conversation. The existing local AI switch also disables chat.
 
+## Lifetime planning (development preview)
+
+Open **Plan** to compare a baseline retirement projection with a what-if path.
+The editable starting amount comes from the latest recorded balances of active
+Savings accounts; inspect the source dates and remove money reserved for other
+purposes. Enter a household timeline, annual savings, retirement spending,
+estimated retirement income, and an optional one-time expense. Compare changes
+to retirement age, contributions, spending, and nominal investment growth.
+
+The chart and annual table can display today's purchasing power or future
+dollars. Calculations use fixed annual growth, inflation-adjusted cash flows at
+year end, and explicit unfunded spending when investments are insufficient.
+Account-specific tax rules, benefits eligibility, debt amortization, and market
+volatility are not modeled. Include an allowance for taxes in spending. These
+are illustrations, not predictions or success probabilities.
+
+Calculations run locally without AI or financial-record changes, including in
+the read-only development mirror. Assumptions and results are not persisted;
+leaving or reloading the page clears the plan.
+
 ## Developer setup
 
 Development never clears categories or rules on unlock. A configured production
