@@ -25,7 +25,7 @@ def federal_return(people, filing_status, factor=1, year=TAX_YEAR):
 
     Call separately for separate returns; never pool unrelated household members.
     Savings inputs must already be eligible contributions, within plan limits.
-    State taxes are deliberately absent until a supported state policy is supplied.
+    State taxes are calculated separately by household_taxes.
     """
     if filing_status not in FILING_STATUSES:
         raise ValueError("Choose a supported federal filing status.")
@@ -86,3 +86,109 @@ def federal_payroll_tax(wages, filing_status, factor=1):
     threshold = 250000 if filing_status == 'joint' else 125000 if filing_status == 'separate' else 200000
     tax += max(0, sum(wages) - threshold) * .009
     return tax
+
+
+STATES = {'WA': 'Washington', 'OR': 'Oregon'}
+
+
+def oregon_tax(income, oregon_income, status, federal_tax, ages, factor=1):
+    """Ordinary-income estimate using OR-40-N deduction proration."""
+    if income <= 0 or oregon_income <= 0:
+        return 0
+    joint = status == 'joint'
+    ratio = min(1, oregon_income / income)
+    standard = (5820 if joint else 2910) * factor + 1000 * sum(age >= 65 for age in ages)
+    # The federal subtraction limit is halved for separate returns.
+    phase_start, phase_step = (250000, 10000) if joint else (125000, 5000)
+    phase = max(0, 1 - .2 * max(0, 1 + math.floor((income - phase_start) / phase_step)))
+    federal_subtraction = min(federal_tax, (8750 if joint else 4375) * factor * phase)
+    taxable = max(0, oregon_income - (standard + federal_subtraction) * ratio)
+    thresholds = (9100 * factor, 22800 * factor, 250000) if joint else (4550 * factor, 11400 * factor, 125000)
+    # Keep the two indexed bands below the fixed top-band threshold in long scenarios.
+    thresholds = tuple(min(value, thresholds[-1]) for value in thresholds)
+    tax = progressive_tax(taxable, thresholds, (.0475, .0675, .0875, .099))
+    credit = 263 * factor * len(ages) * ratio if income <= (200000 if joint else 100000) else 0
+    return max(0, tax - credit)
+
+
+def washington_tax(income, washington_income, status, year, inflation):
+    """Enacted ordinary-income tax from 2028; capital gains are not modeled."""
+    if year < 2028 or income <= 0 or washington_income <= 0:
+        return 0
+    # Biennial indexing begins with 2029 income, collected in 2030.
+    periods = max(0, (year - 2027) // 2)
+    deduction = 1000000 * (1 + inflation) ** (2 * periods)
+    if status == 'separate':
+        deduction /= 2  # Explicit equal allocation of the shared married deduction.
+    deduction *= min(1, washington_income / income)
+    return max(0, washington_income - deduction) * .099
+
+
+def household_taxes(people, status, allocation, factor=1, year=TAX_YEAR, inflation=0):
+    """Two married adults; federal + OR/WA ordinary-income planning estimate.
+
+    Each person supplies wages, pretax_savings, taxable_withdrawals, age, states,
+    and work_state_percent. Community allocation affects income tax, never FICA.
+    Residence and work locations are assumed constant for the full year.
+    """
+    if status not in {'joint', 'separate'} or len(people) != 2:
+        raise ValueError('Choose joint or separate filing for two spouses.')
+    if allocation not in {'individual', 'community_wages', 'community_all'}:
+        raise ValueError('Choose how income is allocated to separate returns.')
+    incomes, sources, overlaps = [], [], []
+    for person in people:
+        residence, work = person['residence_state'], person['employment_state']
+        if residence not in STATES or work not in STATES:
+            raise ValueError('This estimate supports Washington and Oregon only.')
+        net_wages = person['wages'] - person['pretax_savings']
+        retirement = person['taxable_withdrawals']
+        fraction = person['work_state_percent'] / 100
+        worked = {state: net_wages * ((fraction if work == state else 0)
+                  + (1 - fraction if residence == state else 0)) for state in STATES}
+        income = net_wages + retirement
+        incomes.append([net_wages, retirement])
+        sources.append({state: income if residence == state else worked[state] for state in STATES})
+        # Income taxed by both states, tagged by the state granting a resident credit.
+        overlaps.append({state: worked['OR' if state == 'WA' else 'WA'] if residence == state else 0
+                         for state in STATES})
+    if status == 'separate' and allocation != 'individual':
+        for index in (0, 1) if allocation == 'community_all' else (0,):
+            average = sum(row[index] for row in incomes) / 2
+            for row in incomes:
+                row[index] = average
+        # Community allocation is supported where both spouses share domicile.
+        if people[0]['residence_state'] != people[1]['residence_state']:
+            raise ValueError('Community allocation requires the same residence state for both spouses in this preview.')
+        for state in STATES:
+            for collection in (sources, overlaps):
+                average = sum(row[state] for row in collection) / 2
+                if allocation == 'community_wages' and collection is sources and state == people[0]['residence_state']:
+                    for i, row in enumerate(collection):
+                        row[state] = incomes[i][0] + incomes[i][1]
+                else:
+                    for row in collection:
+                        row[state] = average
+    totals = dict(federal_income_tax=0, federal_payroll_tax=0, oregon_tax=0,
+                  washington_tax=0, interstate_credit=0)
+    groups = [(0, 1)] if status == 'joint' else [(0,), (1,)]
+    for group in groups:
+        income = sum(sum(incomes[i]) for i in group)
+        ages = [people[i]['age'] for i in group]
+        federal = federal_income_tax(income, status, ages, factor, year)
+        payroll = federal_payroll_tax([people[i]['wages'] for i in group], status, factor)
+        sourced = {state: sum(sources[i][state] for i in group) for state in STATES}
+        oregon = oregon_tax(income, sourced['OR'], status, federal, ages, factor)
+        washington = washington_tax(income, sourced['WA'], status, year, inflation)
+        state_taxes = {'OR': oregon, 'WA': washington}
+        credits = {}
+        for state, other in (('OR', 'WA'), ('WA', 'OR')):
+            overlap = sum(overlaps[i][state] for i in group)
+            credits[state] = min(state_taxes[state] * overlap / sourced[state] if sourced[state] else 0,
+                                 state_taxes[other] * overlap / sourced[other] if sourced[other] else 0)
+        totals['federal_income_tax'] += federal
+        totals['federal_payroll_tax'] += payroll
+        totals['oregon_tax'] += oregon - credits['OR']
+        totals['washington_tax'] += washington - credits['WA']
+        totals['interstate_credit'] += sum(credits.values())
+    totals['taxes'] = sum(totals[key] for key in ('federal_income_tax', 'federal_payroll_tax', 'oregon_tax', 'washington_tax'))
+    return totals

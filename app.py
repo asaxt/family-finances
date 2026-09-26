@@ -1569,15 +1569,22 @@ def planning_page():
     )
     with db() as connection:
         context["planning_trend"] = planning_spending_trend(connection)
-    context["plan_retirement_share"] = retirement_investment_share(context)
     context["plan_end_age"] = projections.END_AGE
+    saved = setting("household_plan")
+    try:
+        context["household_plan"] = projections.validate(json.loads(saved)) if saved else None
+    except (ValueError, TypeError):
+        context["household_plan"] = None
+    if context["household_plan"] is None:
+        context["household_plan"] = dict(
+            people=[dict(name=f"Person {i + 1}", annual_income="", tax_advantaged_rate=0,
+                contribution_type="pre_tax", current_age="", retirement_age=67, withdrawal_rate=4,
+                starting_pretax="", starting_roth="", residence_state="", employment_state="",
+                work_state_percent=100) for i in range(2)],
+            starting_taxable=context["classification_totals"]["taxable"] / 100 if context["plan_starting_assets"] is not None else "",
+            inflation_rate=2.5, growth_rate=5, tax_payments_in_spending=0,
+            filing_status="joint", mfs_allocation="")
     return render_template("plan.html", **context)
-
-
-def retirement_investment_share(savings):
-    total = savings["all_savings_total"]
-    retirement = sum(savings["classification_totals"][key] for key in ("pre_tax", "post_tax"))
-    return retirement / total if total > 0 else 1
 
 
 @app.post("/api/projections")
@@ -1590,20 +1597,31 @@ def projection_compare():
     try:
         baseline = projections.validate(payload["baseline"])
         comparison = projections.validate(payload["comparison"])
-        if baseline["current_age"] != comparison["current_age"]:
-            raise projections.ProjectionError("Scenarios must use the same current age. Clear the comparison to change it.")
+        if [p["current_age"] for p in baseline["people"]] != [p["current_age"] for p in comparison["people"]]:
+            raise projections.ProjectionError("Scenarios must use the same current ages. Clear the comparison to change them.")
         with db() as connection:
             trend = planning_spending_trend(connection)
         spending = trend["annual_spending"]
         if spending is None:
             raise projections.ProjectionError("A usable 12-month spending estimate is needed. Review the data coverage on Plan.")
-        share = retirement_investment_share(savings_data())
-        return jsonify(baseline=projections.project(baseline, spending / 100, share),
-                       comparison=projections.project(comparison, spending / 100, share),
-                       retirement_share=share, spending_date_from=trend["date_from"],
+        return jsonify(baseline=projections.project(baseline, spending / 100),
+                       comparison=projections.project(comparison, spending / 100),
+                       spending_date_from=trend["date_from"],
                        spending_date_to=trend["date_to"])
     except projections.ProjectionError as error:
         return jsonify(error=str(error)), 400
+
+
+@app.post("/api/plan-settings")
+def save_household_plan():
+    if request.content_length and request.content_length > 10000:
+        return jsonify(error="The planning request is too large."), 413
+    try:
+        plan = projections.validate(request.get_json(silent=True))
+    except projections.ProjectionError as error:
+        return jsonify(error=str(error)), 400
+    save_setting("household_plan", json.dumps(plan, separators=(",", ":")))
+    return jsonify(saved=True)
 
 
 @app.get("/assistant")

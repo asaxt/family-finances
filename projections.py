@@ -1,5 +1,9 @@
-"""Annual retirement and taxable investment estimates; no persistence."""
+"""Local annual household projections. Calculation never writes financial data."""
 import math
+from copy import deepcopy
+from datetime import date
+
+from planning_taxes import STATES, TAX_YEAR, household_taxes
 
 END_AGE = 95
 
@@ -8,84 +12,133 @@ class ProjectionError(ValueError):
     pass
 
 
+PERSON_FIELDS = {
+    'annual_income': (0, 100_000_000, 'Gross annual income'),
+    'tax_advantaged_rate': (0, 100, 'Tax-advantaged saving percentage'),
+    'withdrawal_rate': (0, 100, 'Retirement withdrawal percentage'),
+    'retirement_age': (18, END_AGE - 1, 'Retirement age'),
+    'current_age': (18, END_AGE - 1, 'Current age'),
+    'starting_pretax': (0, 1_000_000_000, 'Starting pre-tax investments'),
+    'starting_roth': (0, 1_000_000_000, 'Starting Roth investments'),
+    'work_state_percent': (0, 100, 'Work-state percentage'),
+}
 FIELDS = {
-    "annual_income": (0, 100_000_000, "Annual income"),
-    "tax_advantaged_rate": (0, 100, "Tax-advantaged saving percentage"),
-    "withdrawal_rate": (0, 100, "Retirement withdrawal percentage"),
-    "retirement_age": (18, END_AGE - 1, "Retirement age"),
-    "current_age": (18, END_AGE - 1, "Current age"),
-    "starting_assets": (0, 1_000_000_000, "Starting investments"),
-    "inflation_rate": (0, 15, "Annual inflation"),
-    "growth_rate": (-30, 30, "Annual investment growth"),
+    'starting_taxable': (0, 1_000_000_000, 'Starting taxable investments'),
+    'inflation_rate': (0, 15, 'Annual inflation'),
+    'growth_rate': (-30, 30, 'Annual investment growth'),
+    'tax_payments_in_spending': (-100_000_000, 100_000_000, 'Tax payments already in spending'),
 }
 
 
-def validate(values):
-    if not isinstance(values, dict) or set(values) != set(FIELDS):
-        raise ProjectionError("Complete the eight planning inputs before calculating.")
-    for key, (low, high, label) in FIELDS.items():
+def validate_numbers(values, fields):
+    for key, (low, high, label) in fields.items():
         value = values[key]
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or not low <= value <= high):
-            raise ProjectionError(f"{label} must be a number between {low:g} and {high:g}.")
-        if key.endswith("age") and value != int(value):
-            raise ProjectionError(f"{label} must be a whole number.")
-    if values["retirement_age"] < values["current_age"]:
-        raise ProjectionError("Retirement age must be at least your current age. Use your current age if already retired.")
-    return dict(values)
+            raise ProjectionError(f'{label} must be a number between {low:g} and {high:g}.')
+        if key.endswith('age') and value != int(value):
+            raise ProjectionError(f'{label} must be a whole number.')
 
 
-def project(values, annual_spending, retirement_share=1):
+def validate(values):
+    if not isinstance(values, dict) or set(values) != set(FIELDS) | {'people', 'filing_status', 'mfs_allocation'}:
+        raise ProjectionError('Complete the household planning inputs before calculating.')
+    validate_numbers(values, FIELDS)
+    if values['filing_status'] not in ('joint', 'separate'):
+        raise ProjectionError('Choose married filing jointly or separately.')
+    if values['mfs_allocation'] not in ('individual', 'community_wages', 'community_all') and not (values['filing_status'] == 'joint' and values['mfs_allocation'] == ''):
+        raise ProjectionError('Choose the income allocation for separate returns.')
+    people = values['people']
+    if not isinstance(people, list) or len(people) != 2:
+        raise ProjectionError('This married-household preview needs two spouse profiles.')
+    for person in people:
+        if not isinstance(person, dict) or set(person) != set(PERSON_FIELDS) | {'name', 'contribution_type', 'residence_state', 'employment_state'}:
+            raise ProjectionError('Complete each spouse profile.')
+        validate_numbers(person, PERSON_FIELDS)
+        if not isinstance(person['name'], str) or not person['name'].strip() or len(person['name']) > 60 or any(ord(c) < 32 for c in person['name']):
+            raise ProjectionError('Each person needs a name or label of 1–60 characters.')
+        if person['residence_state'] not in tuple(STATES) or person['employment_state'] not in tuple(STATES):
+            raise ProjectionError('This preview supports Washington and Oregon.')
+        if person['contribution_type'] not in ('pre_tax', 'roth'):
+            raise ProjectionError('Choose pre-tax or Roth saving for each person.')
+        if person['retirement_age'] < person['current_age']:
+            raise ProjectionError('Use current age as retirement age if already retired.')
+    if max(p['current_age'] for p in people) - min(p['current_age'] for p in people) > 25:
+        raise ProjectionError('This preview supports an age difference up to 25 years.')
+    if values['filing_status'] == 'separate' and values['mfs_allocation'] != 'individual' and people[0]['residence_state'] != people[1]['residence_state']:
+        raise ProjectionError('Community allocation requires the same residence state for both spouses in this preview.')
+    return deepcopy(values)
+
+
+def project(values, annual_spending, start_year=None):
     plan = validate(values)
     if (not isinstance(annual_spending, (int, float)) or isinstance(annual_spending, bool)
             or not math.isfinite(annual_spending) or annual_spending < 0):
-        raise ProjectionError("A usable 12-month spending estimate is needed before calculating.")
-    if not isinstance(retirement_share, (int, float)) or not 0 <= retirement_share <= 1:
-        raise ProjectionError("The starting investment split could not be determined.")
-    growth = plan["growth_rate"] / 100
-    inflation = plan["inflation_rate"] / 100
-    retirement_balance = plan["starting_assets"] * retirement_share
-    taxable_balance = plan["starting_assets"] - retirement_balance
-    annual_tax_advantaged = plan["annual_income"] * plan["tax_advantaged_rate"] / 100
-    annual_taxable = plan["annual_income"] - annual_tax_advantaged - annual_spending
-    rows = [{"age": int(plan["current_age"]), "factor": 1,
-             "assets": round(plan["starting_assets"], 2),
-             "retirement_assets": round(retirement_balance, 2), "taxable_assets": round(taxable_balance, 2),
-             "income": 0, "tax_advantaged_savings": 0, "taxable_cash_flow": 0,
-             "withdrawal": 0, "spending": 0, "shortfall": 0}]
-    first_shortfall_age = None
-    total_real_shortfall = 0
-    for age in range(int(plan["current_age"]), END_AGE):
-        elapsed = age - plan["current_age"]
+        raise ProjectionError('A usable 12-month spending estimate is needed before calculating.')
+    if plan['tax_payments_in_spending'] > annual_spending:
+        raise ProjectionError('Tax payments already in spending cannot exceed the spending estimate.')
+    start_year = start_year or date.today().year
+    if start_year < TAX_YEAR:
+        raise ProjectionError('Tax estimates begin in 2026.')
+    people = plan['people']
+    growth, inflation = plan['growth_rate'] / 100, plan['inflation_rate'] / 100
+    balances = [[p['starting_pretax'], p['starting_roth']] for p in people]
+    taxable = plan['starting_taxable']
+    spending_base = annual_spending - plan['tax_payments_in_spending']
+    horizon = END_AGE - int(min(p['current_age'] for p in people))
+    tax_keys = ('federal_income_tax', 'federal_payroll_tax', 'oregon_tax', 'washington_tax', 'interstate_credit', 'taxes')
+    rows = [dict(year=start_year, elapsed=0, ages=[p['current_age'] for p in people], factor=1,
+                 retirement_assets=sum(map(sum, balances)), taxable_assets=taxable,
+                 assets=sum(map(sum, balances)) + taxable, income=0, tax_advantaged_savings=0,
+                 requested_savings=0, withdrawal=0, spending=0, taxable_cash_flow=0, shortfall=0,
+                 **dict.fromkeys(tax_keys, 0))]
+    first_shortfall_year, total_real_shortfall = None, 0
+    for elapsed in range(horizon):
+        year = start_year + elapsed
         factor = (1 + inflation) ** elapsed
-        end_factor = factor * (1 + inflation)
-        retired = age >= plan["retirement_age"]
-        income = 0 if retired else plan["annual_income"] * factor
-        contribution = income * plan["tax_advantaged_rate"] / 100
-        spending = annual_spending * factor
-        # Apply the elected rate to this year's opening retirement balance.
-        # A severe loss cannot force a withdrawal above the available balance.
-        available_retirement = retirement_balance * (1 + growth)
-        withdrawal = min(available_retirement, retirement_balance * plan["withdrawal_rate"] / 100) if retired else 0
-        retirement_balance = available_retirement + contribution - withdrawal
-        taxable_cash_flow = income - contribution + withdrawal - spending
-        taxable_closing = taxable_balance * (1 + growth) + taxable_cash_flow
-        shortfall = max(0, -taxable_closing)
-        if shortfall > 0 and first_shortfall_age is None:
-            first_shortfall_age = age
-        total_real_shortfall += shortfall / end_factor
-        taxable_balance = max(0, taxable_closing)
-        rows.append({"age": age + 1, "factor": end_factor,
-                     **{key: round(value, 2) for key, value in {
-                         "assets": retirement_balance + taxable_balance,
-                         "retirement_assets": retirement_balance, "taxable_assets": taxable_balance,
-                         "income": income, "tax_advantaged_savings": contribution,
-                         "taxable_cash_flow": taxable_cash_flow, "withdrawal": withdrawal,
-                         "spending": spending, "shortfall": shortfall}.items()}})
-    retirement = next(row for row in rows if row["age"] == plan["retirement_age"])
-    return {"rows": rows, "retirement": retirement, "final": rows[-1],
-            "annual_spending": annual_spending,
-            "annual_tax_advantaged_savings": round(annual_tax_advantaged, 2),
-            "annual_taxable_savings": round(annual_taxable, 2),
-            "first_shortfall_age": first_shortfall_age,
-            "total_real_shortfall": round(total_real_shortfall, 2)}
+        tax_factor = (1 + inflation) ** (year - TAX_YEAR)
+        income = contribution = requested = withdrawal = 0
+        tax_people = []
+        for person, balance in zip(people, balances):
+            age = person['current_age'] + elapsed
+            retired = age >= person['retirement_age']
+            wages = 0 if retired else person['annual_income'] * factor
+            desired = wages * person['tax_advantaged_rate'] / 100
+            saving = min(desired, 24500 * tax_factor)
+            distributions = [min(amount * (1 + growth), amount * person['withdrawal_rate'] / 100)
+                             if retired else 0 for amount in balance]
+            for i in (0, 1):
+                balance[i] = balance[i] * (1 + growth) - distributions[i]
+            balance[0 if person['contribution_type'] == 'pre_tax' else 1] += saving
+            tax_people.append(dict(age=age, wages=wages,
+                pretax_savings=saving if person['contribution_type'] == 'pre_tax' else 0,
+                taxable_withdrawals=distributions[0], residence_state=person['residence_state'],
+                employment_state=person['employment_state'], work_state_percent=person['work_state_percent']))
+            income += wages
+            contribution += saving
+            requested += desired
+            withdrawal += sum(distributions)
+        taxes = household_taxes(tax_people, plan['filing_status'], plan['mfs_allocation'] or 'individual', tax_factor, year, inflation)
+        spending = spending_base * factor
+        cash_flow = income - contribution + withdrawal - spending - taxes['taxes']
+        closing = taxable * (1 + growth) + cash_flow
+        shortfall = max(0, -closing)
+        if shortfall > 0 and first_shortfall_year is None:
+            first_shortfall_year = year
+        total_real_shortfall += shortfall / (factor * (1 + inflation))
+        taxable = max(0, closing)
+        retirement = sum(map(sum, balances))
+        rows.append(dict(year=year + 1, elapsed=elapsed + 1,
+            ages=[p['current_age'] + elapsed + 1 for p in people], factor=factor * (1 + inflation),
+            **{key: round(value, 2) for key, value in dict(retirement_assets=retirement,
+                taxable_assets=taxable, assets=retirement + taxable, income=income,
+                tax_advantaged_savings=contribution, requested_savings=requested,
+                withdrawal=withdrawal, spending=spending, taxable_cash_flow=cash_flow,
+                shortfall=shortfall, **taxes).items()}))
+    both_retired = int(max(p['retirement_age'] - p['current_age'] for p in people))
+    return dict(rows=rows, retirement=rows[both_retired], final=rows[-1],
+                annual_spending=annual_spending, adjusted_annual_spending=spending_base,
+                annual_tax_advantaged_savings=rows[1]['tax_advantaged_savings'],
+                annual_taxable_savings=rows[1]['taxable_cash_flow'],
+                annual_taxes=rows[1]['taxes'], first_shortfall_year=first_shortfall_year,
+                total_real_shortfall=round(total_real_shortfall, 2))

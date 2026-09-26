@@ -71,34 +71,38 @@ clears the conversation. The existing local AI switch also disables chat.
 
 ## Lifetime planning (development preview)
 
-**Plan** accepts eight inputs: annual income, tax-advantaged saving percentage,
-retirement withdrawal percentage, retirement age, current age, starting
-investments, annual inflation, and annual investment growth. The latest active
-Savings balances provide the starting total and retirement/taxable proportions.
-Editing the total preserves that split; without recorded balances, an entered
-starting amount is treated as retirement investments.
+**Plan** models two spouses with independent income, saving rates, pre-tax/Roth
+balances, retirement ages, withdrawal rates, and Washington/Oregon residence
+and physical work locations. Choose married filing jointly or separately.
+Separate returns require an explicit income-allocation assumption for community
+property. The household shares brokerage investments, inflation, and growth.
 
-Yearly spending is inferred from the last 12 completed calendar months using
-Spending Trends treatment. Refunds reduce spending; transfers, pending records,
-and excluded transactions are omitted. Missing months and mixed currencies
-prevent calculation. Records in all 12 months do not establish complete account
-coverage; the page shows monthly totals and classification warnings for review.
+Yearly spending uses the last 12 complete calendar months and Spending Trends
+classification. Refunds reduce spending; transfers, pending and excluded records
+are omitted. Missing months and mixed currencies prevent calculation. Review
+coverage and subtract only income-tax payments already counted in spending.
 
-Before retirement, tax-advantaged contributions equal income times the saving
-percentage. Income minus contributions minus spending goes to taxable brokerage
-investments; a negative remainder draws from that balance. Income and
-contributions stop at retirement. Each year's withdrawal is the selected
-percentage of the opening retirement balance, capped at funds available after
-growth. Withdrawals fund spending, with taxable investments covering the gap
-or receiving any excess. Both balances earn the chosen growth rate. Income and
-spending increase with inflation, with cash flows applied at year end.
+Each person's wages and new retirement contributions stop at their retirement
+age. Contributions use the indexed 2026 employee-plan base limit; catch-ups,
+IRA contributions, and employer matches are not included. Annual withdrawals
+use that person's remaining opening retirement balances, capped after growth.
+Pre-tax withdrawals are taxable; Roth withdrawals are assumed qualified.
+After modeled taxes and spending, surplus goes to brokerage; deficits draw
+brokerage then become separately reported funding gaps. Both balances grow at
+the selected rate, with cash flows at year end.
 
-The chart and annual table distinguish retirement and taxable investments and
-can show today's or future dollars through age 95. Keep a baseline in the page,
-edit the same eight inputs, and calculate again to compare. Calculations do not
-write records, including in the development mirror. Plans are cleared on exit.
-Taxes, contribution limits, penalties, benefits, and market volatility are not
-modeled; these are illustrations, not success probabilities.
+Federal income/payroll taxes and Oregon/Washington income-tax estimates are
+shown separately. The model includes Oregon work sourcing and proportional
+interstate credits, and Washington's enacted ordinary-income tax from 2028.
+See [tax coverage and official sources](docs/planning-taxes.md) for assumptions,
+indexing, community-property choices, and exclusions. This is a planning
+illustration, not a tax return or a probability of success.
+
+Charts and annual tables run until the younger spouse reaches 95 (both remain
+alive in the model; supported age gap is at most 25 years). Comparisons are
+page-only. Explicitly saving household profiles and assumptions writes to the
+existing encrypted vault. Calculation never writes records. In the read-only
+development mirror, saving is disabled and all edits remain temporary.
 
 ## Developer setup
 

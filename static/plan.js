@@ -8,28 +8,43 @@
   const mode = document.getElementById('plan-dollar-mode');
   const status = document.getElementById('plan-result-status');
   const source = JSON.parse(document.getElementById('plan-data').textContent);
-  const fields = ['annual_income', 'tax_advantaged_rate', 'withdrawal_rate', 'retirement_age',
-    'current_age', 'starting_assets', 'inflation_rate', 'growth_rate'];
+  const fields = ['starting_taxable', 'inflation_rate', 'growth_rate', 'tax_payments_in_spending'];
+  const personNumbers = ['annual_income', 'tax_advantaged_rate', 'current_age', 'retirement_age',
+    'starting_pretax', 'starting_roth', 'withdrawal_rate', 'work_state_percent'];
+  const personText = ['name', 'contribution_type', 'residence_state', 'employment_state'];
+  function readPlan() {
+    const plan = Object.fromEntries(fields.map(key => [key, Number(form.elements[key].value)]));
+    plan.filing_status = form.elements.filing_status.value;
+    plan.mfs_allocation = form.elements.mfs_allocation.value;
+    plan.people = [0, 1].map(index => Object.fromEntries([
+      ...personNumbers.map(key => [key, Number(form.elements[`person_${index}_${key}`].value)]),
+      ...personText.map(key => [key, form.elements[`person_${index}_${key}`].value])
+    ]));
+    return plan;
+  }
   const format = new Intl.NumberFormat('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: 0});
   let calculated, plans, baseline, chart, controller;
   let revision = 0;
   const dollars = (row, key) => row[key] / (mode.value === 'real' ? row.factor : 1);
   function updateDerived() {
-    const incomeField = form.elements.annual_income;
-    const rateField = form.elements.tax_advantaged_rate;
-    const income = Number(incomeField.value), rate = Number(rateField.value);
-    const known = incomeField.value !== '' && rateField.value !== '' && incomeField.validity.valid && rateField.validity.valid;
-    const taxSaving = income * rate / 100;
-    const surplus = known && source.annual_spending !== null ? income - taxSaving - source.annual_spending : null;
-    document.getElementById('plan-taxable-savings').textContent = surplus === null ? '—' : `${format.format(surplus)} / year`;
-    document.getElementById('plan-tax-advantaged').textContent = known ? `Tax-advantaged savings: ${format.format(taxSaving)} / year (${rate}% of income).` : 'Enter income and a saving percentage to calculate.';
-    document.getElementById('plan-cash-flow-note').textContent = surplus !== null && surplus < 0
-      ? 'Your contributions and spending exceed income. The negative remainder draws from taxable investments; any uncovered amount becomes a funding gap.'
-      : 'The remainder is a calculated cash-flow estimate, not a measurement of actual brokerage transfers. Income and contributions stop at retirement.';
-    const assets = form.elements.starting_assets;
-    document.getElementById('plan-starting-split').textContent = assets.value !== '' && assets.validity.valid
-      ? `Starting split: ${format.format(Number(assets.value) * source.retirement_share)} retirement · ${format.format(Number(assets.value) * (1 - source.retirement_share))} taxable.`
-      : 'Enter starting investments to see the split.';
+    const separate = form.elements.filing_status.value === 'separate';
+    document.getElementById('plan-separate-fields').hidden = !separate;
+    form.elements.mfs_allocation.required = separate;
+    const current = readPlan();
+    const fresh = calculated && JSON.stringify(current) === JSON.stringify(plans.comparison);
+    const result = fresh ? calculated.comparison : null;
+    document.getElementById('plan-taxable-savings').textContent = result ? `${format.format(result.annual_taxable_savings)} / year` : 'Calculate to estimate';
+    document.getElementById('plan-tax-advantaged').textContent = result
+      ? `Retirement savings: ${format.format(result.annual_tax_advantaged_savings)} / year. Adjusted spending: ${format.format(result.adjusted_annual_spending)} / year.` : '';
+    document.getElementById('plan-cash-flow-note').textContent = result && result.annual_taxable_savings < 0
+      ? 'The negative remainder draws from brokerage; any uncovered amount becomes a funding gap.'
+      : 'This is a cash-flow estimate, not a measurement of actual brokerage transfers.';
+    const first = result?.rows[1];
+    document.getElementById('plan-tax-summary').textContent = first
+      ? `First-year modeled taxes: ${format.format(first.taxes)} — federal income ${format.format(first.federal_income_tax)}, federal payroll ${format.format(first.federal_payroll_tax)}, Oregon ${format.format(first.oregon_tax)}, Washington ${format.format(first.washington_tax)}. Interstate credits included: ${format.format(first.interstate_credit)}.`
+      : 'Calculate to see federal income, federal payroll, Oregon, and Washington tax estimates.';
+    const retirement = current.people.reduce((total, person) => total + person.starting_pretax + person.starting_roth, 0);
+    document.getElementById('plan-starting-split').textContent = `Entered starting investments: ${format.format(retirement)} retirement + ${format.format(current.starting_taxable)} brokerage. Verify the ownership allocation above.`;
   }
   function render() {
     if (!calculated) return;
@@ -44,14 +59,14 @@
       const card = document.createElement('article');
       const heading = document.createElement('h3'); heading.textContent = name;
       const assumptions = document.createElement('p'); assumptions.className = 'plan-note';
-      assumptions.textContent = `Retire at ${plan.retirement_age} · ${plan.tax_advantaged_rate}% saved · ${plan.withdrawal_rate}% withdrawn each retirement year · ${plan.growth_rate}% growth · ${plan.inflation_rate}% inflation.`;
+      assumptions.textContent = `${plan.filing_status === 'joint' ? 'Joint return' : 'Separate returns'} · ${plan.people.map(person => `${person.name}: retire at ${person.retirement_age}, save ${person.tax_advantaged_rate}%`).join(' · ')} · ${plan.growth_rate}% growth · ${plan.inflation_rate}% inflation.`;
       const retirement = document.createElement('p');
-      retirement.textContent = `At retirement: ${format.format(dollars(result.retirement, 'retirement_assets'))} retirement + ${format.format(dollars(result.retirement, 'taxable_assets'))} taxable. Total at age ${result.final.age}: ${format.format(dollars(result.final, 'assets'))}.`;
+      retirement.textContent = `When both have retired: ${format.format(dollars(result.retirement, 'retirement_assets'))} retirement + ${format.format(dollars(result.retirement, 'taxable_assets'))} taxable. Total in ${result.final.year}: ${format.format(dollars(result.final, 'assets'))}.`;
       const outcome = document.createElement('p');
-      outcome.className = result.first_shortfall_age === null ? 'plan-funded' : 'plan-shortfall';
-      outcome.textContent = result.first_shortfall_age === null
-        ? `No funding gap before age ${result.final.age} under these assumptions.`
-        : `First funding gap during age ${result.first_shortfall_age}–${result.first_shortfall_age + 1}. Total unfunded: ${format.format(result.total_real_shortfall)} in today's dollars.`;
+      outcome.className = result.first_shortfall_year === null ? 'plan-funded' : 'plan-shortfall';
+      outcome.textContent = result.first_shortfall_year === null
+        ? `No funding gap through ${result.final.year - 1} under these assumptions.`
+        : `First funding gap during ${result.first_shortfall_year}. Total unfunded: ${format.format(result.total_real_shortfall)} in today's dollars.`;
       card.append(heading, assumptions, retirement, outcome); summary.append(card);
       for (const [field, label, color] of [['retirement_assets', 'Retirement', '#24634e'], ['taxable_assets', 'Taxable', '#6686c4']]) {
         datasets.push({label: `${name} · ${label}`, data: result.rows.map(row => dollars(row, field)),
@@ -62,18 +77,18 @@
     for (let i = 0; i < calculated.comparison.rows.length; i++) {
       for (const [key, name] of scenarios) {
         const row = calculated[key].rows[i], tr = document.createElement('tr');
-        const values = [row.age, name, ...['retirement_assets', 'taxable_assets', 'income', 'tax_advantaged_savings',
-          'withdrawal', 'spending', 'taxable_cash_flow', 'shortfall'].map(field => format.format(dollars(row, field)))];
+        const values = [`${row.year} / ${row.ages.join(' & ')}`, name, ...['retirement_assets', 'taxable_assets', 'income', 'tax_advantaged_savings',
+          'withdrawal', 'federal_income_tax', 'federal_payroll_tax', 'oregon_tax', 'washington_tax', 'interstate_credit', 'spending', 'taxable_cash_flow', 'shortfall'].map(field => format.format(dollars(row, field)))];
         for (const value of values) { const td = document.createElement('td'); td.textContent = value; tr.append(td); }
         table.append(tr);
       }
     }
     chart?.destroy();
     chart = new Chart(document.getElementById('plan-chart'), {
-      type: 'line', data: {labels: calculated.comparison.rows.map(row => row.age), datasets},
+      type: 'line', data: {labels: calculated.comparison.rows.map(row => row.year), datasets},
       options: {responsive: true, maintainAspectRatio: false, animation: false,
         interaction: {mode: 'index', intersect: false},
-        scales: {x: {title: {display: true, text: 'Age'}}, y: {beginAtZero: true,
+        scales: {x: {title: {display: true, text: 'Calendar year'}}, y: {beginAtZero: true,
           title: {display: true, text: mode.value === 'real' ? "Today's dollars" : 'Future dollars'},
           ticks: {callback: value => new Intl.NumberFormat('en-US', {notation: 'compact', style: 'currency', currency: 'USD'}).format(value)}}},
         plugins: {tooltip: {callbacks: {label: item => `${item.dataset.label}: ${format.format(item.parsed.y)}`}}}}
@@ -85,7 +100,7 @@
   });
   pin.addEventListener('click', () => {
     if (!calculated || pin.disabled) return;
-    baseline = {...plans.comparison}; plans.baseline = {...baseline}; calculated.baseline = calculated.comparison;
+    baseline = structuredClone(plans.comparison); plans.baseline = structuredClone(baseline); calculated.baseline = calculated.comparison;
     unpin.hidden = false; status.textContent = 'Baseline kept in this page. Edit inputs above and calculate to compare.'; render();
   });
   unpin.addEventListener('click', () => {
@@ -101,7 +116,8 @@
   form.addEventListener('submit', async event => {
     event.preventDefault();
     if (button.disabled) return;
-    const current = Object.fromEntries(fields.map(key => [key, Number(form.elements[key].value)]));
+    if (!form.reportValidity()) return;
+    const current = readPlan();
     const submitted = {baseline: baseline || current, comparison: current};
     const submittedRevision = revision;
     button.disabled = true; pin.disabled = true; error.hidden = true;
@@ -113,9 +129,9 @@
       if (response.status === 401) { window.location.assign('/login'); return; }
       const data = await response.json().catch(() => { throw new Error('Your session may have expired. Reload and try again.'); });
       if (!response.ok) throw new Error(data.error || 'The projection could not be calculated.');
-      if (source.annual_spending !== data.comparison.annual_spending || source.retirement_share !== data.retirement_share
+      if (source.annual_spending !== data.comparison.annual_spending
           || source.date_from !== data.spending_date_from || source.date_to !== data.spending_date_to) {
-        throw new Error('Your source data changed. Reload Plan to review the updated spending estimate and investment split.');
+        throw new Error('Your source data changed. Reload Plan to review the updated spending estimate.');
       }
       calculated = data; plans = submitted; results.hidden = false;
       updateDerived();
@@ -126,6 +142,23 @@
     } catch (failure) {
       if (failure.name !== 'AbortError') { error.textContent = failure.message; error.hidden = false; }
     } finally { button.disabled = source.annual_spending === null; }
+  });
+  const save = document.getElementById('plan-save');
+  save?.addEventListener('click', async () => {
+    if (!form.reportValidity()) return;
+    const saveStatus = document.getElementById('plan-save-status');
+    const savedRevision = revision;
+    save.disabled = true;
+    try {
+      const response = await fetch('/api/plan-settings', {method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': form.elements.csrf_token.value},
+        body: JSON.stringify(readPlan())});
+      if (response.status === 401) { window.location.assign('/login'); return; }
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not save. Reload and try again.');
+      saveStatus.textContent = savedRevision === revision ? 'Household and assumptions saved in your encrypted vault.' : 'Earlier inputs saved. Your latest edits have not been saved.';
+    } catch (failure) { saveStatus.textContent = failure.message; }
+    finally { save.disabled = false; }
   });
   updateDerived();
 })();

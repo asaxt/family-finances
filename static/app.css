@@ -482,3 +482,7 @@ tr:last-child td { border-bottom: 0; }
   .plan-intro { align-items: flex-start; flex-direction: column; }
   .plan-chart { height: 280px; }
 }
+
+.plan-person { border: 1px solid var(--line); border-radius: 12px; margin: 24px 0 0; padding: 20px; min-width: 0; }
+.plan-person legend { padding: 0 8px; font-weight: 650; }
+.plan-field select { width: 100%; min-width: 0; }
