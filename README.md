@@ -47,6 +47,36 @@ Plaid or any financial institution.
 - A user-editable app name
 - A read-only local Ollama assistant with calculated summaries and visible supporting data
 
+## Categorization and rule review
+
+Transactions show their category source and the matching **Category rule text**.
+Missing merchant or description text is copied from the other field and marked
+as copied. A later bank sync can replace copied text with supplied detail.
+
+Use **Review** for a transaction or **Review details for selected transactions**
+for bulk changes. Category Rules also supports bulk changes to text, match
+style, category, account scope, and category treatment. Individual user choices
+win over rules. Use **Only change this transaction** to preserve saved rules.
+
+Exact description rules match the full description, ignoring case and outer
+spaces. Contains rules match a phrase; merchant rules match the full merchant.
+No match style automatically wins over another. Saved-rule edits preview their
+impact across history. If rules overlap, choose **Replace old rules**, **Keep
+old rules as fallback**, or **Cancel**. A fallback applies where its preferred
+rule does not match; deleting the preferred rule makes the fallback available
+again. Newly encountered unresolved conflicts are flagged for review.
+
+**AI category review → Review existing categories** proposes changes against the current
+category labels. Scanning does not change transactions. Accepted suggestions
+remain AI-sourced and can be superseded by user rules; they do not create
+permanent user overrides. A suggestion conflicting with a user rule directs you
+to review that rule. Individual manual edits remain protected during automatic
+categorization. AI processing uses the configured local Ollama service.
+
+Upgrades retain an encrypted migration recovery copy. Existing rules with no
+recorded origin are conservatively treated as user rules. The development
+production mirror remains read-only.
+
 ## Ask AI (preview)
 
 Enable **Local AI assistance** in Settings, then open **Ask AI**. The preview

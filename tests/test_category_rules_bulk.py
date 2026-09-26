@@ -9,9 +9,11 @@ class CategoryRulesBulkTests(unittest.TestCase):
     tearDown = test_app_setup.AppSetupTests.tearDown
     csrf_token = staticmethod(test_app_setup.AppSetupTests.csrf_token)
 
+    post_with_rule_review = test_app_setup.AppSetupTests.post_with_rule_review
+
     def ready(self):
         page = self.client.get('/setup')
-        self.client.post('/setup', data={'csrf_token': self.csrf_token(page),
+        self.post_with_rule_review('/setup', data={'csrf_token': self.csrf_token(page),
                          'password': 'fictional rules test password', 'confirmation': 'fictional rules test password'})
         with self.application.db() as connection:
             connection.execute("INSERT INTO connections (id, owner_name, institution, access_token) "
@@ -44,7 +46,7 @@ class CategoryRulesBulkTests(unittest.TestCase):
                     edit_category_treatment='on', category_flow_type='earned_income', return_q='SAMPLE',
                     return_category='EXAMPLE BROAD', return_scope='account', return_account='sample-account',
                     return_match_type='exact', return_sort='matches_desc')
-        response = self.client.post('/api/category-rules/bulk', data=data)
+        response = self.post_with_rule_review('/api/category-rules/bulk', data=data)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(parse_qs(urlparse(response.location).query), {
             'q': ['SAMPLE'], 'category': ['EXAMPLE BROAD'], 'scope': ['account'],
@@ -64,13 +66,13 @@ class CategoryRulesBulkTests(unittest.TestCase):
         before = self.rows('merchant_rules')
         data.update(category_change='__new__', new_category='EXAMPLE GROUP', category_flow_type='spending',
                     replace_match_text='on', match_value='SAMPLE CAFE', match_type_change='description_contains')
-        failed = self.client.post('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'})
+        failed = self.post_with_rule_review('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'})
         self.assertEqual(failed.status_code, 400)
         self.assertIn('Combine identical', failed.json['error'])
         self.assertEqual(self.rows('merchant_rules'), before)
         self.assertNotIn('EXAMPLE GROUP', [row['name'] for row in self.rows('category_rules')])
         data['combine_duplicates'] = 'on'
-        self.assertEqual(self.client.post('/api/category-rules/bulk', data=data).status_code, 302)
+        self.assertEqual(self.post_with_rule_review('/api/category-rules/bulk', data=data).status_code, 302)
         rules = self.rows('merchant_rules')
         self.assertEqual(len(rules), 2)
         self.assertEqual((rules[0]['id'], rules[0]['match_type'], rules[0]['match_value'], rules[0]['category']),
@@ -83,14 +85,14 @@ class CategoryRulesBulkTests(unittest.TestCase):
         data.update(rule_ids=['1'], replace_match_text='on', match_value='SAMPLE CAFE BETA',
                     category_change='__new__', new_category='EXAMPLE GROUP', category_flow_type='earned_income',
                     scope_change='all', combine_duplicates='on')
-        response = self.client.post('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'})
+        response = self.post_with_rule_review('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'})
         self.assertEqual(response.status_code, 400)
         self.assertIn('unselected', response.json['error'])
         self.assertEqual(self.rows('merchant_rules'), before)
         self.assertNotIn('EXAMPLE GROUP', [row['name'] for row in self.rows('category_rules')])
         for text in (' ', 'X' * 256):
             data['match_value'] = text
-            self.assertEqual(self.client.post('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'}).status_code, 400)
+            self.assertEqual(self.post_with_rule_review('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'}).status_code, 400)
             self.assertEqual(self.rows('merchant_rules'), before)
 
     def test_combining_different_categories_is_blocked(self):
@@ -100,7 +102,7 @@ class CategoryRulesBulkTests(unittest.TestCase):
         before = self.rows('merchant_rules')
         data.update(replace_match_text='on', match_value='SAMPLE CAFE',
                     match_type_change='description_contains', combine_duplicates='on')
-        response = self.client.post('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'})
+        response = self.post_with_rule_review('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'})
         self.assertEqual(response.status_code, 400)
         self.assertIn('different categories', response.json['error'])
         self.assertEqual(self.rows('merchant_rules'), before)
@@ -111,23 +113,23 @@ class CategoryRulesBulkTests(unittest.TestCase):
             connection.execute("UPDATE merchant_rules SET flow_type = 'transfer', spending_override = 'exclude' WHERE id = 1")
         before = self.rows('merchant_rules')
         transactions = self.rows('transactions')
-        self.client.post('/api/category-rules/bulk', data=data)
+        self.post_with_rule_review('/api/category-rules/bulk', data=data)
         self.assertEqual(self.rows('merchant_rules'), before)
         data.update(action='delete', match_value='', replace_match_text='on', category_change='__new__')
-        self.client.post('/api/category-rules/bulk', data=data)
+        self.post_with_rule_review('/api/category-rules/bulk', data=data)
         self.assertEqual(self.rows('merchant_rules'), [before[2]])
         self.assertEqual(self.rows('transactions'), transactions)
 
     def test_style_change_keeps_each_text_and_missing_selection_is_rejected(self):
         data = self.ready()
         data.update(match_type_change='description_contains')
-        self.client.post('/api/category-rules/bulk', data=data)
+        self.post_with_rule_review('/api/category-rules/bulk', data=data)
         rules = self.rows('merchant_rules')
         self.assertEqual([row['match_value'] for row in rules[:2]], ['SAMPLE CAFE ALPHA', 'SAMPLE CAFE BETA'])
         self.assertTrue(all(row['match_type'] == 'description_contains' for row in rules[:2]))
         for ids in (['1', '9999'], ['invalid']):
             data.update(rule_ids=ids, scope_change='all')
-            self.assertEqual(self.client.post('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'}).status_code, 400)
+            self.assertEqual(self.post_with_rule_review('/api/category-rules/bulk', data=data, headers={'Accept': 'application/json'}).status_code, 400)
             self.assertEqual(self.rows('merchant_rules'), rules)
         page = self.client.get('/category-rules?q=ALPHA')
         self.assertEqual(page.data.count(b'class="rule-select"'), 1)

@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block title %}Review rule change{% endblock %}
+{% block heading %}Review rule change{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>{{ 'Overlapping rules found' if preview.overlaps else 'Confirm changes to saved rules' }}</h2>
+  <p>Nothing has changed yet. Individual user choices take precedence over saved rules. This preview covers all matching history, including transactions outside your current filters.</p>
+  <h3>Proposed rules</h3>
+  <ul>{% for rule in preview.proposed %}<li>{{ rule.match_value }} · {{ {'merchant': 'Exact merchant', 'description': 'Exact description', 'description_contains': 'Description contains'}[rule.match_type] }} → {{ rule.category }} · {{ 'All accounts' if rule.applies_all_accounts else 'Saved account only' }}</li>{% else %}<li>Remove the selected saved rules.</li>{% endfor %}</ul>
+  {% if preview.old %}<h3>Rules being edited or removed</h3><ul>{% for rule in preview.old %}<li>{{ rule.match_value }} → {{ rule.category }}</li>{% endfor %}</ul>{% endif %}
+  {% if preview.overlaps %}<h3>Other matching rules</h3><ul>{% for rule in preview.overlaps %}<li>{{ rule.match_value }} · {{ {'merchant': 'Exact merchant', 'description': 'Exact description', 'description_contains': 'Description contains'}[rule.match_type] }} → {{ rule.category }} · {{ 'AI-created' if rule.source == 'model' else 'User rule' }}</li>{% endfor %}</ul>
+  <p><strong>Replace:</strong> remove the other matching rules. Transactions outside the new rules may lose their prior rule match.</p>
+  <p><strong>Fallback:</strong> keep the other rules for transactions the new rules do not match. A fully covered fallback remains saved but will not categorize transactions while the new rule applies. User rules take precedence over AI-created rules.</p>{% endif %}
+  {% for choice, impact in preview.impacts.items() %}
+  {% if choice == 'replace' or preview.overlaps %}<details><summary>{{ ('Replace' if choice == 'replace' else 'Keep as fallback') if preview.overlaps else 'Category changes' }}: {{ impact.count }} transaction categories would change</summary>
+    <table><thead><tr><th>Date</th><th>Transaction</th><th>Before</th><th>After</th></tr></thead><tbody>{% for row in impact.examples %}<tr><td>{{ row.date }}</td><td>{{ row.description }}</td><td>{{ row.before }}</td><td>{{ row.after }}</td></tr>{% endfor %}</tbody></table>
+    {% if impact.count > impact.examples|length %}<p>Showing the first {{ impact.examples|length }} changes. The total includes all affected transactions.</p>{% endif %}
+  </details>{% endif %}{% endfor %}
+  <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="button primary" name="choice" value="replace">{{ 'Replace old rules' if preview.overlaps else 'Apply reviewed changes' }}</button>
+    {% if preview.overlaps %}<button class="button secondary" name="choice" value="fallback">Keep old rules as fallback</button>{% endif %}
+    <button class="button secondary" name="choice" value="cancel">Cancel</button>
+  </form>
+</section>
+{% endblock %}

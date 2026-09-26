@@ -75,7 +75,7 @@ class CategoryReviewTests(unittest.TestCase):
         self.assertEqual(review.decide(self.connection, result, ['sample-1'], 'accept')['accepted'], 1)
         rows = {row['id']: row for row in self.connection.execute('SELECT * FROM transactions')}
         self.assertEqual(rows['sample-1']['category_override'], 'EXAMPLE SPECIFIC')
-        self.assertEqual(rows['sample-1']['category_override_source'], 'user')
+        self.assertEqual(rows['sample-1']['category_override_source'], 'model')
         self.assertEqual(rows['sample-1']['excluded'], 1)
         self.assertIsNone(rows['sample-2']['category_override'])
         for table in ('category_rules', 'merchant_rules', 'accounts'):

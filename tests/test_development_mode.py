@@ -181,17 +181,20 @@ class DevelopmentModeTests(unittest.TestCase):
         self.application.unlock_data(self.password)
         with self.application.db() as connection:
             create_recurring_category_rules(connection, {'details': items})
-            self.assertEqual(connection.execute("SELECT category_override_source FROM transactions WHERE id = 'guess-one'").fetchone()[0], 'user')
+            self.assertEqual(connection.execute("SELECT category_override_source FROM transactions WHERE id = 'guess-one'").fetchone()[0], None)
+            self.assertEqual(connection.execute("SELECT source FROM merchant_rules LIMIT 1").fetchone()[0], 'model')
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0], 2)
             self.assertNotIn('guess-one', load_ai_reviews(connection))
             self.assertIn('guess-two', load_ai_reviews(connection))
         page = self.client.get('/transactions?ai_review=1&purpose=all')
         self.assertEqual(page.data.count(b'AI best guess'), 1)
         self.assertNotIn(b'Example Cafe', page.data)
-        self.client.post('/api/transaction/guess-two', data={
+        response = self.client.post('/api/transaction/guess-two', data={
             'csrf_token': self.csrf_token(page), 'category_choice': 'Receipts',
             'remember_match': 'on', 'return_ai_review': '1',
         })
+        self.assertEqual(response.status_code, 303)
+        self.client.post(response.location, data={'csrf_token': self.csrf_token(page), 'choice': 'replace'})
         self.assertNotIn(b'AI best guess', self.client.get('/transactions?ai_review=1').data)
 
     def test_legacy_tentative_assignments_survive_starting_a_new_report(self):
@@ -1306,7 +1309,7 @@ class DevelopmentModeTests(unittest.TestCase):
         self.assertTrue(result["targeted"])
         self.assertEqual(result["source_transaction_count"], 1)
 
-    def test_unlock_reconciles_saved_model_result_into_historical_rule(self):
+    def test_unlock_does_not_replay_old_model_results(self):
         self.complete_setup()
         self.enable_local_ai()
         with self.application.vault.connection() as connection:
@@ -1368,8 +1371,8 @@ class DevelopmentModeTests(unittest.TestCase):
                 )
             }
         self.assertEqual(effective["recent"], "Eating Out")
-        self.assertEqual(effective["older"], "Eating Out")
-        self.assertEqual(sources, {"recent": None, "older": None})
+        self.assertEqual(effective["older"], "Groceries")
+        self.assertEqual(sources, {"recent": "model", "older": "model"})
 
     def test_completed_batches_survive_a_later_model_timeout(self):
         self.complete_setup()
@@ -1484,7 +1487,7 @@ class DevelopmentModeTests(unittest.TestCase):
             persisted_result = self.application.load_ollama_result(connection)
             effective = self.application.transaction_list(connection)
         self.assertEqual(
-            sum(value == "Food And Drink" for value in persisted.values()), 0
+            sum(value == "Food And Drink" for value in persisted.values()), 5
         )
         self.assertEqual(persisted_result["status"], "interrupted")
         self.assertEqual(

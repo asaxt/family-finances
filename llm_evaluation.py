@@ -6,6 +6,7 @@ from datetime import date, datetime
 
 from analytics import CATEGORY_RULE_JOIN, RAW_CATEGORY_SQL
 from local_chat import NoRedirect
+from category_matching import match_sql, conflict_sql
 
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
@@ -67,16 +68,8 @@ def representative_transactions(connection, today=None, transaction_ids=None):
             f"""
             SELECT t.id, t.transacted_at, t.amount, t.description, t.merchant,
                    t.category, t.category_override,
-                   EXISTS (
-                       SELECT 1 FROM merchant_rules mr
-                       WHERE (mr.account_id = t.account_id
-                              OR mr.applies_all_accounts = 1) AND (
-                           (mr.match_type = 'description'
-                            AND mr.match_value = TRIM(t.description) COLLATE NOCASE)
-                           OR (mr.match_type = 'description_contains'
-                               AND INSTR(LOWER(TRIM(t.description)), LOWER(mr.match_value)) > 0)
-                         )
-                   ) AS has_description_rule,
+                   EXISTS (SELECT 1 FROM merchant_rules candidate WHERE {match_sql()}) AS has_description_rule,
+                   {conflict_sql()} AS rule_conflict,
                    a.id AS account_id, a.type AS account_type,
                    a.subtype AS account_subtype
             FROM transactions t
@@ -93,6 +86,8 @@ def representative_transactions(connection, today=None, transaction_ids=None):
     matches = transfer_matches(rows)
     grouped = defaultdict(list)
     for row in rows:
+        if row['rule_conflict']:
+            continue
         if not targeted and (
             (row["category_override"] or row["category"]).casefold()
             != "uncategorized"
@@ -389,11 +384,17 @@ def save_ai_reviews(connection, reviews):
     )
 
 
+def dismissed_ai_categories(connection):
+    row = connection.execute("SELECT value FROM settings WHERE key = 'dismissed_ai_categories_v1'").fetchone()
+    return json.loads(row[0]) if row else {}
+
+
 def update_ai_reviews(connection, items):
     reviews = load_ai_reviews(connection)
+    dismissed = dismissed_ai_categories(connection)
     for item in items:
         for transaction_id in item.get("applied_transaction_ids", []):
-            if item.get("confidence") == 1:
+            if item.get("confidence") == 1 and dismissed.get(transaction_id) != item["category"]:
                 reviews[transaction_id] = {
                     "category": item["category"], "reason": item.get("reason", "")[:400]
                 }
@@ -404,8 +405,13 @@ def update_ai_reviews(connection, items):
 
 def dismiss_ai_reviews(connection, transaction_ids):
     reviews = load_ai_reviews(connection)
+    dismissed = dismissed_ai_categories(connection)
     for transaction_id in transaction_ids:
-        reviews.pop(transaction_id, None)
+        review = reviews.pop(transaction_id, None)
+        if review:
+            dismissed[transaction_id] = review['category']
+    connection.execute("INSERT INTO settings (key,value) VALUES ('dismissed_ai_categories_v1', ?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(dismissed),))
     save_ai_reviews(connection, reviews)
 
 
@@ -593,6 +599,7 @@ def apply_categorized_suggestions(connection, result):
                     flow_override = NULL,
                     spending_override = NULL
                 WHERE id IN ({placeholders})
+                  AND COALESCE(category_override_source, '') != 'user'
                 {category_guard}
                 RETURNING id
                 """,
@@ -627,12 +634,13 @@ def create_recurring_category_rules(connection, result):
         connection.execute(
             """
             INSERT INTO merchant_rules (
-                account_id, match_type, match_value, category
-            ) VALUES (?, 'description', ?, ?)
+                account_id, match_type, match_value, category, source
+            ) VALUES (?, 'description', ?, ?, 'model')
             ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
                 category = excluded.category,
                 flow_type = NULL,
                 spending_override = NULL
+            WHERE merchant_rules.source = 'model'
             """,
             (account_id, description, category),
         )

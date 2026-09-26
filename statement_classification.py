@@ -3,38 +3,27 @@ from datetime import date
 from collections import defaultdict
 
 from llm_evaluation import apply_categorized_suggestions
+from analytics import RAW_CATEGORY_SQL, CATEGORY_RULE_JOIN
+from category_matching import conflict_sql
 
 
 def account_rows(connection, transaction_ids=None):
     if transaction_ids == []:
         return []
     scope = ' AND t.id IN (' + ','.join('?' for _ in transaction_ids) + ')' if transaction_ids is not None else ''
-    return [dict(row) for row in connection.execute("""
+    return [dict(row) for row in connection.execute(f"""
         SELECT t.*, a.cash_flow_role, a.spending_enabled,
-               COALESCE(t.category_override, mr.category, t.category) AS effective_category,
+               {RAW_CATEGORY_SQL} AS effective_category, {conflict_sql()} AS rule_conflict,
                r.flow_type, mr.category AS rule_category
         FROM transactions t JOIN accounts a ON a.id = t.account_id
-        LEFT JOIN merchant_rules mr ON mr.id = (
-          SELECT candidate.id FROM merchant_rules candidate
-          WHERE (candidate.account_id = t.account_id
-                 OR candidate.applies_all_accounts = 1) AND (
-            (candidate.match_type = 'description' AND candidate.match_value = TRIM(t.description) COLLATE NOCASE)
-            OR (candidate.match_type = 'description_contains'
-                AND INSTR(LOWER(TRIM(t.description)), LOWER(candidate.match_value)) > 0)
-          )
-          ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
-                   LENGTH(candidate.match_value) DESC,
-                   candidate.applies_all_accounts, candidate.id
-          LIMIT 1
-        )
-        LEFT JOIN category_rules r ON r.name = COALESCE(t.category_override, mr.category, t.category) COLLATE NOCASE
+        {CATEGORY_RULE_JOIN}
         WHERE t.pending = 0 AND t.excluded = 0
     """ + scope, transaction_ids or [])]
 
 
 def needs_category(row):
     return (row['effective_category'].casefold() == 'uncategorized'
-            and not row['rule_category'] and row['category_override_source'] != 'user')
+            and not row['rule_conflict'] and not row['rule_category'] and row['category_override_source'] != 'user')
 
 
 def match_import_transfers(connection, imported_ids):

@@ -28,7 +28,7 @@ class ProductionMirrorTests(unittest.TestCase):
         self.mode.start()
         self.addCleanup(self.mode.stop)
         self.application.lock_data()
-        with patch.object(self.application, 'reconcile_saved_model_rules') as reconcile:
+        with patch.object(self.application, 'create_recurring_category_rules') as reconcile:
             self.application.unlock_data(self.password)
             reconcile.assert_not_called()
 

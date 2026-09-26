@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from analytics import CATEGORY_RULE_JOIN, EFFECTIVE_CATEGORY_SQL
+from category_matching import conflict_sql
 from llm_evaluation import (
     classify_batch, dismiss_ai_reviews, existing_category_examples,
     normalized_description, transfer_matches, validate_prediction,
@@ -46,9 +47,9 @@ def source_rows(connection):
                t.description, t.merchant, t.pending, t.excluded, t.category,
                t.category_override, t.category_override_source,
                t.flow_override, t.spending_override,
-               {EFFECTIVE_CATEGORY_SQL} AS current_category,
+               {EFFECTIVE_CATEGORY_SQL} AS current_category, {conflict_sql()} AS rule_conflict,
                a.name AS account_name, a.type AS account_type, a.subtype AS account_subtype,
-               mr.id AS rule_id, mr.category AS rule_category,
+               mr.id AS rule_id, mr.source AS rule_source, mr.category AS rule_category,
                mr.match_type AS rule_match_type, mr.match_value AS rule_match_value,
                mr.applies_all_accounts AS rule_all_accounts, r.flow_type AS category_treatment
         FROM transactions t JOIN accounts a ON a.id = t.account_id
@@ -135,7 +136,7 @@ def review_batch(result, groups, examples):
 def decide(connection, result, transaction_ids, action):
     current = {row['id']: row for row in source_rows(connection)}
     palette_unchanged = fingerprint(categories(connection)) == result['palette_fingerprint']
-    counts = {'accepted': 0, 'kept': 0, 'stale': 0}
+    counts = {'accepted': 0, 'kept': 0, 'stale': 0, 'needs_rule_change': 0}
     requested = set(transaction_ids)
     for item in result['suggestions']:
         if item['transaction_id'] not in requested or item['decision'] != 'pending':
@@ -145,9 +146,12 @@ def decide(connection, result, transaction_ids, action):
         elif (not palette_unchanged or item['transaction_id'] not in current
               or fingerprint(current[item['transaction_id']]) != item['fingerprint']):
             item['decision'] = 'stale'
+        elif (current[item['transaction_id']]['rule_conflict'] or
+              (current[item['transaction_id']]['rule_source'] == 'user' and current[item['transaction_id']]['rule_category'] != item['proposed_category'])):
+            item['decision'] = 'needs_rule_change'
         else:
             connection.execute(
-                "UPDATE transactions SET category_override = ?, category_override_source = 'user' WHERE id = ?",
+                "UPDATE transactions SET category_override = ?, category_override_source = 'model' WHERE id = ?",
                 (item['proposed_category'], item['transaction_id']),
             )
             dismiss_ai_reviews(connection, [item['transaction_id']])

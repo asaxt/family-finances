@@ -7,7 +7,7 @@
   <div class="panel-header">
     <div><h2>Find a better fit for existing categories</h2>
       <p>Compare all posted, categorized transactions with your current category labels, including labels added since the original categorization. This includes manually categorized and excluded transactions; table filters do not limit this review.</p>
-      <p><strong>No categories change during the scan.</strong> Your local model proposes changes here for you to accept or keep as they are. Accepting changes only the chosen transactions; category labels, treatments, inclusion settings, and remembered rules stay unchanged.</p>
+      <p><strong>No categories change during the scan.</strong> Your local model proposes changes here for you to accept or keep as they are. Accepted suggestions remain AI-sourced and can be superseded by user rules or individual choices. Accepting changes only the chosen transactions; category labels, treatments, inclusion settings, and remembered rules stay unchanged.</p>
     </div>
     <a class="button secondary" href="{{ url_for('transactions') }}">Back to transactions</a>
   </div>
@@ -29,10 +29,10 @@
     {% endfor %}
   </div>
   <p class="transaction-sub">{{ result.considered }} transactions considered · {{ result.pending_skipped }} pending transactions skipped · {{ result.uncategorized_skipped }} uncategorized transactions skipped. {{ result.categories|length }} current labels considered. Model suggestions can be wrong; the current label is not proof that it is the best fit.</p>
-  {% if result.last_decision is defined %}<p role="status">{{ result.last_decision.accepted }} accepted · {{ result.last_decision.kept }} kept unchanged · {{ result.last_decision.stale }} skipped because the transaction, its matching rule, or category labels changed. Run another review for skipped transactions.</p>{% endif %}
+  {% if result.last_decision is defined %}<p role="status">{{ result.last_decision.accepted }} accepted · {{ result.last_decision.kept }} kept unchanged · {{ result.last_decision.needs_rule_change or 0 }} need a saved user rule changed · {{ result.last_decision.stale }} skipped because the transaction, its matching rule, or category labels changed. Run another review for skipped transactions.</p>{% endif %}
 </section>
 <section class="panel">
-  <h2>Proposed category changes</h2>
+  <h2>Proposed category changes</h2><p>Saved user rules take priority over AI suggestions. <a class="text-link" href="{{ url_for('category_rules') }}">Review category rules</a> when a proposal needs a user rule changed.</p>
   <p>Compare the current category at review time with the proposal. Older suggestions cannot overwrite transactions edited since the scan.</p>
   {% if pending %}
   <form id="category-review-bulk" method="post" action="{{ url_for('decide_category_review') }}" class="bulk-action-bar">
@@ -59,7 +59,7 @@
   </table></div>
   {% else %}<p class="empty">{{ 'The model is still reviewing transactions. No proposed changes yet.' if result.status == 'running' else ('No pending suggestions. Your decisions are saved.' if result.suggestions else 'No category changes were proposed.') }}</p>{% endif %}
   {% if result.suggestions %}<details><summary>Decision history</summary>
-    <ul>{% for item in result.suggestions if item.decision != 'pending' %}<li>{{ item.date }} · {{ item.description }} · {{ item.current_category }} → {{ item.proposed_category }} — {{ 'Accepted' if item.decision == 'accepted' else ('Kept current category' if item.decision == 'kept' else 'Skipped: changed since review') }}</li>{% else %}<li>No decisions yet.</li>{% endfor %}</ul>
+    <ul>{% for item in result.suggestions if item.decision != 'pending' %}<li>{{ item.date }} · {{ item.description }} · {{ item.current_category }} → {{ item.proposed_category }} — {{ 'Accepted' if item.decision == 'accepted' else ('Kept current category' if item.decision == 'kept' else ('Edit the saved user rule to apply this suggestion' if item.decision == 'needs_rule_change' else 'Skipped: changed since review')) }}</li>{% else %}<li>No decisions yet.</li>{% endfor %}</ul>
   </details>{% endif %}
 </section>
 {% endif %}
