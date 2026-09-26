@@ -490,3 +490,8 @@ tr:last-child td { border-bottom: 0; }
 .plan-monthly dt { color: var(--muted); font-size: 13px; margin-top: 14px; }
 .plan-monthly dd { margin: 3px 0 0; font-weight: 650; }
 .plan-field select { width: 100%; min-width: 0; }
+
+.bulk-action-bar { flex-wrap: wrap; }
+.bulk-review-details { flex-basis: 100%; }
+.bulk-review-details summary { cursor: pointer; font-weight: 600; }
+.bulk-review-details .review-form { margin-top: 12px; max-width: 640px; }

@@ -62,6 +62,30 @@
       {% if transaction_view in ["excluded", "all"] %}<button class="button secondary bulk-button" type="submit" name="action" value="restore" disabled>Restore selected</button>{% endif %}
       {% if transaction_view in ["active", "all"] %}<button class="button primary bulk-button" type="submit" name="action" value="exclude" disabled>Exclude selected</button>{% endif %}
     </div>
+    <details class="bulk-review-details">
+      <summary>Review details for selected transactions</summary>
+      <div class="review-form">
+        <label class="check-label"><input id="bulk-edit-treatment" type="checkbox" name="edit_category_treatment"> Edit treatment for the chosen category</label>
+        <label id="bulk-treatment-label" hidden>Category cash-flow treatment (applies to all transactions in this category)
+          <select id="bulk-treatment" name="category_flow_type" disabled>
+            {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Remembered category rules
+          <select id="bulk-rule-action" name="rule_action">
+            <option value="__no_change__">No change to rules</option>
+            <option value="remember">Remember the chosen category for matching descriptions</option>
+            <option value="remove">Remove the matching rule for each selected transaction</option>
+          </select>
+        </label>
+        <div id="bulk-match-options" hidden>
+          <label class="check-label"><input type="checkbox" name="apply_all_accounts" checked> Apply rules to matching transactions in all accounts</label>
+          <label>Description text to match<input id="bulk-match-value" name="match_value" maxlength="255" placeholder="Leave blank to use each full description"></label>
+          <p class="transaction-sub">Enter a shared phrase found in every selected description, or leave blank to remember each full description. Choose a category above. Uncheck all accounts to limit rules to the selected accounts.</p>
+        </div>
+        <p class="transaction-sub">Only settings you change are applied. Remembering or removing rules can affect unselected and future matching transactions; their individual category overrides still take priority. Description text defines a rule and does not rename transactions.</p>
+      </div>
+    </details>
   </form>
 
   <form id="transaction-table-filters" method="get">
@@ -397,7 +421,43 @@
     showTreatmentEditor();
   }
   reviewCategory.addEventListener("change", showReviewNewCategory);
+  const bulkEditTreatment = document.querySelector("#bulk-edit-treatment");
+  const bulkTreatment = document.querySelector("#bulk-treatment");
+  const bulkRuleAction = document.querySelector("#bulk-rule-action");
+  function updateBulkDetails() {
+    document.querySelector("#bulk-treatment-label").hidden = !bulkEditTreatment.checked;
+    bulkTreatment.disabled = !bulkEditTreatment.checked;
+    document.querySelector("#bulk-match-options").hidden = bulkRuleAction.value !== "remember";
+  }
+  bulkEditTreatment.addEventListener("change", updateBulkDetails);
+  bulkRuleAction.addEventListener("change", updateBulkDetails);
+  document.querySelector("#bulk-transaction-form").addEventListener("submit", async event => {
+    if (event.submitter?.value !== "apply") return;
+    event.preventDefault();
+    if ((bulkEditTreatment.checked || bulkRuleAction.value === "remember")
+        && ["", "__no_change__"].includes(bulkCategory.value)) {
+      showNotice("Choose a category when changing treatment or remembering a rule.", "error");
+      bulkCategory.focus();
+      return;
+    }
+    const data = new FormData(event.currentTarget);
+    data.set("action", "apply");
+    bulkButtons.forEach(button => button.disabled = true);
+    try {
+      const response = await fetch("/api/transactions/bulk", {method: "POST", body: data});
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(response.status === 400 && !message.includes("<")
+          ? message : "Changes could not be saved. Refresh the page and try again.");
+      }
+      location.href = response.url;
+    } catch (error) {
+      showNotice(error.message, "error");
+      updateBulkSelection();
+    }
+  });
   bulkCategory.addEventListener("change", () => {
+    bulkTreatment.value = categoryFlowDefaults[bulkCategory.value] || "spending";
     const show = bulkCategory.value === "__new__";
     bulkNewCategory.hidden = !show;
     bulkNewCategoryFlow.hidden = !show;
