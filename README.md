@@ -69,6 +69,60 @@ SQL, modify records, or initiate bank operations. The app does not save chat
 history or log prompt/answer text. Leaving the page or choosing **New chat**
 clears the conversation. The existing local AI switch also disables chat.
 
+## Lifetime planning (development preview)
+
+**Plan** models two spouses with independent income, saving rates, pre-tax/Roth
+balances, retirement ages, and Washington/Oregon residence
+and physical work locations. Choose married filing jointly or separately.
+Separate returns require an explicit income-allocation assumption for community
+property. The household shares brokerage investments, inflation, growth, one withdrawal
+percentage, and a withdrawal start choice (first spouse retired or both retired).
+
+Yearly spending uses the last 12 complete calendar months and Spending Trends
+classification. Refunds reduce spending; transfers, pending and excluded records
+are omitted. Missing months and mixed currencies prevent calculation. Review
+coverage and subtract only income-tax payments already counted in spending.
+
+Each person's wages and new retirement contributions stop at their retirement
+age. Contributions use the indexed 2026 employee-plan base limit; catch-ups,
+IRA contributions, and employer matches are not included. The shared withdrawal rate applies to the combined opening investment balance.
+Half the dollar amount comes from retirement and half from brokerage; when one
+pool cannot supply its half, the other covers the remainder, capped after growth.
+Retirement withdrawals are allocated proportionally across all owners and tax
+types, including a spouse still working.
+Pre-tax withdrawals are taxable; Roth withdrawals are assumed qualified.
+After modeled taxes and spending, surplus is reinvested in brokerage. Deficits
+are funding gaps under the elected rate, even with assets remaining. There are
+no automatic extra withdrawals. Both balances grow at
+the selected rate, with cash flows at year end.
+
+Federal income/payroll taxes and Oregon/Washington income-tax estimates are
+shown separately. The model includes Oregon work sourcing and proportional
+interstate credits, and Washington's enacted ordinary-income tax from 2028.
+See [tax coverage and official sources](docs/planning-taxes.md) for assumptions,
+indexing, community-property choices, and exclusions. This is a planning
+illustration, not a tax return or a probability of success.
+
+Charts and annual tables run until the younger spouse reaches 95 (both remain
+alive in the model; supported age gap is at most 25 years). Comparisons are
+page-only. Explicitly saving household profiles and assumptions writes to the
+existing encrypted vault. Calculation never writes records. In the read-only
+development mirror, saving is disabled and all edits remain temporary.
+
+The monthly spending view compares the recorded 12-month average with the
+inflation-adjusted cost of the same lifestyle and after-tax income/withdrawals
+in any projection year. It defaults to the first year both spouses are retired.
+Combined withdrawals already include brokerage. Monthly surplus and unfunded
+gaps are shown without extra top-ups; the view does not claim a sustainable
+maximum spending level. Monthly amounts are annual averages,
+converted to today's purchasing power using the cash-flow year's inflation
+factor. The current comparable average removes tax payments already in spending.
+
+Saved plans from the earlier per-person-withdrawal preview are translated in
+memory without rewriting the vault. Matching old rates become the shared rate;
+differing rates require a new selection. The page asks the user to review the
+changed withdrawal behavior before explicitly saving.
+
 ## Developer setup
 
 Development never clears categories or rules on unlock. A configured production

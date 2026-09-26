@@ -32,6 +32,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 import statement_import as statements
 import local_chat
+import projections
 from statement_classification import eligible_import_ids, match_import_transfers
 
 from schema import SchemaError, prepare_encrypted_database
@@ -53,6 +54,7 @@ from analytics import (
     category_details,
     cash_flow_summary,
     long_term_trends,
+    planning_spending_trend,
     month_label,
     rolling_spending_summary,
     spending_summary,
@@ -304,7 +306,7 @@ def require_login():
         if not expected or not submitted or not secrets.compare_digest(expected, submitted):
             abort(400, "The form expired. Reload the page and try again.")
     if READ_ONLY_MIRROR and request.method == "POST" and request.endpoint not in {
-        "login", "logout", "assistant_answer", "update_local_ai", "update_overview_lookback",
+        "login", "logout", "assistant_answer", "projection_compare", "update_local_ai", "update_overview_lookback",
     }:
         return jsonify(error="Development is a read-only production snapshot. Make data and categorization changes in the production app."), 403
     if request.endpoint in {"static", "favicon", "health", "login", "setup"}:
@@ -1554,6 +1556,74 @@ def savings():
     context["saved_count"] = request.args.get("saved")
     context["savings_error"] = request.args.get("error")
     return render_template("savings.html", **context)
+
+
+@app.get("/plan")
+def planning_page():
+    context = page_context("plan")
+    context.update(savings_data())
+    context["plan_starting_assets"] = (
+        context["all_savings_total"]
+        if any(account["recorded_on"] for account in context["savings_accounts"])
+        else None
+    )
+    with db() as connection:
+        context["planning_trend"] = planning_spending_trend(connection)
+    context["plan_end_age"] = projections.END_AGE
+    context["plan_withdrawal_updated"] = False
+    saved = setting("household_plan")
+    try:
+        context["household_plan"], context["plan_withdrawal_updated"] = projections.restore_saved_plan(json.loads(saved)) if saved else (None, False)
+    except (ValueError, TypeError):
+        context["household_plan"] = None
+    if context["household_plan"] is None:
+        context["household_plan"] = dict(
+            people=[dict(name=f"Person {i + 1}", annual_income="", tax_advantaged_rate=0,
+                contribution_type="pre_tax", current_age="", retirement_age=67,
+                starting_pretax="", starting_roth="", residence_state="", employment_state="",
+                work_state_percent=100) for i in range(2)],
+            starting_taxable=context["classification_totals"]["taxable"] / 100 if context["plan_starting_assets"] is not None else "",
+            inflation_rate=2.5, growth_rate=5, tax_payments_in_spending=0,
+            withdrawal_rate=4, withdrawal_start="first_retirement",
+            filing_status="joint", mfs_allocation="")
+    return render_template("plan.html", **context)
+
+
+@app.post("/api/projections")
+def projection_compare():
+    if request.content_length and request.content_length > 10000:
+        return jsonify(error="The planning request is too large."), 413
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) != {"baseline", "comparison"}:
+        return jsonify(error="Send a baseline and a comparison plan."), 400
+    try:
+        baseline = projections.validate(payload["baseline"])
+        comparison = projections.validate(payload["comparison"])
+        if [p["current_age"] for p in baseline["people"]] != [p["current_age"] for p in comparison["people"]]:
+            raise projections.ProjectionError("Scenarios must use the same current ages. Clear the comparison to change them.")
+        with db() as connection:
+            trend = planning_spending_trend(connection)
+        spending = trend["annual_spending"]
+        if spending is None:
+            raise projections.ProjectionError("A usable 12-month spending estimate is needed. Review the data coverage on Plan.")
+        return jsonify(baseline=projections.project(baseline, spending / 100),
+                       comparison=projections.project(comparison, spending / 100),
+                       spending_date_from=trend["date_from"],
+                       spending_date_to=trend["date_to"])
+    except projections.ProjectionError as error:
+        return jsonify(error=str(error)), 400
+
+
+@app.post("/api/plan-settings")
+def save_household_plan():
+    if request.content_length and request.content_length > 10000:
+        return jsonify(error="The planning request is too large."), 413
+    try:
+        plan = projections.validate(request.get_json(silent=True))
+    except projections.ProjectionError as error:
+        return jsonify(error=str(error)), 400
+    save_setting("household_plan", json.dumps(plan, separators=(",", ":")))
+    return jsonify(saved=True)
 
 
 @app.get("/assistant")

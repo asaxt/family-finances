@@ -1,6 +1,6 @@
 // Mirror controls are disabled for clarity; the server and database enforce it.
 (() => {
-  const allowed = new Set(['/logout', '/api/local-ai', '/api/overview-lookback']);
+  const allowed = new Set(['/logout', '/api/local-ai', '/api/overview-lookback', '/api/projections']);
   for (const form of document.forms) {
     if (form.method.toLowerCase() !== 'post' || allowed.has(new URL(form.action).pathname)) continue;
     for (const control of form.elements) control.disabled = true;

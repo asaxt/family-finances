@@ -641,6 +641,42 @@ def daily_trends(connection, account_id=None, connection_id=None):
     return [dict(row) for row in rows]
 
 
+def planning_spending_trend(connection, today=None):
+    """Use Trends' spending treatment over the last 12 completed months."""
+    today = today or date.today()
+    end = today.replace(day=1) - timedelta(days=1)
+    start = date(today.year - 1, today.month, 1)
+    rows = connection.execute(
+        f"""
+        SELECT substr(t.transacted_at, 1, 7) AS month,
+               SUM(CASE WHEN t.currency = 'USD' THEN {SPEND_SQL} ELSE 0 END) AS spending,
+               COUNT(*) AS records,
+               SUM(CASE WHEN t.currency != 'USD' THEN 1 ELSE 0 END) AS other_currency,
+               SUM(CASE WHEN ({EFFECTIVE_CASH_FLOW_SQL}) IS NULL THEN 1 ELSE 0 END) AS unclassified
+        FROM transactions t
+        JOIN accounts a ON a.id = t.account_id
+        {CATEGORY_RULE_JOIN}
+        WHERE t.pending = 0 AND t.excluded = 0 AND a.spending_enabled = 1
+          AND t.transacted_at BETWEEN ? AND ?
+        GROUP BY substr(t.transacted_at, 1, 7)
+        ORDER BY month
+        """,
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+    by_month = {row["month"]: dict(row) for row in rows}
+    months = [by_month.get(month, {"month": month, "spending": None, "records": 0,
+                                 "other_currency": 0, "unclassified": 0})
+              for month in month_range(start.strftime("%Y-%m"), end.strftime("%Y-%m"))]
+    observed = sum(month["records"] > 0 for month in months)
+    other_currency = sum(month["other_currency"] for month in months)
+    total = sum(month["spending"] or 0 for month in months)
+    available = observed == 12 and not other_currency and total >= 0
+    return {"date_from": start.isoformat(), "date_to": end.isoformat(), "months": months,
+            "observed_months": observed, "other_currency": other_currency,
+            "unclassified": sum(month["unclassified"] for month in months),
+            "annual_spending": total if available else None}
+
+
 def long_term_trends(connection, account_id=None, connection_id=None, kind="spending"):
     scope_sql, scope_params = scope_filter(account_id, connection_id)
     earnings = kind == "earnings"
