@@ -136,7 +136,18 @@ def project(values, annual_spending, start_year=None):
                 withdrawal=withdrawal, spending=spending, taxable_cash_flow=cash_flow,
                 shortfall=shortfall, **taxes).items()}))
     both_retired = int(max(p['retirement_age'] - p['current_age'] for p in people))
+    monthly = []
+    for opening, closing in zip(rows, rows[1:]):
+        available = closing['income'] + closing['withdrawal'] - closing['tax_advantaged_savings'] - closing['taxes']
+        gap = max(0, closing['spending'] - available)
+        monthly.append(dict(year=opening['year'], ages=opening['ages'], factor=opening['factor'],
+            retired_count=sum(age >= person['retirement_age'] for age, person in zip(opening['ages'], people)),
+            **{key: value / 12 for key, value in dict(spending=closing['spending'],
+                available=available, difference=available - closing['spending'],
+                brokerage_draw=max(0, gap - closing['shortfall']), shortfall=closing['shortfall'],
+                taxes=closing['taxes']).items()}))
     return dict(rows=rows, retirement=rows[both_retired], final=rows[-1],
+                monthly=monthly, first_retirement_monthly=monthly[both_retired],
                 annual_spending=annual_spending, adjusted_annual_spending=spending_base,
                 annual_tax_advantaged_savings=rows[1]['tax_advantaged_savings'],
                 annual_taxable_savings=rows[1]['taxable_cash_flow'],

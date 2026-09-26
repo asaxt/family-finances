@@ -7,6 +7,7 @@
   const unpin = document.getElementById('plan-unpin');
   const mode = document.getElementById('plan-dollar-mode');
   const status = document.getElementById('plan-result-status');
+  const monthlyYear = document.getElementById('plan-monthly-year');
   const source = JSON.parse(document.getElementById('plan-data').textContent);
   const fields = ['starting_taxable', 'inflation_rate', 'growth_rate', 'tax_payments_in_spending'];
   const personNumbers = ['annual_income', 'tax_advantaged_rate', 'current_age', 'retirement_age',
@@ -53,6 +54,16 @@
     summary.replaceChildren(); table.replaceChildren();
     const comparing = baseline && JSON.stringify(plans.baseline) !== JSON.stringify(plans.comparison);
     const scenarios = comparing ? [['baseline', 'Baseline'], ['comparison', 'Current plan']] : [['comparison', 'Current plan']];
+    const selectedYear = monthlyYear.value || String(calculated.comparison.first_retirement_monthly.year);
+    monthlyYear.replaceChildren();
+    for (const month of calculated.comparison.monthly) {
+      const option = document.createElement('option');
+      option.value = String(month.year);
+      option.textContent = `${month.year} · ages ${month.ages.join(' & ')} · ${['Neither retired', 'One retired', 'Both retired'][month.retired_count]}`;
+      monthlyYear.append(option);
+    }
+    monthlyYear.value = selectedYear;
+    renderMonthly(scenarios);
     const datasets = [];
     for (const [key, name] of scenarios) {
       const result = calculated[key], plan = plans[key];
@@ -94,6 +105,44 @@
         plugins: {tooltip: {callbacks: {label: item => `${item.dataset.label}: ${format.format(item.parsed.y)}`}}}}
     });
   }
+  function renderMonthly(scenarios) {
+    if (!calculated) return;
+    if (!Array.isArray(scenarios)) {
+      const comparing = baseline && JSON.stringify(plans.baseline) !== JSON.stringify(plans.comparison);
+      scenarios = comparing ? [['baseline', 'Baseline'], ['comparison', 'Current plan']] : [['comparison', 'Current plan']];
+    }
+    const summary = document.getElementById('plan-monthly-summary');
+    summary.replaceChildren();
+    for (const [key, name] of scenarios) {
+      const result = calculated[key];
+      const month = result.monthly.find(row => row.year === Number(monthlyYear.value));
+      if (!month) continue;
+      const factor = mode.value === 'real' ? month.factor : 1;
+      const money = value => `${format.format(value)} / month`;
+      const card = document.createElement('article');
+      const heading = document.createElement('h3'); heading.textContent = `${name} · ${month.year}`;
+      const note = document.createElement('p'); note.className = 'plan-note';
+      note.textContent = `${['Neither spouse retired', 'One spouse retired', 'Both spouses retired'][month.retired_count]} · ages ${month.ages.join(' & ')}. Projection amounts are ${mode.value === 'real' ? "in today's purchasing power" : 'in future dollars'}.`;
+      const list = document.createElement('dl');
+      const items = [
+        ['Current comparable spending (today’s dollars)', result.adjusted_annual_spending / 12],
+        ['Needed to maintain today’s lifestyle', month.spending / factor],
+        ['Available after tax from income & retirement withdrawals', month.available / factor],
+        ['Difference before brokerage top-up', month.difference / factor],
+        ['Planned brokerage top-up', month.brokerage_draw / factor],
+        ['Unfunded spending gap', month.shortfall / factor]
+      ];
+      for (const [label, amount] of items) {
+        const term = document.createElement('dt'); term.textContent = label;
+        const value = document.createElement('dd'); value.textContent = money(amount);
+        list.append(term, value);
+      }
+      const adjustment = document.createElement('p'); adjustment.className = 'plan-note';
+      adjustment.textContent = `Current recorded average: ${money(result.annual_spending / 12)}. Comparable spending removes income-tax payments already counted in that history. Modeled taxes in the selected year: ${money(month.taxes / factor)}, already deducted from available spending.`;
+      card.append(heading, note, list, adjustment); summary.append(card);
+    }
+  }
+  monthlyYear.addEventListener('change', renderMonthly);
   form.addEventListener('input', () => {
     revision++; updateDerived(); pin.disabled = true;
     if (calculated) status.textContent = 'Inputs changed. Calculate again to update these results.';
@@ -111,6 +160,7 @@
   window.addEventListener('pagehide', () => {
     controller?.abort(); calculated = null; plans = null; baseline = null; chart?.destroy();
     document.getElementById('plan-summary').replaceChildren(); document.getElementById('plan-table').replaceChildren();
+    document.getElementById('plan-monthly-summary').replaceChildren(); monthlyYear.replaceChildren(); monthlyYear.value = '';
     form.reset(); results.hidden = true; unpin.hidden = true; error.hidden = true; updateDerived();
   });
   form.addEventListener('submit', async event => {
@@ -134,6 +184,7 @@
         throw new Error('Your source data changed. Reload Plan to review the updated spending estimate.');
       }
       calculated = data; plans = submitted; results.hidden = false;
+      monthlyYear.value = '';
       updateDerived();
       pin.disabled = revision !== submittedRevision;
       status.textContent = pin.disabled ? 'Inputs changed. Calculate again to update these results.'

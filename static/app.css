@@ -485,4 +485,8 @@ tr:last-child td { border-bottom: 0; }
 
 .plan-person { border: 1px solid var(--line); border-radius: 12px; margin: 24px 0 0; padding: 20px; min-width: 0; }
 .plan-person legend { padding: 0 8px; font-weight: 650; }
+.plan-monthly { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+.plan-monthly dl { margin: 16px 0 0; }
+.plan-monthly dt { color: var(--muted); font-size: 13px; margin-top: 14px; }
+.plan-monthly dd { margin: 3px 0 0; font-weight: 650; }
 .plan-field select { width: 100%; min-width: 0; }

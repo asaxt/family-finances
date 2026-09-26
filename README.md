@@ -104,6 +104,14 @@ page-only. Explicitly saving household profiles and assumptions writes to the
 existing encrypted vault. Calculation never writes records. In the read-only
 development mirror, saving is disabled and all edits remain temporary.
 
+The monthly spending view compares the recorded 12-month average with the
+inflation-adjusted cost of the same lifestyle and after-tax income/withdrawals
+in any projection year. It defaults to the first year both spouses are retired.
+Brokerage top-ups and remaining funding gaps are separate; the view does not
+claim a sustainable maximum spending level. Monthly amounts are annual averages,
+converted to today's purchasing power using the cash-flow year's inflation
+factor. The current comparable average removes tax payments already in spending.
+
 ## Developer setup
 
 Development never clears categories or rules on unlock. A configured production

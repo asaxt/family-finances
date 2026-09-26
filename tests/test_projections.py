@@ -35,6 +35,40 @@ def seed_trend(connection):
 
 
 class ProjectionMathTests(unittest.TestCase):
+    def test_monthly_retirement_uses_first_retired_year_and_its_inflation(self):
+        result = project(sample_plan(inflation_rate=10), 600, start_year=2026)
+        monthly = result['first_retirement_monthly']
+        self.assertEqual(monthly['year'], 2028)
+        self.assertEqual(monthly['ages'], [42, 42])
+        self.assertEqual(monthly['retired_count'], 2)
+        self.assertAlmostEqual(monthly['available'], 121 / 12)
+        self.assertAlmostEqual(monthly['spending'], 60.5)
+        self.assertAlmostEqual(monthly['spending'] / monthly['factor'], 50)
+        self.assertAlmostEqual(monthly['available'] + monthly['brokerage_draw'] + monthly['shortfall'], monthly['spending'])
+        self.assertEqual(len(result['monthly']), len(result['rows']) - 1)
+
+    def test_monthly_brokerage_is_a_draw_not_recurring_income(self):
+        plan = sample_plan(retirement_age=40, starting_pretax=0, starting_taxable=1000)
+        plan['people'][1]['retirement_age'] = 40
+        result = project(plan, 600, start_year=2026)
+        first, second, third = result['monthly'][:3]
+        self.assertEqual(result['first_retirement_monthly']['year'], 2026)
+        self.assertEqual(first['available'], 0)
+        self.assertEqual(first['brokerage_draw'], 50)
+        self.assertEqual(first['shortfall'], 0)
+        self.assertAlmostEqual(second['brokerage_draw'], 400 / 12)
+        self.assertAlmostEqual(second['shortfall'], 200 / 12)
+        self.assertEqual(third['shortfall'], 50)
+
+    def test_monthly_available_deducts_taxes_and_uses_adjusted_spending(self):
+        result = project(sample_plan(annual_income=100000, tax_payments_in_spending=120), 600, start_year=2026)
+        monthly = result['monthly'][0]
+        yearly = result['rows'][1]
+        self.assertEqual(monthly['spending'], 40)
+        self.assertAlmostEqual(monthly['available'], (yearly['income'] - yearly['tax_advantaged_savings'] - yearly['taxes']) / 12)
+        self.assertAlmostEqual(monthly['difference'], yearly['taxable_cash_flow'] / 12)
+        self.assertEqual(monthly['brokerage_draw'], 0)
+
     def test_income_allocates_after_taxes_and_retirement_stops_contributions(self):
         result = project(sample_plan(), 600, start_year=2026)
         self.assertEqual(result['annual_tax_advantaged_savings'], 100)

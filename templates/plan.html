@@ -58,6 +58,7 @@
     <div class="panel-header"><div><p class="eyebrow">Calculated for you</p><h2>Your yearly spending and savings</h2></div></div>
     <div class="plan-summary">
       <article><h3>Recorded yearly spending</h3><p class="metric-value">{{ planning_trend.annual_spending|money if planning_trend.annual_spending is not none else 'Not available' }}</p><p class="plan-note">12-month monthly average × 12, using {{ planning_trend.date_from }} through {{ planning_trend.date_to }}.</p></article>
+      <article><h3>Current monthly spending average</h3><p class="metric-value">{{ (planning_trend.annual_spending / 12)|money if planning_trend.annual_spending is not none else 'Not available' }}</p><p class="plan-note">Average across the last 12 completed months, not this month's spending to date. Individual recorded months are listed below.</p></article>
       <article><h3>Savings / money out → taxable brokerage</h3><p id="plan-taxable-savings" class="metric-value">—</p><p class="plan-note">Gross income − retirement savings − modeled taxes − adjusted spending, plus retirement withdrawals when applicable.</p><p id="plan-tax-advantaged" class="plan-note"></p></article>
     </div>
     {{ number('tax_payments_in_spending', 'Income-tax payments already included in recorded spending ($ / year)', household_plan.tax_payments_in_spending, min=-100000000, step='0.01', help='Remove only income-tax payments already counted above, net of refunds; use a negative amount if refunds exceed payments. Do not include payroll withholding absent from transactions, property tax, or sales tax. The model adds its own estimated income taxes.') }}
@@ -84,6 +85,14 @@
   </div>
   <p id="plan-result-status" class="plan-note" role="status"></p>
   <div class="plan-actions"><button class="button secondary" id="plan-pin" type="button">Keep as baseline</button><button class="button secondary" id="plan-unpin" type="button" hidden>Clear comparison</button><span class="plan-note">Keep a baseline, edit any input, then calculate again to compare.</span></div>
+  <section class="plan-monthly" aria-labelledby="plan-monthly-heading">
+    <div class="panel-header"><div><p class="eyebrow">Your monthly lifestyle</p><h2 id="plan-monthly-heading">Spending now and in retirement</h2></div>
+      <label class="plan-field"><span>Projection year</span><select id="plan-monthly-year"></select></label>
+    </div>
+    <p class="plan-note">Starts with the first year both spouses are retired. Choose any year to see the transition or later retirement. Figures are monthly averages of the annual model, not a month-by-month forecast.</p>
+    <div id="plan-monthly-summary" class="plan-summary" aria-live="polite"></div>
+    <p class="plan-note">Available spending is income plus your chosen retirement withdrawals, minus retirement saving and modeled taxes. Brokerage top-ups are shown separately and can run out. These figures do not establish a sustainable maximum spending budget. Social Security benefits and other excluded income are not included.</p>
+  </section>
   <div class="plan-chart"><canvas id="plan-chart" role="img" aria-label="Projected retirement and taxable investment balances, also shown in the year-by-year table."></canvas></div>
   <div id="plan-summary" class="plan-summary"></div>
   <details class="plan-sources"><summary>Year-by-year numbers</summary>
