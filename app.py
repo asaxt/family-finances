@@ -60,6 +60,8 @@ from analytics import (
     spending_summary,
     transaction_list,
 )
+import category_review
+
 from llm_evaluation import (
     AI_REVIEW_SETTING,
     apply_categorized_suggestions,
@@ -2598,6 +2600,81 @@ def transaction_cleanup_redirect():
             ai_review="1" if request.form.get("return_ai_review") == "1" else None,
         )
     )
+
+
+def run_category_review(result, groups, examples):
+    try:
+        for start in range(0, len(groups), category_review.BATCH_SIZE):
+            category_review.review_batch(result, groups[start:start + category_review.BATCH_SIZE], examples)
+            with db() as connection:
+                category_review.save(connection, result)
+        result["status"] = "completed"
+    except Exception:
+        result["status"] = "interrupted"
+        result["error"] = "The local review stopped early. Completed suggestions are saved; no categories were changed."
+        app.logger.warning("Local category review interrupted.")
+    finally:
+        try:
+            with db() as connection:
+                category_review.save(connection, result)
+        except Exception:
+            app.logger.warning("Category review could not save progress; the vault may be locked.")
+        OLLAMA_EVALUATION_LOCK.release()
+
+
+@app.post("/api/local-ai/category-review/start")
+def start_category_review():
+    if not local_ai_enabled():
+        return jsonify(error="Turn on Local AI in Settings before starting a review."), 403
+    if not OLLAMA_EVALUATION_LOCK.acquire(blocking=False):
+        return jsonify(error="Another local categorization or review is running. Wait for it to finish."), 409
+    try:
+        with db() as connection:
+            previous = category_review.load(connection)
+            if previous and any(item["decision"] == "pending" for item in previous["suggestions"]):
+                OLLAMA_EVALUATION_LOCK.release()
+                return jsonify(error="Accept or keep the pending suggestions before starting another review."), 409
+            result, groups, examples = category_review.prepare(connection)
+            category_review.save(connection, result)
+        threading.Thread(target=run_category_review, args=(result, groups, examples), daemon=True).start()
+        return jsonify(report_url=url_for("category_review_report"))
+    except ValueError as error:
+        OLLAMA_EVALUATION_LOCK.release()
+        return jsonify(error=str(error)), 400
+    except Exception:
+        OLLAMA_EVALUATION_LOCK.release()
+        return jsonify(error="The category review could not start. Try again after unlocking the app."), 500
+
+
+@app.get("/local-ai/category-review")
+def category_review_report():
+    with db() as connection:
+        result = category_review.load(connection)
+        if result and result["status"] == "running" and not OLLAMA_EVALUATION_LOCK.locked():
+            result["status"] = "interrupted"
+            result["error"] = "The review was interrupted. Completed suggestions are saved; no categories were changed."
+            if not READ_ONLY_MIRROR:
+                category_review.save(connection, result)
+    context = page_context("transactions")
+    pending = [item for item in result["suggestions"] if item["decision"] == "pending"] if result else []
+    context.update(result=result, pending=pending)
+    return render_template("category_review.html", **context)
+
+
+@app.post("/api/local-ai/category-review/decide")
+def decide_category_review():
+    action = request.form.get("action")
+    if action not in {"accept", "keep"}:
+        abort(400)
+    with db() as connection:
+        result = category_review.load(connection)
+        if not result or request.form.get("review_id") != result["id"]:
+            return "This review has been replaced. Reload the category review page.", 409
+        if result["status"] == "running" and OLLAMA_EVALUATION_LOCK.locked():
+            return "Wait for the review to finish before making decisions.", 409
+        transaction_ids = request.form.getlist("transaction_ids")
+        category_review.decide(connection, result, transaction_ids, action)
+    return redirect(url_for("category_review_report"))
 
 
 @app.post("/api/local-ai/evaluation")

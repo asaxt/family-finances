@@ -23,6 +23,7 @@
       <a class="button secondary" href="{{ url_for('statement_import', account=account_id) }}">Add a statement</a>
       {% endif %}
       <a class="button secondary" href="{{ url_for('transactions', ai_review='1', purpose='all') }}">Review AI guesses</a>
+      <a class="button secondary" href="{{ url_for('category_review_report') }}">AI category review</a>
       <span class="pill">{{ profiles|length }} household member{{ "" if profiles|length == 1 else "s" }}</span>
     </div>
   </div>
