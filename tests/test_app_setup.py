@@ -49,6 +49,85 @@ class AppSetupTests(unittest.TestCase):
             rb'name="csrf_token" value="([^"]+)"', response.data
         ).group(1).decode()
 
+    def prepare_bulk_review(self):
+        page = self.client.get("/setup")
+        self.client.post("/setup", data={
+            "csrf_token": self.csrf_token(page),
+            "password": "fictional bulk test password",
+            "confirmation": "fictional bulk test password",
+        })
+        with self.application.db() as connection:
+            connection.execute("INSERT INTO connections (id, owner_name, institution, access_token) "
+                               "VALUES (1, 'EXAMPLE PERSON', 'EXAMPLE BANK', 'fake-token')")
+            for account in ("sample-a", "sample-b"):
+                connection.execute(
+                    "INSERT INTO accounts (id, connection_id, institution, name, type) "
+                    "VALUES (?, 1, 'EXAMPLE BANK', 'EXAMPLE ACCOUNT', 'depository')", (account,))
+            for identifier, account, description in (
+                ("sample-1", "sample-a", "SAMPLE CAFE ALPHA"),
+                ("sample-2", "sample-b", "SAMPLE CAFE BETA"),
+                ("sample-3", "sample-b", "SAMPLE CAFE GAMMA"),
+            ):
+                connection.execute(
+                    "INSERT INTO transactions (id, account_id, amount, currency, description, "
+                    "pending, transacted_at, category, excluded, flow_override) "
+                    "VALUES (?, ?, 123, 'USD', ?, 0, '2001-01-02', 'EXAMPLE CATEGORY', 1, 'transfer')",
+                    (identifier, account, description))
+            connection.execute("INSERT INTO category_rules (name, flow_type) "
+                               "VALUES ('EXAMPLE CATEGORY', 'spending')")
+        page = self.client.get("/transactions?purpose=all&view=all")
+        self.assertIn(b"Review details for selected transactions", page.data)
+        return {"csrf_token": self.csrf_token(page), "action": "apply",
+                "transaction_ids": ["sample-1", "sample-2"],
+                "category_choice": "EXAMPLE CATEGORY"}
+
+    def test_bulk_review_shared_phrase_and_treatment(self):
+        data = self.prepare_bulk_review()
+        data.update(rule_action="remember", match_value="sample cafe", apply_all_accounts="on",
+                    edit_category_treatment="on", category_flow_type="earned_income", inclusion="include")
+        self.assertEqual(self.client.post("/api/transactions/bulk", data=data).status_code, 302)
+        with self.application.db() as connection:
+            rules = connection.execute("SELECT match_type, match_value, applies_all_accounts FROM merchant_rules").fetchall()
+            self.assertEqual([tuple(row) for row in rules], [("description_contains", "sample cafe", 1)])
+            rows = connection.execute("SELECT id, category_override_source, flow_override, excluded FROM transactions ORDER BY id").fetchall()
+            self.assertEqual([tuple(row) for row in rows], [
+                ("sample-1", "user", None, 0), ("sample-2", "user", None, 0),
+                ("sample-3", None, "transfer", 1)])
+            self.assertEqual(connection.execute("SELECT flow_type FROM category_rules WHERE name = 'EXAMPLE CATEGORY'").fetchone()[0], "earned_income")
+
+    def test_bulk_review_account_scope_and_exact_descriptions(self):
+        data = self.prepare_bulk_review()
+        data.update(rule_action="remember", match_value="SAMPLE CAFE")
+        self.client.post("/api/transactions/bulk", data=data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM merchant_rules WHERE applies_all_accounts = 0").fetchone()[0], 2)
+        data.update(match_value="", apply_all_accounts="on")
+        self.client.post("/api/transactions/bulk", data=data)
+        with self.application.db() as connection:
+            rules = connection.execute("SELECT match_type, match_value FROM merchant_rules ORDER BY match_value").fetchall()
+            self.assertEqual([tuple(row) for row in rules], [
+                ("description", "SAMPLE CAFE ALPHA"), ("description", "SAMPLE CAFE BETA")])
+
+    def test_bulk_review_invalid_phrase_is_atomic_and_defaults_preserve_rules(self):
+        data = self.prepare_bulk_review()
+        data.update(rule_action="remember", match_value="SAMPLE CAFE", apply_all_accounts="on")
+        self.client.post("/api/transactions/bulk", data=data)
+        data.update(match_value="SAMPLE CAFE ALPHA", category_choice="__new__",
+                    new_category="EXAMPLE NEW CATEGORY", new_category_flow_type="spending", inclusion="include")
+        self.assertEqual(self.client.post("/api/transactions/bulk", data=data).status_code, 400)
+        with self.application.db() as connection:
+            self.assertIsNone(connection.execute("SELECT name FROM category_rules WHERE name = 'EXAMPLE NEW CATEGORY'").fetchone())
+            self.assertEqual(connection.execute("SELECT SUM(excluded) FROM transactions").fetchone()[0], 3)
+        data.update(rule_action="__no_change__", category_choice="__no_change__")
+        self.client.post("/api/transactions/bulk", data=data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0], 1)
+        data.update(rule_action="remove")
+        self.client.post("/api/transactions/bulk", data=data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE category_override_source = 'user'").fetchone()[0], 2)
+
     def test_new_installation_creates_current_schema_and_encrypted_settings(self):
         password = "a long setup password"
         setup_page = self.client.get("/setup")

@@ -2363,6 +2363,100 @@ def recurring_match(transaction):
     return "description", transaction["description"].strip()
 
 
+def matching_transaction_rule(connection, transaction, form):
+    match_type, full_match_value = recurring_match(transaction)
+    rule_id = form.get("merchant_rule_id", "").strip()
+    return connection.execute(
+        """
+        SELECT id, category, match_type, match_value FROM merchant_rules
+        WHERE id = ? AND (account_id = ? OR applies_all_accounts = 1)
+        """,
+        (rule_id, transaction["account_id"]),
+    ).fetchone() if rule_id else connection.execute(
+        """
+        SELECT id, category, match_type, match_value FROM merchant_rules
+        WHERE (account_id = ? OR applies_all_accounts = 1) AND (
+          (match_type = 'description'
+           AND match_value = ? COLLATE NOCASE)
+          OR (match_type = 'description_contains'
+              AND INSTR(LOWER(?), LOWER(match_value)) > 0)
+        )
+        ORDER BY CASE match_type WHEN 'description' THEN 0 ELSE 1 END,
+                 LENGTH(match_value) DESC,
+                 applies_all_accounts, id
+        LIMIT 1
+        """,
+        (
+            transaction["account_id"], full_match_value, full_match_value,
+        ),
+    ).fetchone()
+
+
+def update_transaction_rule(connection, transaction, category, form, *, replace_existing=True):
+    match_type, full_match_value = recurring_match(transaction)
+    existing_rule = matching_transaction_rule(connection, transaction, form) if replace_existing else None
+    if form.get("remember_match") == "on":
+        applies_all_accounts = int(
+            form.get("apply_all_accounts") == "on"
+        )
+        match_value = form.get("match_value", "").strip() or full_match_value
+        if not match_value or len(match_value) > 255:
+            return False
+        match_type = (
+            "description"
+            if match_value.casefold() == full_match_value.casefold()
+            else "description_contains"
+        )
+        recurring_category = category or (
+            existing_rule["category"] if existing_rule else transaction["category"]
+        )
+        same_rule = existing_rule and (
+            existing_rule["match_type"] == match_type
+            and existing_rule["match_value"].casefold() == match_value.casefold()
+        )
+        if same_rule:
+            connection.execute(
+                """
+                UPDATE merchant_rules
+                SET category = ?, flow_type = NULL, spending_override = NULL,
+                    applies_all_accounts = ?
+                WHERE id = ?
+                """,
+                (recurring_category, applies_all_accounts, existing_rule["id"]),
+            )
+        else:
+            if existing_rule:
+                connection.execute(
+                    "DELETE FROM merchant_rules WHERE id = ?",
+                    (existing_rule["id"],),
+                )
+            connection.execute(
+                """
+                INSERT INTO merchant_rules (
+                    account_id, match_type, match_value, category,
+                    applies_all_accounts
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
+                    category = excluded.category,
+                    flow_type = NULL,
+                    spending_override = NULL,
+                    applies_all_accounts = excluded.applies_all_accounts
+                """,
+                (
+                    transaction["account_id"],
+                    match_type,
+                    match_value,
+                    recurring_category,
+                    applies_all_accounts,
+                ),
+            )
+    elif existing_rule:
+        connection.execute(
+            "DELETE FROM merchant_rules WHERE id = ?",
+            (existing_rule["id"],),
+        )
+
+
 @app.post("/api/transaction/<transaction_id>")
 def update_transaction(transaction_id):
     category_flow_type = request.form.get("category_flow_type", "")
@@ -2398,92 +2492,8 @@ def update_transaction(transaction_id):
                 """,
                 (category, category_flow_type),
             )
-        match_type, full_match_value = recurring_match(transaction)
-        rule_id = request.form.get("merchant_rule_id", "").strip()
-        existing_rule = connection.execute(
-            """
-            SELECT id, category, match_type, match_value FROM merchant_rules
-            WHERE id = ? AND (account_id = ? OR applies_all_accounts = 1)
-            """,
-            (rule_id, transaction["account_id"]),
-        ).fetchone() if rule_id else connection.execute(
-            """
-            SELECT id, category, match_type, match_value FROM merchant_rules
-            WHERE (account_id = ? OR applies_all_accounts = 1) AND (
-              (match_type = 'description'
-               AND match_value = ? COLLATE NOCASE)
-              OR (match_type = 'description_contains'
-                  AND INSTR(LOWER(?), LOWER(match_value)) > 0)
-            )
-            ORDER BY CASE match_type WHEN 'description' THEN 0 ELSE 1 END,
-                     LENGTH(match_value) DESC,
-                     applies_all_accounts, id
-            LIMIT 1
-            """,
-            (
-                transaction["account_id"], full_match_value, full_match_value,
-            ),
-        ).fetchone()
-        if request.form.get("remember_match") == "on":
-            applies_all_accounts = int(
-                request.form.get("apply_all_accounts") == "on"
-            )
-            match_value = request.form.get("match_value", "").strip() or full_match_value
-            if not match_value or len(match_value) > 255:
-                return transaction_cleanup_redirect()
-            match_type = (
-                "description"
-                if match_value.casefold() == full_match_value.casefold()
-                else "description_contains"
-            )
-            recurring_category = category or (
-                existing_rule["category"] if existing_rule else transaction["category"]
-            )
-            same_rule = existing_rule and (
-                existing_rule["match_type"] == match_type
-                and existing_rule["match_value"].casefold() == match_value.casefold()
-            )
-            if same_rule:
-                connection.execute(
-                    """
-                    UPDATE merchant_rules
-                    SET category = ?, flow_type = NULL, spending_override = NULL,
-                        applies_all_accounts = ?
-                    WHERE id = ?
-                    """,
-                    (recurring_category, applies_all_accounts, existing_rule["id"]),
-                )
-            else:
-                if existing_rule:
-                    connection.execute(
-                        "DELETE FROM merchant_rules WHERE id = ?",
-                        (existing_rule["id"],),
-                    )
-                connection.execute(
-                    """
-                    INSERT INTO merchant_rules (
-                        account_id, match_type, match_value, category,
-                        applies_all_accounts
-                    ) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
-                        category = excluded.category,
-                        flow_type = NULL,
-                        spending_override = NULL,
-                        applies_all_accounts = excluded.applies_all_accounts
-                    """,
-                    (
-                        transaction["account_id"],
-                        match_type,
-                        match_value,
-                        recurring_category,
-                        applies_all_accounts,
-                    ),
-                )
-        elif existing_rule:
-            connection.execute(
-                "DELETE FROM merchant_rules WHERE id = ?",
-                (existing_rule["id"],),
-            )
+        if update_transaction_rule(connection, transaction, category, request.form) is False:
+            return transaction_cleanup_redirect()
         connection.execute(
             """
             UPDATE transactions
@@ -2538,6 +2548,36 @@ def bulk_update_transactions():
                 if inclusion not in {"__no_change__", "include", "exclude"}:
                     return transaction_cleanup_redirect()
                 choice = request.form.get("category_choice", "__no_change__")
+                rule_action = request.form.get("rule_action", "__no_change__")
+                edit_treatment = request.form.get("edit_category_treatment") == "on"
+                treatment = request.form.get("category_flow_type", "")
+                match_value = request.form.get("match_value", "").strip()
+                if rule_action not in {"__no_change__", "remember", "remove"}:
+                    return "Choose a valid remembered-rule action.", 400
+                if edit_treatment and treatment not in FLOW_TYPES:
+                    return "Choose a category treatment.", 400
+                if (edit_treatment or rule_action == "remember") and choice in {"", "__no_change__"}:
+                    return "Choose a category when changing treatment or remembering a rule.", 400
+                if rule_action == "remember" and len(match_value) > 255:
+                    return "Description text must be at most 255 characters.", 400
+                selected = []
+                for start in range(0, len(transaction_ids), 500):
+                    batch = transaction_ids[start:start + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    selected.extend(connection.execute(
+                        f"SELECT id, account_id, description, merchant, "
+                        f"COALESCE(category_override, category) AS category "
+                        f"FROM transactions WHERE id IN ({placeholders}) ORDER BY id", batch,
+                    ).fetchall())
+                if not selected:
+                    return transaction_cleanup_redirect()
+                if rule_action == "remember" and any(
+                    not row["description"].strip()
+                    or len(match_value or row["description"].strip()) > 255
+                    or (match_value and match_value.casefold() not in row["description"].casefold())
+                    for row in selected
+                ):
+                    return "Description text must match every selected transaction. Adjust the text or selection.", 400
                 if choice != "__no_change__":
                     valid, category = selected_category(
                         connection,
@@ -2547,6 +2587,41 @@ def bulk_update_transactions():
                     )
                     if not valid:
                         return transaction_cleanup_redirect()
+                if edit_treatment:
+                    connection.execute(
+                        "INSERT INTO category_rules (name, flow_type) VALUES (?, ?) "
+                        "ON CONFLICT(name) DO UPDATE SET flow_type = excluded.flow_type",
+                        (category, treatment),
+                    )
+                if rule_action != "__no_change__":
+                    form = {
+                        "remember_match": "on" if rule_action == "remember" else "",
+                        "apply_all_accounts": request.form.get("apply_all_accounts", ""),
+                        "match_value": match_value,
+                    }
+                    # Resolve original matches before changes so shared rules are
+                    # replaced once, independent of the order of selected rows.
+                    existing_ids = {
+                        rule["id"] for row in selected
+                        if (rule := matching_transaction_rule(connection, row, {}))
+                    }
+                    for rule_id in existing_ids:
+                        connection.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
+                    if rule_action == "remember":
+                        seen = set()
+                        for transaction in selected:
+                            full_description = transaction["description"].strip()
+                            value = match_value or full_description
+                            key = (
+                                None if form["apply_all_accounts"] == "on" else transaction["account_id"],
+                                value.casefold() == full_description.casefold(),
+                                value.casefold(),
+                            )
+                            if key not in seen:
+                                update_transaction_rule(
+                                    connection, transaction, category, form, replace_existing=False,
+                                )
+                                seen.add(key)
             for start in range(0, len(transaction_ids), 500):
                 batch = transaction_ids[start : start + 500]
                 placeholders = ",".join("?" for _ in batch)
