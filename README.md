@@ -71,23 +71,34 @@ clears the conversation. The existing local AI switch also disables chat.
 
 ## Lifetime planning (development preview)
 
-Open **Plan** to compare a baseline retirement projection with a what-if path.
-The editable starting amount comes from the latest recorded balances of active
-Savings accounts; inspect the source dates and remove money reserved for other
-purposes. Enter a household timeline, annual savings, retirement spending,
-estimated retirement income, and an optional one-time expense. Compare changes
-to retirement age, contributions, spending, and nominal investment growth.
+**Plan** accepts eight inputs: annual income, tax-advantaged saving percentage,
+retirement withdrawal percentage, retirement age, current age, starting
+investments, annual inflation, and annual investment growth. The latest active
+Savings balances provide the starting total and retirement/taxable proportions.
+Editing the total preserves that split; without recorded balances, an entered
+starting amount is treated as retirement investments.
 
-The chart and annual table can display today's purchasing power or future
-dollars. Calculations use fixed annual growth, inflation-adjusted cash flows at
-year end, and explicit unfunded spending when investments are insufficient.
-Account-specific tax rules, benefits eligibility, debt amortization, and market
-volatility are not modeled. Include an allowance for taxes in spending. These
-are illustrations, not predictions or success probabilities.
+Yearly spending is inferred from the last 12 completed calendar months using
+Spending Trends treatment. Refunds reduce spending; transfers, pending records,
+and excluded transactions are omitted. Missing months and mixed currencies
+prevent calculation. Records in all 12 months do not establish complete account
+coverage; the page shows monthly totals and classification warnings for review.
 
-Calculations run locally without AI or financial-record changes, including in
-the read-only development mirror. Assumptions and results are not persisted;
-leaving or reloading the page clears the plan.
+Before retirement, tax-advantaged contributions equal income times the saving
+percentage. Income minus contributions minus spending goes to taxable brokerage
+investments; a negative remainder draws from that balance. Income and
+contributions stop at retirement. Each year's withdrawal is the selected
+percentage of the opening retirement balance, capped at funds available after
+growth. Withdrawals fund spending, with taxable investments covering the gap
+or receiving any excess. Both balances earn the chosen growth rate. Income and
+spending increase with inflation, with cash flows applied at year end.
+
+The chart and annual table distinguish retirement and taxable investments and
+can show today's or future dollars through age 95. Keep a baseline in the page,
+edit the same eight inputs, and calculate again to compare. Calculations do not
+write records, including in the development mirror. Plans are cleared on exit.
+Taxes, contribution limits, penalties, benefits, and market volatility are not
+modeled; these are illustrations, not success probabilities.
 
 ## Developer setup
 

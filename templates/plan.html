@@ -7,70 +7,71 @@
 {% endmacro %}
 {% block content %}
 <section class="panel plan-intro">
-  <div><h2>See how your choices change the picture</h2><p>Start with your investments, choose a retirement timeline, and compare two possible paths.</p></div>
+  <div><h2>Eight inputs. A plan grounded in your spending.</h2><p>Tax-advantaged contributions build retirement investments. Your remaining surplus builds taxable brokerage investments.</p></div>
   <span class="pill">Local calculation · No AI</span>
 </section>
 <form id="plan-form" method="post" action="/api/projections" autocomplete="off">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <section class="panel plan-section">
-    <div class="panel-header"><div><p class="eyebrow">1 · Starting point</p><h2>A shared foundation</h2></div></div>
-    <p class="plan-note">Use one person's age as the household timeline. This preview models one combined retirement date. All dollar inputs are in today's purchasing power.</p>
+    <div class="panel-header"><div><p class="eyebrow">Your assumptions</p><h2>The inputs you control</h2></div></div>
     <div class="plan-fields">
-      {{ number('current_age', 'Current age', min=18, max=109) }}
-      {{ number('end_age', 'Plan through age', 95, min=19, max=110) }}
-      {{ number('starting_assets', 'Starting investments ($)', '%.2f'|format(plan_starting_assets / 100) if plan_starting_assets is not none else '', max=1000000000, step='0.01', help='Editable planning value; changing it does not change your accounts.') }}
-      {{ number('inflation_rate', 'Annual inflation (%)', 2.5, max=15, step='0.1', help='Illustrative assumption, not a prediction.') }}
+      {{ number('annual_income', 'Income ($ per year)', step='0.01', help='Before tax-advantaged saving. Taxes are not calculated: account for them in income or spending, not both. Do not subtract payroll savings twice.') }}
+      {{ number('tax_advantaged_rate', 'Tax-advantaged saving (%)', 0, max=100, step='0.1', help='Percentage of annual income contributed before retirement.') }}
+      {{ number('withdrawal_rate', 'Retirement account withdrawal (%)', 4, max=100, step='0.1', help='Percentage of the remaining retirement balance withdrawn each year. The initial 4% is illustrative.') }}
+      {{ number('retirement_age', 'Retirement age', 67, min=18, max=plan_end_age-1) }}
+      {{ number('current_age', 'Current age', min=18, max=plan_end_age-1) }}
+      {{ number('starting_assets', 'Starting investments ($)', '%.2f'|format(plan_starting_assets / 100) if plan_starting_assets is not none else '', max=1000000000, step='0.01', help='Total retirement and taxable investments. Editing this only changes the plan.') }}
+      {{ number('inflation_rate', 'Annual inflation (%)', 2.5, max=15, step='0.1', help='Illustrative assumption. Income and spending rise with inflation.') }}
+      {{ number('growth_rate', 'Annual investment growth (%)', 5, min=-30, max=30, step='0.1', help='Nominal return after fees, before inflation, for both investment balances. Illustrative only.') }}
     </div>
-    <details class="plan-sources"><summary>Where the starting balance comes from</summary>
-      <p>The initial value combines the latest recorded balances of active accounts on Savings, including pre-tax, post-tax, and taxable accounts. It excludes linked bank balances, property, and debts. Remove emergency funds or money reserved for other goals. Missing balances are unknown, not evidence of zero savings.</p>
-      {% if savings_accounts %}<ul>{% for account in savings_accounts %}<li>{{ account.name }} · {{ account.classification_label }} · {{ account.amount|money if account.recorded_on else 'Unknown balance' }} · {{ account.recorded_on or 'No recorded date' }}</li>{% endfor %}</ul>{% else %}<p>No manually recorded savings accounts yet. Enter a starting amount above or add accounts on Savings.</p>{% endif %}
-      {% if stale_savings_accounts %}<p><strong>Some balances are missing or more than one month old.</strong> Review them before relying on this starting point.</p>{% endif %}
+    <details class="plan-sources"><summary>Starting investment sources and split</summary>
+      <p>Latest active Savings balances provide the starting total and the split between retirement (pre-tax and post-tax) and taxable accounts. If you edit the total, the same proportions apply. Linked bank balances, property, and debts are excluded. Remove money reserved for other goals.</p>
+      <p id="plan-starting-split"></p>
+      {% if not all_savings_total %}<p><strong>No recorded investment split is available.</strong> An entered starting amount is treated as retirement investments; add classified accounts in Savings for a different split.</p>{% endif %}
+      {% if savings_accounts %}<ul>{% for account in savings_accounts %}<li>{{ account.name }} · {{ account.classification_label }} · {{ account.amount|money if account.recorded_on else 'Unknown balance' }} · {{ account.recorded_on or 'No recorded date' }}</li>{% endfor %}</ul>{% else %}<p>No manually recorded savings accounts yet.</p>{% endif %}
+      {% if stale_savings_accounts %}<p><strong>Some balances are missing or more than one month old.</strong> Missing balances are not evidence of zero investments.</p>{% endif %}
       <a class="text-link" href="/savings">Review Savings →</a>
     </details>
   </section>
   <section class="panel plan-section">
-    <div class="panel-header"><div><p class="eyebrow">2 · Baseline</p><h2>Your current plan</h2></div></div>
-    <div class="plan-fields">
-      {{ number('retirement_age', 'Retirement age', 67, min=18, max=109) }}
-      {{ number('annual_savings', 'Annual savings before retirement ($)', help='Amount added to investments after current spending and taxes.') }}
-      {{ number('annual_spending', 'Annual retirement spending ($)', help='Include housing, healthcare, debt payments, and an allowance for taxes.') }}
-      {{ number('growth_rate', 'Annual investment growth (%)', 5, min=-30, max=30, step='0.1', help='Nominal return after fees, before inflation. Illustrative only.') }}
-      {{ number('annual_income', 'Annual retirement income ($)', 0, help='Your estimate for Social Security, pensions, or other income before taxes.') }}
-      {{ number('income_age', 'Retirement income starts at age', 67, min=18, max=110, help='Income starts at this age or retirement, whichever is later.') }}
-      {{ number('expense_amount', 'One-time expense in today’s dollars ($)', 0, help='Optional major purchase or goal. Enter 0 to omit.') }}
-      {{ number('expense_age', 'One-time expense at age', 67, min=18, max=109) }}
+    <div class="panel-header"><div><p class="eyebrow">Calculated for you</p><h2>Your yearly spending and savings</h2></div></div>
+    <div class="plan-summary">
+      <article><h3>Average yearly spending</h3><p class="metric-value">{{ planning_trend.annual_spending|money if planning_trend.annual_spending is not none else 'Not available' }}</p><p class="plan-note">12-month monthly average × 12, using {{ planning_trend.date_from }} through {{ planning_trend.date_to }}.</p></article>
+      <article><h3>Savings / money out → taxable brokerage</h3><p id="plan-taxable-savings" class="metric-value">—</p><p class="plan-note">Yearly income − tax-advantaged savings − yearly spending.</p><p id="plan-tax-advantaged" class="plan-note"></p></article>
     </div>
-  </section>
-  <section class="panel plan-section">
-    <div class="panel-header"><div><p class="eyebrow">3 · What if?</p><h2>Try a different path</h2></div></div>
-    <p class="plan-note">Adjust the baseline by these amounts. All other assumptions stay the same.</p>
-    <div class="plan-fields">
-      {{ number('retirement_change', 'Retire earlier / later (years)', 0, min=-30, max=30, help='Negative means earlier; positive means later.') }}
-      {{ number('savings_change', 'Change annual savings ($)', 0, min=-100000000, help='Extra savings before retirement, or a reduction.') }}
-      {{ number('spending_change', 'Change annual retirement spending ($)', 0, min=-100000000) }}
-      {{ number('growth_change', 'Change growth (percentage points)', -2, min=-30, max=30, step='0.1', help='Starts with a lower-return comparison: 5% becomes 3%.') }}
-    </div>
-    <div class="plan-actions"><button class="button primary" id="plan-calculate" type="submit">Compare projections</button><span class="plan-note">Assumptions are not saved. Reloading or leaving clears this plan.</span></div>
+    <p id="plan-cash-flow-note" class="plan-note"></p>
+    <details class="plan-sources"><summary>Review the 12-month spending estimate</summary>
+      <p>Uses the same category treatment as Spending Trends across all spending-enabled accounts. Transfers, pending transactions, and excluded records are omitted. Refunds reduce spending. The current partial month is omitted; missing months are not treated as zero.</p>
+      <p>{{ planning_trend.observed_months }} of 12 months contain included records. This does not prove every account or transaction is present. Review your imports and categories before relying on this estimate.</p>
+      {% if planning_trend.unclassified %}<p><strong>Uncategorized records remain in this period.</strong> Their spending treatment is unknown, so the estimate may understate spending.</p>{% endif %}
+      {% if planning_trend.other_currency %}<p><strong>Non-USD records are present.</strong> Currency conversion is not supported; a combined spending estimate is unavailable.</p>{% endif %}
+      <div class="table-wrap"><table><thead><tr><th>Completed month</th><th>Net spending recorded (USD)</th></tr></thead><tbody>{% for month in planning_trend.months %}<tr><td>{{ month.month }}</td><td>{{ month.spending|money if month.spending is not none else 'No included records' }}</td></tr>{% endfor %}</tbody></table></div>
+      <a class="text-link" href="/trends">Review Spending Trends →</a>
+    </details>
+    {% if planning_trend.annual_spending is none %}<p class="plan-shortfall">A usable 12-month estimate is required. Import missing history and review currency and spending treatment in the production app, then refresh development.</p>{% endif %}
+    <div class="plan-actions"><button class="button primary" id="plan-calculate" type="submit" {{ 'disabled' if planning_trend.annual_spending is none }}>Calculate plan</button><span class="plan-note">Projects through age {{ plan_end_age }}. Inputs and comparisons stay in this page only.</span></div>
     <p id="plan-error" role="alert" hidden></p>
   </section>
 </form>
 <section class="panel plan-section" id="plan-results" hidden aria-label="Projection results">
-  <div class="panel-header"><div><p class="eyebrow">Your two paths</p><h2>Savings & investments over time</h2></div>
+  <div class="panel-header"><div><p class="eyebrow">Your projected path</p><h2>Retirement & taxable investments</h2></div>
     <label class="plan-field"><span>Show amounts in</span><select id="plan-dollar-mode"><option value="real">Today's dollars</option><option value="nominal">Future dollars</option></select></label>
   </div>
   <p id="plan-result-status" class="plan-note" role="status"></p>
-  <div class="plan-chart"><canvas id="plan-chart" role="img" aria-label="Baseline and what-if investment projections. The year-by-year table below provides the same values."></canvas></div>
+  <div class="plan-actions"><button class="button secondary" id="plan-pin" type="button">Keep as baseline</button><button class="button secondary" id="plan-unpin" type="button" hidden>Clear comparison</button><span class="plan-note">Keep a baseline, edit any input, then calculate again to compare.</span></div>
+  <div class="plan-chart"><canvas id="plan-chart" role="img" aria-label="Projected retirement and taxable investment balances, also shown in the year-by-year table."></canvas></div>
   <div id="plan-summary" class="plan-summary"></div>
   <details class="plan-sources"><summary>Year-by-year numbers</summary>
-    <p class="plan-note">Each row ends at the age shown. Income, savings, spending, and shortfalls apply to the preceding year of age. Amounts follow the dollar display above.</p>
-    <div class="table-wrap"><table><thead><tr><th>Age at year end</th><th>Scenario</th><th>Investments</th><th>Added savings</th><th>Retirement income</th><th>Spending + goal</th><th>Unfunded spending</th></tr></thead><tbody id="plan-table"></tbody></table></div>
+    <p class="plan-note">Rows end at the age shown; cash flows apply to the preceding year of age. Negative taxable cash flow draws down brokerage investments. Dollar amounts follow the display above.</p>
+    <div class="table-wrap"><table><thead><tr><th>Age at year end</th><th>Scenario</th><th>Retirement investments</th><th>Taxable investments</th><th>Income</th><th>Tax-advantaged saving</th><th>Retirement withdrawal</th><th>Spending</th><th>Net taxable cash flow</th><th>Unfunded spending</th></tr></thead><tbody id="plan-table"></tbody></table></div>
   </details>
 </section>
 <section class="panel plan-section">
-  <h2>What this preview assumes</h2>
-  <p class="plan-note">Annual investment growth applies to the opening balance. Savings, income, and spending happen at year end and increase with inflation. Savings stop at retirement; retirement spending starts then. A goal at age 70 is paid during the year from age 70 to 71. “Plan through age 95” ends at your 95th birthday.</p>
-  <p class="plan-note">Balances cannot go below zero. Unfunded spending is shown separately and is not carried forward as debt. Retirement income above spending stays invested. Taxes, withdrawal rules, account-specific returns, benefits eligibility, and debt amortization are not calculated. Pre-tax and post-tax accounts are combined; include an estimated tax allowance in spending.</p>
-  <p class="plan-note">These are fixed-assumption illustrations, not predictions or a probability of success. Market volatility and return timing are not simulated. This is an investment projection, not a complete net-worth or financial plan.</p>
+  <h2>How the projection works</h2>
+  <p class="plan-note">Before retirement, income funds tax-advantaged contributions and estimated spending; the rest goes to taxable brokerage. A negative remainder draws from taxable investments. At retirement, income and new contributions stop. The withdrawal percentage applies to each year's opening retirement balance. Withdrawals cover spending first; excess goes to taxable brokerage, which also covers spending beyond the chosen withdrawal.</p>
+  <p class="plan-note">Both balances grow at the chosen rate. Growth applies to opening balances, then cash flows happen at year end. Withdrawals are capped at the retirement funds available after growth. Spending and working income rise with inflation. A funding gap means the chosen withdrawal plus taxable funds cannot cover spending; it does not necessarily mean retirement funds are exhausted. Gaps are shown separately, not carried forward as debt.</p>
+  <p class="plan-note">Tax-advantaged saving is a contribution allocation, not a calculated tax deduction. Contribution limits, taxes, withdrawal penalties, benefits, and market volatility are not modeled. These are illustrations, not predictions or a probability of success. Leaving or reloading clears your inputs and comparison.</p>
 </section>
+<script id="plan-data" type="application/json">{{ {'annual_spending': planning_trend.annual_spending / 100 if planning_trend.annual_spending is not none else none, 'retirement_share': plan_retirement_share, 'date_from': planning_trend.date_from, 'date_to': planning_trend.date_to}|tojson }}</script>
 <script src="{{ url_for('static', filename='plan.js') }}" defer></script>
 {% endblock %}

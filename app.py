@@ -54,6 +54,7 @@ from analytics import (
     category_details,
     cash_flow_summary,
     long_term_trends,
+    planning_spending_trend,
     month_label,
     rolling_spending_summary,
     spending_summary,
@@ -1566,7 +1567,17 @@ def planning_page():
         if any(account["recorded_on"] for account in context["savings_accounts"])
         else None
     )
+    with db() as connection:
+        context["planning_trend"] = planning_spending_trend(connection)
+    context["plan_retirement_share"] = retirement_investment_share(context)
+    context["plan_end_age"] = projections.END_AGE
     return render_template("plan.html", **context)
+
+
+def retirement_investment_share(savings):
+    total = savings["all_savings_total"]
+    retirement = sum(savings["classification_totals"][key] for key in ("pre_tax", "post_tax"))
+    return retirement / total if total > 0 else 1
 
 
 @app.post("/api/projections")
@@ -1579,10 +1590,18 @@ def projection_compare():
     try:
         baseline = projections.validate(payload["baseline"])
         comparison = projections.validate(payload["comparison"])
-        for key in ("current_age", "end_age", "starting_assets", "inflation_rate"):
-            if baseline[key] != comparison[key]:
-                raise projections.ProjectionError("Scenarios must share a starting point, horizon, and inflation assumption.")
-        return jsonify(baseline=projections.project(baseline), comparison=projections.project(comparison))
+        if baseline["current_age"] != comparison["current_age"]:
+            raise projections.ProjectionError("Scenarios must use the same current age. Clear the comparison to change it.")
+        with db() as connection:
+            trend = planning_spending_trend(connection)
+        spending = trend["annual_spending"]
+        if spending is None:
+            raise projections.ProjectionError("A usable 12-month spending estimate is needed. Review the data coverage on Plan.")
+        share = retirement_investment_share(savings_data())
+        return jsonify(baseline=projections.project(baseline, spending / 100, share),
+                       comparison=projections.project(comparison, spending / 100, share),
+                       retirement_share=share, spending_date_from=trend["date_from"],
+                       spending_date_to=trend["date_to"])
     except projections.ProjectionError as error:
         return jsonify(error=str(error)), 400
 
