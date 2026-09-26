@@ -9,12 +9,13 @@
   const status = document.getElementById('plan-result-status');
   const monthlyYear = document.getElementById('plan-monthly-year');
   const source = JSON.parse(document.getElementById('plan-data').textContent);
-  const fields = ['starting_taxable', 'inflation_rate', 'growth_rate', 'tax_payments_in_spending'];
+  const fields = ['withdrawal_rate', 'starting_taxable', 'inflation_rate', 'growth_rate', 'tax_payments_in_spending'];
   const personNumbers = ['annual_income', 'tax_advantaged_rate', 'current_age', 'retirement_age',
-    'starting_pretax', 'starting_roth', 'withdrawal_rate', 'work_state_percent'];
+    'starting_pretax', 'starting_roth', 'work_state_percent'];
   const personText = ['name', 'contribution_type', 'residence_state', 'employment_state'];
   function readPlan() {
     const plan = Object.fromEntries(fields.map(key => [key, Number(form.elements[key].value)]));
+    plan.withdrawal_start = form.elements.withdrawal_start.value;
     plan.filing_status = form.elements.filing_status.value;
     plan.mfs_allocation = form.elements.mfs_allocation.value;
     plan.people = [0, 1].map(index => Object.fromEntries([
@@ -37,8 +38,8 @@
     document.getElementById('plan-taxable-savings').textContent = result ? `${format.format(result.annual_taxable_savings)} / year` : 'Calculate to estimate';
     document.getElementById('plan-tax-advantaged').textContent = result
       ? `Retirement savings: ${format.format(result.annual_tax_advantaged_savings)} / year. Adjusted spending: ${format.format(result.adjusted_annual_spending)} / year.` : '';
-    document.getElementById('plan-cash-flow-note').textContent = result && result.annual_taxable_savings < 0
-      ? 'The negative remainder draws from brokerage; any uncovered amount becomes a funding gap.'
+    document.getElementById('plan-cash-flow-note').textContent = result && result.rows[1].shortfall > 0
+      ? 'Spending exceeds the cash available under this plan. The difference is a funding gap; the model does not make an extra withdrawal.'
       : 'This is a cash-flow estimate, not a measurement of actual brokerage transfers.';
     const first = result?.rows[1];
     document.getElementById('plan-tax-summary').textContent = first
@@ -70,7 +71,7 @@
       const card = document.createElement('article');
       const heading = document.createElement('h3'); heading.textContent = name;
       const assumptions = document.createElement('p'); assumptions.className = 'plan-note';
-      assumptions.textContent = `${plan.filing_status === 'joint' ? 'Joint return' : 'Separate returns'} · ${plan.people.map(person => `${person.name}: retire at ${person.retirement_age}, save ${person.tax_advantaged_rate}%`).join(' · ')} · ${plan.growth_rate}% growth · ${plan.inflation_rate}% inflation.`;
+      assumptions.textContent = `${plan.filing_status === 'joint' ? 'Joint return' : 'Separate returns'} · ${plan.people.map(person => `${person.name}: retire at ${person.retirement_age}, save ${person.tax_advantaged_rate}%`).join(' · ')} · ${plan.withdrawal_rate}% household withdrawal · ${plan.growth_rate}% growth · ${plan.inflation_rate}% inflation.`;
       const retirement = document.createElement('p');
       retirement.textContent = `When both have retired: ${format.format(dollars(result.retirement, 'retirement_assets'))} retirement + ${format.format(dollars(result.retirement, 'taxable_assets'))} taxable. Total in ${result.final.year}: ${format.format(dollars(result.final, 'assets'))}.`;
       const outcome = document.createElement('p');
@@ -127,9 +128,9 @@
       const items = [
         ['Current comparable spending (today’s dollars)', result.adjusted_annual_spending / 12],
         ['Needed to maintain today’s lifestyle', month.spending / factor],
-        ['Available after tax from income & retirement withdrawals', month.available / factor],
-        ['Difference before brokerage top-up', month.difference / factor],
-        ['Planned brokerage top-up', month.brokerage_draw / factor],
+        ['Available after tax from income & combined withdrawals', month.available / factor],
+        ['Monthly surplus / shortfall', month.difference / factor],
+        ['Combined investment withdrawals (before tax)', month.withdrawal / factor],
         ['Unfunded spending gap', month.shortfall / factor]
       ];
       for (const [label, amount] of items) {

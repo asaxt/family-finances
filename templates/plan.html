@@ -13,9 +13,11 @@
 <form id="plan-form" method="post" action="/api/projections" autocomplete="off">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <section class="panel plan-section">
-    <div class="panel-header"><div><p class="eyebrow">Your assumptions</p><h2>The inputs you control</h2></div></div>
+    <div class="panel-header"><div><p class="eyebrow">Combined household</p><h2>Shared planning inputs</h2></div></div>
     <div class="plan-fields">
       <label class="plan-field"><span>Married filing status</span><select name="filing_status"><option value="joint" {{ 'selected' if household_plan.filing_status == 'joint' }}>Married filing jointly</option><option value="separate" {{ 'selected' if household_plan.filing_status == 'separate' }}>Married filing separately</option></select></label>
+      {{ number('withdrawal_rate', 'Household annual withdrawal (%)', household_plan.withdrawal_rate, max=100, step='0.1', help='One percentage of the combined opening retirement and brokerage balance. Withdraw half the dollar amount from each; if one side is insufficient, use the other for the remainder.') }}
+      <label class="plan-field"><span>Start household withdrawals</span><select name="withdrawal_start"><option value="first_retirement" {{ 'selected' if household_plan.withdrawal_start == 'first_retirement' }}>When the first spouse retires</option><option value="both_retired" {{ 'selected' if household_plan.withdrawal_start == 'both_retired' }}>When both spouses are retired</option></select></label>
       {{ number('starting_taxable', 'Starting taxable brokerage investments ($)', household_plan.starting_taxable, max=1000000000, step='0.01') }}
       {{ number('inflation_rate', 'Annual inflation (%)', household_plan.inflation_rate, max=15, step='0.1', help='Income, spending, and indexed tax thresholds follow this assumption.') }}
       {{ number('growth_rate', 'Annual investment growth (%)', household_plan.growth_rate, min=-30, max=30, step='0.1', help='Nominal return after fees. Brokerage capital-gains and dividend taxes are not modeled.') }}
@@ -27,6 +29,11 @@
         <option value="individual" {{ 'selected' if household_plan.mfs_allocation == 'individual' }}>Each person reports their own income</option>
       </select><small>Washington community earnings generally split equally. IRA withdrawals stay with their owner; employer retirement benefits can include community income. For Oregon separate returns, each person's own income is generally appropriate. Choose the assumption that matches your property and account treatment; mixed ownership is not modeled. Payroll taxes always follow the worker.</small></label>
     </div>
+    {{ number('tax_payments_in_spending', 'Income-tax payments already included in recorded spending ($ / year)', household_plan.tax_payments_in_spending, min=-100000000, step='0.01', help='Remove only income-tax payments already counted above, net of refunds; use a negative amount if refunds exceed payments. Do not include payroll withholding absent from transactions, property tax, or sales tax. The model adds its own estimated income taxes.') }}
+    {% if plan_withdrawal_updated %}<p class="plan-note" role="status">Your saved profiles have been retained. Withdrawals now use one household rate and an equal-dollar split across retirement and brokerage. Review the shared rate and start setting; differing old rates require a new selection. Saving explicitly updates the stored plan.</p>{% endif %}
+  </section>
+  <section class="panel plan-section">
+    <div class="panel-header"><div><p class="eyebrow">People</p><h2>Income, retirement timing & tax profiles</h2></div></div>
     <p class="plan-note">This preview models two married adults with an age difference up to 25 years. State locations stay fixed throughout the projection. The work state means where work is physically performed, not the employer's headquarters.</p>
     {% for person in household_plan.people %}{% set prefix = 'person_' ~ loop.index0 ~ '_' %}
     <fieldset class="plan-person" data-person><legend>Spouse {{ loop.index }}</legend><div class="plan-fields">
@@ -38,7 +45,7 @@
       {{ number(prefix ~ 'retirement_age', 'Retirement age', person.retirement_age, min=18, max=plan_end_age-1, help='Use current age if already retired.') }}
       {{ number(prefix ~ 'starting_pretax', 'Starting pre-tax retirement investments ($)', person.starting_pretax, max=1000000000, step='0.01', help='Allocate the recorded retirement balances to their owners. Enter 0 if none.') }}
       {{ number(prefix ~ 'starting_roth', 'Starting Roth retirement investments ($)', person.starting_roth, max=1000000000, step='0.01', help='Assumes all withdrawals are qualified and tax-free. Enter 0 if none.') }}
-      {{ number(prefix ~ 'withdrawal_rate', 'Annual retirement withdrawal (%)', person.withdrawal_rate, max=100, step='0.1', help='Percentage of this person’s remaining opening retirement balance each year after retirement.') }}
+
       {% for field, label in [('residence_state', 'State of residence'), ('employment_state', 'State of employment / physical work')] %}
       <label class="plan-field"><span>{{ label }}</span><select name="{{ prefix }}{{ field }}" required><option value="">Choose a state</option>{% for code, label in [('WA', 'Washington'), ('OR', 'Oregon')] %}<option value="{{ code }}" {{ 'selected' if person[field] == code }}>{{ label }}</option>{% endfor %}</select></label>
       {% endfor %}
@@ -59,9 +66,9 @@
     <div class="plan-summary">
       <article><h3>Recorded yearly spending</h3><p class="metric-value">{{ planning_trend.annual_spending|money if planning_trend.annual_spending is not none else 'Not available' }}</p><p class="plan-note">12-month monthly average × 12, using {{ planning_trend.date_from }} through {{ planning_trend.date_to }}.</p></article>
       <article><h3>Current monthly spending average</h3><p class="metric-value">{{ (planning_trend.annual_spending / 12)|money if planning_trend.annual_spending is not none else 'Not available' }}</p><p class="plan-note">Average across the last 12 completed months, not this month's spending to date. Individual recorded months are listed below.</p></article>
-      <article><h3>Savings / money out → taxable brokerage</h3><p id="plan-taxable-savings" class="metric-value">—</p><p class="plan-note">Gross income − retirement savings − modeled taxes − adjusted spending, plus retirement withdrawals when applicable.</p><p id="plan-tax-advantaged" class="plan-note"></p></article>
+      <article><h3>Savings / money out → taxable brokerage</h3><p id="plan-taxable-savings" class="metric-value">—</p><p class="plan-note">Positive cash remaining after income, combined investment withdrawals, retirement contributions, modeled taxes, and spending. Any shortfall is shown as a funding gap.</p><p id="plan-tax-advantaged" class="plan-note"></p></article>
     </div>
-    {{ number('tax_payments_in_spending', 'Income-tax payments already included in recorded spending ($ / year)', household_plan.tax_payments_in_spending, min=-100000000, step='0.01', help='Remove only income-tax payments already counted above, net of refunds; use a negative amount if refunds exceed payments. Do not include payroll withholding absent from transactions, property tax, or sales tax. The model adds its own estimated income taxes.') }}
+
     <p id="plan-cash-flow-note" class="plan-note"></p>
     <p class="plan-note" id="plan-tax-summary">Calculate to see federal income, federal payroll, Oregon, and Washington tax estimates.</p>
     <details class="plan-sources"><summary>Review the 12-month spending estimate</summary>
@@ -91,18 +98,18 @@
     </div>
     <p class="plan-note">Starts with the first year both spouses are retired. Choose any year to see the transition or later retirement. Figures are monthly averages of the annual model, not a month-by-month forecast.</p>
     <div id="plan-monthly-summary" class="plan-summary" aria-live="polite"></div>
-    <p class="plan-note">Available spending is income plus your chosen retirement withdrawals, minus retirement saving and modeled taxes. Brokerage top-ups are shown separately and can run out. These figures do not establish a sustainable maximum spending budget. Social Security benefits and other excluded income are not included.</p>
+    <p class="plan-note">Available spending is income plus the combined household withdrawal, minus retirement saving and modeled taxes. The withdrawal already includes both retirement and brokerage accounts; no extra brokerage top-up is added. These figures do not establish a sustainable maximum spending budget. Social Security benefits and other excluded income are not included.</p>
   </section>
   <div class="plan-chart"><canvas id="plan-chart" role="img" aria-label="Projected retirement and taxable investment balances, also shown in the year-by-year table."></canvas></div>
   <div id="plan-summary" class="plan-summary"></div>
   <details class="plan-sources"><summary>Year-by-year numbers</summary>
-    <p class="plan-note">Rows show the start of each calendar year and both ages. Cash flows apply to the preceding calendar year; the first row is the starting balance. Negative taxable cash flow draws down brokerage investments. Dollar amounts follow the display above.</p>
-    <div class="table-wrap"><table><thead><tr><th>Year / ages</th><th>Scenario</th><th>Retirement investments</th><th>Taxable investments</th><th>Income</th><th>Tax-advantaged saving</th><th>Retirement withdrawal</th><th>Federal income tax</th><th>Federal payroll tax</th><th>Oregon tax</th><th>Washington tax</th><th>Interstate credit included</th><th>Adjusted spending</th><th>Net taxable cash flow</th><th>Unfunded spending</th></tr></thead><tbody id="plan-table"></tbody></table></div>
+    <p class="plan-note">Rows show the start of each calendar year and both ages. Cash flows apply to the preceding calendar year; the first row is the starting balance. Negative cash flow is an unfunded spending gap under the chosen withdrawal rate; no extra withdrawal is made. Dollar amounts follow the display above.</p>
+    <div class="table-wrap"><table><thead><tr><th>Year / ages</th><th>Scenario</th><th>Retirement investments</th><th>Taxable investments</th><th>Income</th><th>Tax-advantaged saving</th><th>Combined investment withdrawal</th><th>Federal income tax</th><th>Federal payroll tax</th><th>Oregon tax</th><th>Washington tax</th><th>Interstate credit included</th><th>Adjusted spending</th><th>Surplus / funding gap</th><th>Unfunded spending</th></tr></thead><tbody id="plan-table"></tbody></table></div>
   </details>
 </section>
 <section class="panel plan-section">
   <h2>How the projection works</h2>
-  <p class="plan-note">Each person's income and retirement saving stop at their retirement age. Withdrawals use that person's opening pre-tax and Roth balances. Pre-tax distributions enter taxable income; qualified Roth distributions do not. Surplus after modeled taxes and shared spending goes to brokerage. A deficit draws from brokerage, then becomes a funding gap; it does not force extra retirement withdrawals or carry debt forward.</p>
+  <p class="plan-note">Each person's income and retirement saving stop at their retirement age. At the selected household start point, the shared withdrawal percentage applies to the combined opening investment balance. Half of the dollar withdrawal comes from retirement and half from brokerage; if one side cannot supply its half, the other covers the remainder, capped at total funds after growth. Retirement withdrawals are allocated proportionally across all owners' pre-tax and Roth balances, including a spouse still working. Pre-tax distributions enter taxable income; qualified Roth distributions do not. Account access restrictions and early-withdrawal penalties are not modeled. Unspent cash is reinvested in brokerage. A spending deficit is a funding gap, even if investments remain; the model never takes an extra withdrawal or carries debt forward.</p>
   <p class="plan-note">Growth applies to opening balances and cash flows occur at year end. Each projection period is a full year; the first year is not reduced for the current month. Both spouses are assumed alive throughout. These are illustrations with fixed rates, not predictions or a probability of success.</p>
   <details class="plan-sources"><summary>Tax coverage and assumptions</summary>
     <p>Uses 2026 federal ordinary-income brackets, standard and age deductions, Social Security, Medicare, and Additional Medicare. Oregon uses resident income and nonresident work income, standard deductions, a federal-tax subtraction, and personal exemption credits. Cross-state credits use a proportional planning estimate of tax on income taxed by both states.</p>

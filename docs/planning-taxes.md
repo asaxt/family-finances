@@ -12,7 +12,13 @@ ordinary taxable income, but neither pre-tax nor Roth saving reduces federal
 payroll wages. Annual employee contributions are capped at the indexed 2026
 base limit of $24,500; unused requested savings remain in brokerage cash flow.
 Catch-up contributions, IRA contributions, and employer matches are excluded.
-Opening pre-tax and Roth balances belong to individual people. Pre-tax
+Opening pre-tax and Roth balances belong to individual people for tax treatment.
+One household withdrawal percentage applies to retirement plus taxable brokerage
+assets. Dollar withdrawals split equally across the two pools, with fallback to
+the other pool if one cannot supply its half. The retirement portion is drawn
+proportionally from all owners and tax types, including a spouse still working.
+Unspent cash is reinvested in brokerage; unmet spending is a gap under the chosen
+rate, without extra withdrawals. Account-access restrictions are not modeled. Pre-tax
 withdrawals enter ordinary income; all Roth withdrawals are assumed qualified.
 Brokerage capital gains, dividends, and basis are not modeled.
 

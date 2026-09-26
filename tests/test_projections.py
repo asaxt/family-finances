@@ -5,7 +5,7 @@ from datetime import date
 from unittest.mock import patch
 
 from analytics import planning_spending_trend
-from projections import END_AGE, ProjectionError, project, validate
+from projections import END_AGE, ProjectionError, project, validate, restore_saved_plan, split_withdrawal
 from schema import create_schema
 from tests import test_development_mirror
 
@@ -13,16 +13,17 @@ from tests import test_development_mirror
 def sample_person(**changes):
     return dict(name='EXAMPLE PERSON', current_age=40, retirement_age=42,
                 starting_pretax=1000, starting_roth=0, annual_income=1000,
-                tax_advantaged_rate=10, contribution_type='pre_tax', withdrawal_rate=10,
+                tax_advantaged_rate=10, contribution_type='pre_tax',
                 residence_state='WA', employment_state='WA', work_state_percent=100) | changes
 
 
 def sample_plan(**changes):
     person_fields = {'current_age', 'retirement_age', 'annual_income', 'tax_advantaged_rate',
-                     'withdrawal_rate', 'starting_pretax', 'starting_roth'}
+                     'starting_pretax', 'starting_roth'}
     person = sample_person(**{key: value for key, value in changes.items() if key in person_fields})
     return dict(people=[person, sample_person(name='EXAMPLE SPOUSE', starting_pretax=0, annual_income=0)],
                 starting_taxable=0, growth_rate=0, inflation_rate=0, tax_payments_in_spending=0,
+                withdrawal_rate=10, withdrawal_start='first_retirement',
                 filing_status='joint', mfs_allocation='community_wages') | {key: value for key, value in changes.items() if key not in person_fields}
 
 
@@ -41,24 +42,25 @@ class ProjectionMathTests(unittest.TestCase):
         self.assertEqual(monthly['year'], 2028)
         self.assertEqual(monthly['ages'], [42, 42])
         self.assertEqual(monthly['retired_count'], 2)
-        self.assertAlmostEqual(monthly['available'], 121 / 12)
+        self.assertAlmostEqual(monthly['available'], 167.94 / 12)
         self.assertAlmostEqual(monthly['spending'], 60.5)
         self.assertAlmostEqual(monthly['spending'] / monthly['factor'], 50)
-        self.assertAlmostEqual(monthly['available'] + monthly['brokerage_draw'] + monthly['shortfall'], monthly['spending'])
+        self.assertAlmostEqual(monthly['available'] + monthly['shortfall'], monthly['spending'], places=2)
         self.assertEqual(len(result['monthly']), len(result['rows']) - 1)
 
-    def test_monthly_brokerage_is_a_draw_not_recurring_income(self):
+    def test_monthly_budget_includes_brokerage_without_extra_draws(self):
         plan = sample_plan(retirement_age=40, starting_pretax=0, starting_taxable=1000)
         plan['people'][1]['retirement_age'] = 40
         result = project(plan, 600, start_year=2026)
         first, second, third = result['monthly'][:3]
         self.assertEqual(result['first_retirement_monthly']['year'], 2026)
-        self.assertEqual(first['available'], 0)
-        self.assertEqual(first['brokerage_draw'], 50)
-        self.assertEqual(first['shortfall'], 0)
-        self.assertAlmostEqual(second['brokerage_draw'], 400 / 12)
-        self.assertAlmostEqual(second['shortfall'], 200 / 12)
-        self.assertEqual(third['shortfall'], 50)
+        self.assertAlmostEqual(first['available'], 100 / 12)
+        self.assertAlmostEqual(first['withdrawal'], 100 / 12)
+        self.assertAlmostEqual(first['shortfall'], 500 / 12)
+        self.assertAlmostEqual(second['available'], 90 / 12)
+        self.assertAlmostEqual(second['shortfall'], 510 / 12)
+        self.assertAlmostEqual(third['shortfall'], 519 / 12)
+        self.assertEqual(result['rows'][1]['taxable_assets'], 900)
 
     def test_monthly_available_deducts_taxes_and_uses_adjusted_spending(self):
         result = project(sample_plan(annual_income=100000, tax_payments_in_spending=120), 600, start_year=2026)
@@ -67,18 +69,18 @@ class ProjectionMathTests(unittest.TestCase):
         self.assertEqual(monthly['spending'], 40)
         self.assertAlmostEqual(monthly['available'], (yearly['income'] - yearly['tax_advantaged_savings'] - yearly['taxes']) / 12)
         self.assertAlmostEqual(monthly['difference'], yearly['taxable_cash_flow'] / 12)
-        self.assertEqual(monthly['brokerage_draw'], 0)
+        self.assertEqual(monthly['withdrawal'], 0)
 
     def test_income_allocates_after_taxes_and_retirement_stops_contributions(self):
         result = project(sample_plan(), 600, start_year=2026)
         self.assertEqual(result['annual_tax_advantaged_savings'], 100)
         self.assertEqual(result['annual_taxable_savings'], 223.5)
-        self.assertEqual([row['assets'] for row in result['rows'][:4]], [1000, 1323.5, 1647, 1080])
+        self.assertEqual([row['assets'] for row in result['rows'][:4]], [1000, 1323.5, 1647, 1482.3])
         self.assertEqual(result['retirement']['retirement_assets'], 1200)
         retired = result['rows'][3]
         self.assertEqual(retired['income'], 0)
         self.assertEqual(retired['tax_advantaged_savings'], 0)
-        self.assertEqual(retired['withdrawal'], 120)
+        self.assertEqual(retired['withdrawal'], 164.7)
         self.assertEqual(result['final']['ages'], [END_AGE, END_AGE])
 
     def test_each_person_retires_independently(self):
@@ -89,13 +91,74 @@ class ProjectionMathTests(unittest.TestCase):
         self.assertEqual(result['retirement']['elapsed'], 3)
         self.assertEqual(result['final']['ages'], [97, 95])
 
-    def test_withdrawals_recalculate_on_remaining_balance(self):
+    def test_withdrawals_recalculate_on_combined_remaining_balance(self):
         plan = sample_plan(retirement_age=40, starting_pretax=500, starting_taxable=500)
-        result = project(plan, 0, start_year=2026)
-        self.assertEqual(result['rows'][1]['withdrawal'], 50)
-        self.assertEqual(result['rows'][2]['withdrawal'], 45)
+        result = project(plan, 100, start_year=2026)
+        self.assertEqual(result['rows'][1]['withdrawal'], 100)
+        self.assertEqual(result['rows'][2]['withdrawal'], 90)
+        self.assertEqual(result['rows'][2]['retirement_withdrawal'], 45)
+        self.assertEqual(result['rows'][2]['taxable_withdrawal'], 45)
         self.assertEqual(result['rows'][2]['retirement_assets'], 405)
-        self.assertEqual(result['rows'][2]['taxable_assets'], 595)
+        self.assertEqual(result['rows'][2]['taxable_assets'], 405)
+
+    def test_equal_split_and_empty_pool_fallback_are_capped(self):
+        self.assertEqual(split_withdrawal(100, 900, 100), (50, 50))
+        self.assertEqual(split_withdrawal(100, 10, 900), (10, 90))
+        self.assertEqual(split_withdrawal(100, 900, 10), (90, 10))
+        self.assertEqual(split_withdrawal(1000, 30, 40), (30, 40))
+        self.assertEqual(split_withdrawal(100, 0, 0), (0, 0))
+
+    def test_household_timing_and_retirement_ownership(self):
+        plan = sample_plan(starting_pretax=300, starting_taxable=400, retirement_age=40)
+        plan['people'][1].update(starting_pretax=300, annual_income=1000)
+        first = project(plan, 1000, start_year=2026)['rows'][1]
+        self.assertEqual(first['retirement_withdrawal'], 50)
+        self.assertEqual(first['taxable_withdrawal'], 50)
+        self.assertEqual(first['income'], 1000)
+        plan['withdrawal_start'] = 'both_retired'
+        result = project(plan, 1000, start_year=2026)
+        self.assertEqual(result['rows'][1]['withdrawal'], 0)
+        self.assertEqual(result['rows'][2]['withdrawal'], 0)
+        self.assertGreater(result['rows'][3]['withdrawal'], 0)
+
+    def test_only_pretax_portion_of_equal_household_draw_is_taxable(self):
+        from planning_taxes import household_taxes
+        plan = sample_plan(retirement_age=40, starting_pretax=300, starting_taxable=400)
+        plan['people'][1].update(starting_roth=300, starting_pretax=0)
+        with patch('projections.household_taxes', wraps=household_taxes) as taxes:
+            result = project(plan, 100, start_year=2026)
+        first_people = taxes.call_args_list[0].args[0]
+        self.assertEqual([p['taxable_withdrawals'] for p in first_people], [25, 0])
+        first = result['rows'][1]
+        self.assertEqual(first['withdrawal'], 100)
+        self.assertEqual(first['retirement_assets'], 550)
+        self.assertEqual(first['taxable_assets'], 350)
+        self.assertEqual(first['shortfall'], 0)
+
+    def test_no_automatic_top_up_even_if_assets_remain(self):
+        result = project(sample_plan(retirement_age=40, withdrawal_rate=0, starting_taxable=1000), 600, start_year=2026)
+        self.assertEqual(result['rows'][1]['taxable_assets'], 1000)
+        self.assertEqual(result['rows'][1]['retirement_assets'], 1000)
+        self.assertEqual(result['rows'][1]['withdrawal'], 0)
+        self.assertEqual(result['rows'][1]['shortfall'], 600)
+
+    def test_legacy_saved_profiles_are_preserved_without_mutation(self):
+        old = sample_plan()
+        old.pop('withdrawal_start')
+        rate = old.pop('withdrawal_rate')
+        for person in old['people']:
+            person['withdrawal_rate'] = rate
+        restored, changed = restore_saved_plan(old)
+        self.assertTrue(changed)
+        self.assertEqual(restored['withdrawal_rate'], rate)
+        self.assertNotIn('withdrawal_rate', restored['people'][0])
+        self.assertEqual(old['people'][0]['withdrawal_rate'], rate)
+        old['people'][1]['withdrawal_rate'] = 7
+        restored, changed = restore_saved_plan(old)
+        self.assertEqual(restored['withdrawal_rate'], '')
+        self.assertEqual(restored['people'][0]['annual_income'], old['people'][0]['annual_income'])
+        with self.assertRaises(ProjectionError):
+            validate(restored)
 
     def test_both_balances_grow_and_cash_conserves(self):
         result = project(sample_plan(growth_rate=10, starting_pretax=500, starting_taxable=500), 600, start_year=2026)
@@ -236,6 +299,9 @@ class ProjectionRouteTests(unittest.TestCase):
         page = self.client.get('/plan')
         self.assertIn(b'name="starting_taxable" value="100.0"', page.data)
         self.assertNotIn(b'SAMPLE ARCHIVED', page.data)
+        self.assertEqual(page.data.count(b'name="withdrawal_rate"'), 1)
+        self.assertNotIn(b'person_0_withdrawal_rate', page.data)
+        self.assertIn(b'Shared planning inputs', page.data)
         with patch.object(self.application, 'planning_spending_trend', side_effect=lambda c: planning_spending_trend(c, date(2041, 1, 20))):
             response = self.client.post('/api/projections', json={'baseline': sample_plan(), 'comparison': sample_plan()}, headers={'X-CSRF-Token': self.csrf_token(page)})
         self.assertEqual(response.status_code, 200)
@@ -271,6 +337,23 @@ class ProjectionRouteTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
         response = self.client.post('/api/projections', data=' ' * 10001, content_type='application/json', headers={'X-CSRF-Token': token})
         self.assertEqual(response.status_code, 413)
+
+    def test_loading_legacy_plan_preserves_profiles_without_rewriting_vault(self):
+        import json
+        self.complete_setup()
+        legacy = sample_plan()
+        legacy.pop('withdrawal_start')
+        legacy.pop('withdrawal_rate')
+        for index, person in enumerate(legacy['people']):
+            person['withdrawal_rate'] = 3 + index
+        self.application.save_setting('household_plan', json.dumps(legacy))
+        before = self.application.VAULT_PATH.read_bytes()
+        page = self.client.get('/plan')
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b'EXAMPLE PERSON', page.data)
+        self.assertIn(b'name="withdrawal_rate" value=""', page.data)
+        self.assertIn(b'Your saved profiles have been retained', page.data)
+        self.assertEqual(before, self.application.VAULT_PATH.read_bytes())
 
     def test_saved_household_uses_vault_and_mirror_rejects_writes(self):
         self.complete_setup()

@@ -1570,19 +1570,21 @@ def planning_page():
     with db() as connection:
         context["planning_trend"] = planning_spending_trend(connection)
     context["plan_end_age"] = projections.END_AGE
+    context["plan_withdrawal_updated"] = False
     saved = setting("household_plan")
     try:
-        context["household_plan"] = projections.validate(json.loads(saved)) if saved else None
+        context["household_plan"], context["plan_withdrawal_updated"] = projections.restore_saved_plan(json.loads(saved)) if saved else (None, False)
     except (ValueError, TypeError):
         context["household_plan"] = None
     if context["household_plan"] is None:
         context["household_plan"] = dict(
             people=[dict(name=f"Person {i + 1}", annual_income="", tax_advantaged_rate=0,
-                contribution_type="pre_tax", current_age="", retirement_age=67, withdrawal_rate=4,
+                contribution_type="pre_tax", current_age="", retirement_age=67,
                 starting_pretax="", starting_roth="", residence_state="", employment_state="",
                 work_state_percent=100) for i in range(2)],
             starting_taxable=context["classification_totals"]["taxable"] / 100 if context["plan_starting_assets"] is not None else "",
             inflation_rate=2.5, growth_rate=5, tax_payments_in_spending=0,
+            withdrawal_rate=4, withdrawal_start="first_retirement",
             filing_status="joint", mfs_allocation="")
     return render_template("plan.html", **context)
 
