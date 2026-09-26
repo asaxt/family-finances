@@ -1218,6 +1218,16 @@ def categories():
     return render_template("categories.html", **context)
 
 
+CATEGORY_RULE_ERRORS = {
+    "invalid": "Choose valid settings and nonempty matching text of at most 255 characters.",
+    "duplicate": "That saved account already has a rule for this matching text.",
+    "missing": "Some selected rules no longer exist. Reload the table and select them again.",
+    "unselected": "These changes overlap an unselected rule. Select that rule too, or use different matching text.",
+    "conflict": "These changes create matching rules with different categories, scopes, or treatments. Choose consistent settings or edit fewer rules.",
+    "combine": "These changes make selected rules identical. Check Combine identical selected rules to merge them, or edit fewer rules.",
+}
+
+
 @app.get("/category-rules")
 def category_rules():
     context = page_context("category_rules")
@@ -1301,7 +1311,10 @@ def category_rules():
                 """
             )
         ]
+        context["category_flow_defaults"] = dict(connection.execute("SELECT name, flow_type FROM category_rules"))
     context["rule_error"] = request.args.get("error")
+    context["rule_error_message"] = CATEGORY_RULE_ERRORS.get(context["rule_error"], CATEGORY_RULE_ERRORS["invalid"])
+    context["flow_types"] = FLOW_TYPES
     context.update(
         search_query=search_query,
         selected_category=category,
@@ -1317,51 +1330,111 @@ def category_rules():
     return render_template("category_rules.html", **context)
 
 
+def category_rules_redirect(error=None):
+    return redirect(url_for(
+        "category_rules", error=error,
+        q=request.form.get("return_q", ""),
+        category=request.form.get("return_category", ""),
+        scope=request.form.get("return_scope", ""),
+        rule_account=request.form.get("return_account", ""),
+        match_type=request.form.get("return_match_type", ""),
+        sort=request.form.get("return_sort", "match_asc"),
+    ))
+
+
+def apply_category_rule_changes(connection, form):
+    try:
+        rule_ids = {int(value) for value in form.getlist("rule_ids")}
+    except ValueError:
+        raise ValueError("invalid") from None
+    if not rule_ids:
+        return
+    original = [dict(row) for row in connection.execute("SELECT * FROM merchant_rules ORDER BY id")]
+    selected = [row for row in original if row["id"] in rule_ids]
+    if len(selected) != len(rule_ids):
+        raise ValueError("missing")
+    action = form.get("action", "apply")
+    if action == "delete":
+        connection.executemany("DELETE FROM merchant_rules WHERE id = ?", [(row["id"],) for row in selected])
+        return
+    if action != "apply":
+        raise ValueError("invalid")
+    scope = form.get("scope_change", "__no_change__")
+    choice = form.get("category_change", "__no_change__")
+    match_type = form.get("match_type_change", "__no_change__")
+    replace_text = form.get("replace_match_text") == "on"
+    text = form.get("match_value", "").strip()
+    edit_treatment = form.get("edit_category_treatment") == "on"
+    treatment = form.get("category_flow_type", "")
+    if (scope not in {"__no_change__", "all", "account"}
+            or match_type not in {"__no_change__", "description", "description_contains"}
+            or (replace_text and (not text or len(text) > 255))
+            or (edit_treatment and choice == "__no_change__")
+            or ((edit_treatment or choice == "__new__") and treatment not in FLOW_TYPES)):
+        raise ValueError("invalid")
+    changes = {}
+    if scope != "__no_change__":
+        changes["applies_all_accounts"] = int(scope == "all")
+    if match_type != "__no_change__":
+        changes["match_type"] = match_type
+    if replace_text:
+        changes["match_value"] = text
+    if choice != "__no_change__":
+        valid, category = selected_category(connection, choice, form.get("new_category"), treatment)
+        if not valid or not category:
+            raise ValueError("invalid")
+        changes.update(category=category, flow_type=None, spending_override=None)
+        if edit_treatment:
+            connection.execute(
+                "INSERT INTO category_rules (name, flow_type) VALUES (?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET flow_type = excluded.flow_type",
+                (category, treatment),
+            )
+    if not changes:
+        return
+    # Match SQLite NOCASE semantics without conflating distinct Unicode text.
+    ascii_lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    plans = {}
+    for row in original:
+        planned = {**row, **changes} if row["id"] in rule_ids else row
+        key = (planned["account_id"], planned["match_type"], planned["match_value"].translate(ascii_lower))
+        plans.setdefault(key, []).append(planned)
+    remove_ids = []
+    updates = []
+    for group in plans.values():
+        if not any(row["id"] in rule_ids for row in group):
+            continue
+        if len(group) > 1:
+            if any(row["id"] not in rule_ids for row in group):
+                raise ValueError("unselected")
+            outcomes = {(row["category"].translate(ascii_lower), row["applies_all_accounts"],
+                         row["flow_type"], row["spending_override"]) for row in group}
+            if len(outcomes) != 1:
+                raise ValueError("conflict")
+            if form.get("combine_duplicates") != "on":
+                raise ValueError("combine")
+            remove_ids.extend(row["id"] for row in group[1:])
+        updates.append(group[0])
+    connection.executemany("DELETE FROM merchant_rules WHERE id = ?", [(value,) for value in remove_ids])
+    connection.executemany(
+        "UPDATE merchant_rules SET match_value = :match_value, match_type = :match_type, "
+        "category = :category, applies_all_accounts = :applies_all_accounts, "
+        "flow_type = :flow_type, spending_override = :spending_override WHERE id = :id",
+        updates,
+    )
+
+
 @app.post("/api/category-rules/bulk")
 def bulk_update_category_rules():
-    rule_ids = list(dict.fromkeys(request.form.getlist("rule_ids")))
     try:
-        rule_ids = [int(rule_id) for rule_id in rule_ids]
-    except ValueError:
-        rule_ids = []
-    if not rule_ids:
-        return redirect(url_for("category_rules"))
-    scope = request.form.get("scope_change", "__no_change__")
-    category = request.form.get("category_change", "__no_change__")
-    assignments = []
-    parameters = []
-    if scope in {"all", "account"}:
-        assignments.append("applies_all_accounts = ?")
-        parameters.append(int(scope == "all"))
-    if category != "__no_change__":
-        category = normalized_category(category or "")
         with db() as connection:
-            canonical = canonical_category(connection, category) if category else None
-        if not canonical:
-            return redirect(url_for("category_rules", error="invalid"))
-        assignments.extend(
-            ["category = ?", "flow_type = NULL", "spending_override = NULL"]
-        )
-        parameters.append(canonical[0])
-    if assignments:
-        placeholders = ",".join("?" for _ in rule_ids)
-        with db() as connection:
-            connection.execute(
-                f"UPDATE merchant_rules SET {', '.join(assignments)} "
-                f"WHERE id IN ({placeholders})",
-                [*parameters, *rule_ids],
-            )
-    return redirect(
-        url_for(
-            "category_rules",
-            q=request.form.get("return_q", ""),
-            category=request.form.get("return_category", ""),
-            scope=request.form.get("return_scope", ""),
-            rule_account=request.form.get("return_account", ""),
-            match_type=request.form.get("return_match_type", ""),
-            sort=request.form.get("return_sort", "match_asc"),
-        )
-    )
+            apply_category_rule_changes(connection, request.form)
+    except (ValueError, sqlite3.IntegrityError) as error:
+        code = str(error) if isinstance(error, ValueError) else "duplicate"
+        if request.headers.get("Accept") == "application/json":
+            return jsonify(error=CATEGORY_RULE_ERRORS.get(code, CATEGORY_RULE_ERRORS["invalid"])), 400
+        return category_rules_redirect(error=code)
+    return category_rules_redirect()
 
 
 @app.post("/api/category-rule/<int:rule_id>")
