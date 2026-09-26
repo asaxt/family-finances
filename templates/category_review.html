@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}AI category review · {{ app_name }}{% endblock %}
+{% block eyebrow %}Local AI · Suggestions only{% endblock %}
+{% block heading %}AI category review{% endblock %}
+{% block content %}
+<section class="panel">
+  <div class="panel-header">
+    <div><h2>Find a better fit for existing categories</h2>
+      <p>Compare all posted, categorized transactions with your current category labels, including labels added since the original categorization. This includes manually categorized and excluded transactions; table filters do not limit this review.</p>
+      <p><strong>No categories change during the scan.</strong> Your local model proposes changes here for you to accept or keep as they are. Accepted suggestions remain AI-sourced and can be superseded by user rules or individual choices. Accepting changes only the chosen transactions; category labels, treatments, inclusion settings, and remembered rules stay unchanged.</p>
+    </div>
+    <a class="button secondary" href="{{ url_for('transactions') }}">Back to transactions</a>
+  </div>
+  {% if not read_only_mirror %}
+    {% if local_ai_enabled %}
+      <button id="start-category-review" class="button primary" type="button" {{ 'disabled' if pending or (result and result.status == 'running') }}>{{ 'Start another review' if result else 'Review existing categories' }}</button>
+      {% if pending %}<p class="transaction-sub">Accept or keep the pending suggestions before starting another review.</p>{% elif result %}<p class="transaction-sub">Another review uses the latest labels and replaces these completed results.</p>{% endif %}
+    {% else %}<p><a class="text-link" href="{{ url_for('settings_page') }}">Turn on Local AI in Settings</a> to start a review. Saved suggestions remain available for your decisions.</p>{% endif %}
+  {% endif %}
+</section>
+{% if result %}
+<section class="panel">
+  <h2>{{ 'Review in progress' if result.status == 'running' else ('Review interrupted' if result.status == 'interrupted' else 'Review complete') }}</h2>
+  <p>{{ result.model }} · {{ result.processed }} of {{ result.eligible }} eligible transactions reviewed. Started {{ result.started_at[:19]|replace('T', ' ') }} UTC.</p>
+  {% if result.error is defined %}<p>{{ result.error }}</p>{% endif %}
+  <div class="metric-grid">
+    {% for label, count in [('Awaiting your decision', pending|length), ('Same category proposed', result.unchanged), ('No supported suggestion', result.uncertain), ('Not yet reviewed', result.eligible - result.processed)] %}
+    <article class="metric-card"><span class="metric-label">{{ label }}</span><div class="metric-value">{{ count }}</div></article>
+    {% endfor %}
+  </div>
+  <p class="transaction-sub">{{ result.considered }} transactions considered · {{ result.pending_skipped }} pending transactions skipped · {{ result.uncategorized_skipped }} uncategorized transactions skipped. {{ result.categories|length }} current labels considered. Model suggestions can be wrong; the current label is not proof that it is the best fit.</p>
+  {% if result.last_decision is defined %}<p role="status">{{ result.last_decision.accepted }} accepted · {{ result.last_decision.kept }} kept unchanged · {{ result.last_decision.needs_rule_change or 0 }} need a saved user rule changed · {{ result.last_decision.stale }} skipped because the transaction, its matching rule, or category labels changed. Run another review for skipped transactions.</p>{% endif %}
+</section>
+<section class="panel">
+  <h2>Proposed category changes</h2><p>Saved user rules take priority over AI suggestions. <a class="text-link" href="{{ url_for('category_rules') }}">Review category rules</a> when a proposal needs a user rule changed.</p>
+  <p>Compare the current category at review time with the proposal. Older suggestions cannot overwrite transactions edited since the scan.</p>
+  {% if pending %}
+  <form id="category-review-bulk" method="post" action="{{ url_for('decide_category_review') }}" class="bulk-action-bar">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="review_id" value="{{ result.id }}">
+    <span><strong id="review-selected-count">0</strong> selected</span>
+    <div><button class="button primary review-bulk-button" name="action" value="accept" disabled>Accept selected</button>
+      <button class="button secondary review-bulk-button" name="action" value="keep" disabled>Keep current categories</button></div>
+  </form>
+  {% if result.status == 'running' %}<p class="transaction-sub">You can leave this page while the local review runs. Decisions become available when the scan finishes or stops.</p>{% endif %}
+  <div class="table-wrap"><table>
+    <thead><tr><th><input id="review-select-all" type="checkbox" aria-label="Select all pending suggestions" {{ 'disabled' if result.status == 'running' }}></th><th>Transaction</th><th>Current category</th><th>Proposed category</th><th>Your decision</th></tr></thead>
+    <tbody>{% for item in pending %}<tr>
+      <td><input class="review-select" type="checkbox" name="transaction_ids" value="{{ item.transaction_id }}" form="category-review-bulk" aria-label="Select suggestion for {{ item.description }}" {{ 'disabled' if result.status == 'running' }}></td>
+      <td><div class="transaction-name">{{ item.merchant or item.description }}</div><div class="transaction-sub">{{ item.description }}<br>{{ item.date }} · {{ item.account_name }}{% if item.excluded %} · Excluded{% endif %}</div></td>
+      <td>{{ item.current_category }}</td>
+      <td><span class="pill">{{ item.proposed_category }}</span><div class="transaction-sub">{{ 'Confident suggestion' if item.confidence == 2 else 'Tentative suggestion' }} · {{ item.reason }}</div></td>
+      <td><form method="post" action="{{ url_for('decide_category_review') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="review_id" value="{{ result.id }}"><input type="hidden" name="transaction_ids" value="{{ item.transaction_id }}">
+        <button class="button compact" name="action" value="accept" {{ 'disabled' if result.status == 'running' }}>Accept</button>
+        <button class="button secondary compact" name="action" value="keep" {{ 'disabled' if result.status == 'running' }}>Keep current</button>
+      </form></td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<p class="empty">{{ 'The model is still reviewing transactions. No proposed changes yet.' if result.status == 'running' else ('No pending suggestions. Your decisions are saved.' if result.suggestions else 'No category changes were proposed.') }}</p>{% endif %}
+  {% if result.suggestions %}<details><summary>Decision history</summary>
+    <ul>{% for item in result.suggestions if item.decision != 'pending' %}<li>{{ item.date }} · {{ item.description }} · {{ item.current_category }} → {{ item.proposed_category }} — {{ 'Accepted' if item.decision == 'accepted' else ('Kept current category' if item.decision == 'kept' else ('Edit the saved user rule to apply this suggestion' if item.decision == 'needs_rule_change' else 'Skipped: changed since review')) }}</li>{% else %}<li>No decisions yet.</li>{% endfor %}</ul>
+  </details>{% endif %}
+</section>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+  const startReview = document.querySelector('#start-category-review');
+  startReview?.addEventListener('click', async () => {
+    startReview.disabled = true;
+    try {
+      const response = await fetch('/api/local-ai/category-review/start', {
+        method: 'POST', headers: {'X-CSRF-Token': csrfToken}
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'The review could not start.');
+      location.href = result.report_url;
+    } catch (error) {
+      showNotice(error.message, 'error');
+      startReview.disabled = false;
+    }
+  });
+  const reviewChecks = [...document.querySelectorAll('.review-select')];
+  const reviewSelectAll = document.querySelector('#review-select-all');
+  function updateReviewSelection() {
+    const count = reviewChecks.filter(box => box.checked).length;
+    document.querySelector('#review-selected-count').textContent = count;
+    document.querySelectorAll('.review-bulk-button').forEach(button => button.disabled = count === 0);
+    reviewSelectAll.checked = count > 0 && count === reviewChecks.length;
+    reviewSelectAll.indeterminate = count > 0 && count < reviewChecks.length;
+  }
+  reviewSelectAll?.addEventListener('change', () => {
+    reviewChecks.forEach(box => box.checked = reviewSelectAll.checked);
+    updateReviewSelection();
+  });
+  reviewChecks.forEach(box => box.addEventListener('change', updateReviewSelection));
+  {% if result and result.status == 'running' %}window.setTimeout(() => location.reload(), 10000);{% endif %}
+</script>
+{% endblock %}

@@ -23,6 +23,7 @@
       <a class="button secondary" href="{{ url_for('statement_import', account=account_id) }}">Add a statement</a>
       {% endif %}
       <a class="button secondary" href="{{ url_for('transactions', ai_review='1', purpose='all') }}">Review AI guesses</a>
+      <a class="button secondary" href="{{ url_for('category_review_report') }}">AI category review</a>
       <span class="pill">{{ profiles|length }} household member{{ "" if profiles|length == 1 else "s" }}</span>
     </div>
   </div>
@@ -62,6 +63,31 @@
       {% if transaction_view in ["excluded", "all"] %}<button class="button secondary bulk-button" type="submit" name="action" value="restore" disabled>Restore selected</button>{% endif %}
       {% if transaction_view in ["active", "all"] %}<button class="button primary bulk-button" type="submit" name="action" value="exclude" disabled>Exclude selected</button>{% endif %}
     </div>
+    <details class="bulk-review-details">
+      <summary>Review details for selected transactions</summary>
+      <div class="review-form">
+        <label class="check-label"><input id="bulk-edit-treatment" type="checkbox" name="edit_category_treatment"> Edit treatment for the chosen category</label>
+        <label id="bulk-treatment-label" hidden>Category cash-flow treatment (applies to all transactions in this category)
+          <select id="bulk-treatment" name="category_flow_type" disabled>
+            {% for value, label in flow_types.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Remembered category rules
+          <select id="bulk-rule-action" name="rule_action">
+            <option value="__no_change__">No change to rules</option>
+            <option value="remember">Remember the chosen category for matching descriptions</option>
+            <option value="remove">Remove the matching rule for each selected transaction</option>
+          </select>
+        </label>
+        <div id="bulk-match-options" hidden>
+          <label class="check-label"><input type="checkbox" name="apply_all_accounts" checked> Apply rules to matching transactions in all accounts</label>
+          <label class="check-label"><input type="checkbox" name="individual_override"> Also keep selected transactions as individual user choices</label>
+          <label>Description text to match<input id="bulk-match-value" name="match_value" maxlength="255" placeholder="Leave blank to use each full description"></label>
+          <p class="transaction-sub">Enter a shared phrase found in every selected description, or leave blank to remember each full description. Choose a category above. Uncheck all accounts to limit rules to the selected accounts.</p>
+        </div>
+        <p class="transaction-sub">Only settings you change are applied. Remembering or removing rules can affect unselected and future matching transactions; their individual category overrides still take priority. Description text defines a rule and does not rename transactions.</p>
+      </div>
+    </details>
   </form>
 
   <form id="transaction-table-filters" method="get">
@@ -171,9 +197,12 @@
               <div class="transaction-name">{{ transaction.merchant or transaction.description }}</div>
               {% if transaction.id.startswith('statement:') %}<span class="pill">Statement import</span>{% endif %}
               {% if transaction.statement_overlap %}<span class="pill pending">Possible statement overlap</span><div class="transaction-sub">A statement row and bank-synced row have the same amount within three days. Review before excluding either.</div>{% endif %}
-              {% if transaction.merchant and transaction.description != transaction.merchant %}<div class="transaction-sub">{{ transaction.description }}</div>{% endif %}
+              <div class="transaction-sub">Description: {{ transaction.description or "Missing" }}{% if transaction.description_source == "backfilled" %} · copied from merchant{% endif %}</div>{% if transaction.merchant_source == "backfilled" %}<div class="transaction-sub">Merchant copied from description</div>{% endif %}
             </td>
             <td><span class="pill">{{ transaction.effective_category }}</span>
+              <div class="transaction-sub">{% if transaction.category_override and transaction.category_override_source != 'model' %}Individual user choice{% elif transaction.merchant_rule_id and transaction.merchant_rule_source == 'user' %}User rule{% elif transaction.category_override_source == 'model' or transaction.merchant_rule_source == 'model' %}AI category · can be replaced by a user rule{% else %}No user rule{% endif %}</div>
+              {% if transaction.rule_conflict %}<div><a class="text-link" href="{{ url_for('category_rules', transaction_id=transaction.id) }}">Conflicting rules — review</a></div>{% endif %}
+              <div class="transaction-sub">Category rule text: {% if transaction.category_override and transaction.category_override_source != 'model' %}Individual override{% elif transaction.category_override_source == 'model' and transaction.merchant_rule_source != 'user' %}AI suggestion{% elif transaction.merchant_rule_id %}<a href="{{ url_for('category_rules', q=transaction.merchant_rule_match_value) }}">{{ transaction.merchant_rule_match_value }}</a>{% elif transaction.rule_conflict %}Unresolved{% else %}None{% endif %}</div>
               {% if transaction.ai_review %}<div><span class="pill pending">AI best guess</span></div><div class="transaction-sub">{{ transaction.ai_reason or "The model chose this category with limited evidence." }}</div>{% endif %}
             </td>
             <td>{% if transaction.cash_flow_role == "cash_flow" and transaction.flow_type %}<span class="pill">{{ flow_types[transaction.flow_type] }}</span>{% elif transaction.cash_flow_role == "cash_flow" %}<span class="transaction-sub">Unassigned</span>{% else %}<span class="transaction-sub">Not used</span>{% endif %}</td>
@@ -193,8 +222,10 @@
                 data-name="{{ transaction.merchant or transaction.description }}"
                 data-category="{{ '' if transaction.effective_category == 'Uncategorized' else transaction.effective_category }}"
                 data-flow-type="{{ transaction.flow_type or '' }}"
-                data-recurring-rule="{{ 1 if transaction.merchant_rule_id else 0 }}"
+                data-recurring-rule="{{ 1 if transaction.merchant_rule_id and transaction.merchant_rule_source == "user" else 0 }}"
                 data-rule-id="{{ transaction.merchant_rule_id or '' }}"
+                data-rule-type="{{ transaction.merchant_rule_match_type or 'description' }}"
+                data-user-override="{{ 1 if transaction.category_override and transaction.category_override_source != 'model' else 0 }}"
                 data-rule-match="{{ transaction.merchant_rule_match_value or '' }}"
                 data-rule-all-accounts="{{ transaction.merchant_rule_applies_all_accounts or 0 }}"
                 data-description="{{ transaction.description }}"
@@ -263,12 +294,14 @@
       </select>
     </label>
     <input id="review-rule-id" type="hidden" name="merchant_rule_id">
-    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category for matching descriptions</label>
+    <label class="check-label"><input id="review-remember-match" type="checkbox" name="remember_match"> Remember this category for matching transactions</label>
     <label id="review-all-accounts-label" class="check-label" hidden><input id="review-all-accounts" type="checkbox" name="apply_all_accounts" checked> Apply this rule to matching transactions in all accounts</label>
-    <label id="review-match-label" hidden>Description text to match
+    <label id="review-match-type-label" hidden>Match style<select id="review-match-type" name="rule_match_type" disabled><option value="description">Exact full description</option><option value="description_contains">Description contains phrase</option><option value="merchant">Exact merchant</option></select></label>
+    <label id="review-match-label" hidden>Category rule text
       <input id="review-match-value" name="match_value" maxlength="255" disabled>
     </label>
-    <p class="transaction-sub">Use the full description for an exact match, or shorten it to a distinctive phrase that appears in similar descriptions. Clear the checkbox and save to remove the rule.</p>
+    <p class="transaction-sub">Exact matches use the full text, ignoring case and surrounding spaces. Choose contains for a partial description. Overlapping rules are reviewed before saving. Clear Remember and save to remove the saved rule.</p>
+    <label class="check-label"><input id="review-individual-override" type="checkbox" name="individual_only"> Only change this transaction; leave saved rules unchanged</label>
     <label class="check-label"><input id="review-excluded" type="checkbox" name="excluded"> Exclude from all reporting</label>
     <button class="button primary" type="submit">Save changes</button>
   </form>
@@ -376,6 +409,8 @@
   }
   reviewEditTreatment.addEventListener("change", showTreatmentEditor);
   function showMatchEditor() {
+    document.querySelector("#review-match-type-label").hidden = !reviewRememberMatch.checked;
+    document.querySelector("#review-match-type").disabled = !reviewRememberMatch.checked;
     reviewMatchLabel.hidden = !reviewRememberMatch.checked;
     reviewMatchValue.disabled = !reviewRememberMatch.checked;
     reviewMatchValue.required = reviewRememberMatch.checked;
@@ -383,6 +418,17 @@
     reviewAllAccounts.disabled = !reviewRememberMatch.checked;
   }
   reviewRememberMatch.addEventListener("change", showMatchEditor);
+  const individualOnly = document.querySelector('#review-individual-override');
+  function showIndividualChoice() {
+    reviewRememberMatch.disabled = individualOnly.checked;
+    showMatchEditor();
+    if (individualOnly.checked) {
+      reviewAllAccounts.disabled = true;
+      reviewMatchValue.disabled = true;
+      document.querySelector('#review-match-type').disabled = true;
+    }
+  }
+  individualOnly.addEventListener('change', showIndividualChoice);
   function showReviewNewCategory() {
     const show = reviewCategory.value === "__new__";
     reviewNewCategoryLabel.hidden = !show;
@@ -397,7 +443,43 @@
     showTreatmentEditor();
   }
   reviewCategory.addEventListener("change", showReviewNewCategory);
+  const bulkEditTreatment = document.querySelector("#bulk-edit-treatment");
+  const bulkTreatment = document.querySelector("#bulk-treatment");
+  const bulkRuleAction = document.querySelector("#bulk-rule-action");
+  function updateBulkDetails() {
+    document.querySelector("#bulk-treatment-label").hidden = !bulkEditTreatment.checked;
+    bulkTreatment.disabled = !bulkEditTreatment.checked;
+    document.querySelector("#bulk-match-options").hidden = bulkRuleAction.value !== "remember";
+  }
+  bulkEditTreatment.addEventListener("change", updateBulkDetails);
+  bulkRuleAction.addEventListener("change", updateBulkDetails);
+  document.querySelector("#bulk-transaction-form").addEventListener("submit", async event => {
+    if (event.submitter?.value !== "apply") return;
+    event.preventDefault();
+    if ((bulkEditTreatment.checked || bulkRuleAction.value === "remember")
+        && ["", "__no_change__"].includes(bulkCategory.value)) {
+      showNotice("Choose a category when changing treatment or remembering a rule.", "error");
+      bulkCategory.focus();
+      return;
+    }
+    const data = new FormData(event.currentTarget);
+    data.set("action", "apply");
+    bulkButtons.forEach(button => button.disabled = true);
+    try {
+      const response = await fetch("/api/transactions/bulk", {method: "POST", body: data});
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(response.status === 400 && !message.includes("<")
+          ? message : "Changes could not be saved. Refresh the page and try again.");
+      }
+      location.href = response.url;
+    } catch (error) {
+      showNotice(error.message, "error");
+      updateBulkSelection();
+    }
+  });
   bulkCategory.addEventListener("change", () => {
+    bulkTreatment.value = categoryFlowDefaults[bulkCategory.value] || "spending";
     const show = bulkCategory.value === "__new__";
     bulkNewCategory.hidden = !show;
     bulkNewCategoryFlow.hidden = !show;
@@ -413,9 +495,11 @@
       reviewRememberMatch.checked = button.dataset.recurringRule === "1";
       reviewAllAccounts.checked = button.dataset.recurringRule !== "1"
         || button.dataset.ruleAllAccounts === "1";
+      document.querySelector("#review-match-type").value = button.dataset.ruleType;
+      document.querySelector("#review-individual-override").checked = button.dataset.userOverride === "1";
       reviewRuleId.value = button.dataset.ruleId;
       reviewMatchValue.value = button.dataset.ruleMatch || button.dataset.description;
-      showMatchEditor();
+      showIndividualChoice();
       reviewExcluded.checked = button.dataset.excluded === "1";
       showReviewNewCategory();
       reviewDialog.showModal();

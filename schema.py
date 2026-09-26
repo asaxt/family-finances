@@ -1,11 +1,12 @@
+from category_matching import trimmed_sql
+
 from vault import (
     create_encrypted_backup,
-    delete_encrypted_backup,
     restore_encrypted_backup,
 )
 
 
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 16
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -112,10 +113,18 @@ VERSION_FOURTEEN_COLUMNS = {
     "transactions": VERSION_TEN_COLUMNS["transactions"]
     | {"category_override_source"},
 }
-EXPECTED_COLUMNS = {
+VERSION_FIFTEEN_COLUMNS = {
     **VERSION_FOURTEEN_COLUMNS,
     "merchant_rules": VERSION_TEN_COLUMNS["merchant_rules"]
     | {"applies_all_accounts"},
+}
+
+
+EXPECTED_COLUMNS = {
+    **VERSION_FIFTEEN_COLUMNS,
+    "transactions": VERSION_FIFTEEN_COLUMNS["transactions"] | {"merchant_source", "description_source"},
+    "merchant_rules": VERSION_FIFTEEN_COLUMNS["merchant_rules"] | {"source"},
+    "rule_fallbacks": {"preferred_id", "fallback_id"},
 }
 
 
@@ -213,7 +222,7 @@ def _validate_version_twelve(connection):
 
 
 def _validate_version_fifteen(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 15)
+    _validate_columns(connection, VERSION_FIFTEEN_COLUMNS, 15)
 
 
 def _migrate_zero_to_one(connection):
@@ -580,6 +589,59 @@ def _migrate_fourteen_to_fifteen(connection):
     )
 
 
+def _validate_version_sixteen(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 16)
+
+
+def _migrate_fifteen_to_sixteen(connection):
+    # Retain the previous category as a fallback for pre-existing ambiguous rules.
+    connection.execute("""
+        UPDATE transactions AS t SET category = COALESCE(t.category_override, (
+            SELECT mr.category FROM merchant_rules mr
+            WHERE (mr.account_id = t.account_id OR mr.applies_all_accounts = 1)
+              AND ((mr.match_type = 'description' AND mr.match_value = TRIM(t.description) COLLATE NOCASE)
+                OR (mr.match_type = 'description_contains' AND INSTR(LOWER(TRIM(t.description)), LOWER(mr.match_value)) > 0))
+            ORDER BY CASE mr.match_type WHEN 'description' THEN 0 ELSE 1 END,
+                LENGTH(mr.match_value) DESC, mr.applies_all_accounts, mr.id LIMIT 1
+        ), t.category)
+        WHERE COALESCE(t.category_override_source, '') != 'user'
+    """)
+    for field in ('merchant', 'description'):
+        connection.execute(f"ALTER TABLE transactions ADD COLUMN {field}_source TEXT NOT NULL DEFAULT 'provided' CHECK ({field}_source IN ('provided', 'backfilled', 'missing'))")
+    connection.execute("ALTER TABLE merchant_rules ADD COLUMN source TEXT NOT NULL DEFAULT 'user' CHECK (source IN ('user', 'model'))")
+    connection.execute("""CREATE TABLE rule_fallbacks (
+        preferred_id INTEGER NOT NULL REFERENCES merchant_rules(id) ON DELETE CASCADE,
+        fallback_id INTEGER NOT NULL REFERENCES merchant_rules(id) ON DELETE CASCADE,
+        PRIMARY KEY (preferred_id, fallback_id), CHECK (preferred_id != fallback_id)
+    )""")
+    merchant = trimmed_sql('merchant')
+    description = trimmed_sql('description')
+    connection.execute(f"""UPDATE transactions SET
+        merchant_source = CASE WHEN {merchant} != '' THEN 'provided'
+            WHEN {description} != '' THEN 'backfilled' ELSE 'missing' END,
+        description_source = CASE WHEN {description} != '' THEN 'provided'
+            WHEN {merchant} != '' THEN 'backfilled' ELSE 'missing' END,
+        merchant = CASE WHEN {merchant} = '' THEN CASE WHEN {description} != '' THEN description ELSE '' END ELSE merchant END,
+        description = CASE WHEN {description} = '' THEN CASE WHEN {merchant} != '' THEN merchant ELSE '' END ELSE description END
+    """)
+    merchant = trimmed_sql('NEW.merchant')
+    description = trimmed_sql('NEW.description')
+    for event in ('INSERT', 'UPDATE OF merchant, description'):
+        name = 'insert' if event == 'INSERT' else 'update'
+        connection.execute(f"""CREATE TRIGGER complete_transaction_text_{name} AFTER {event} ON transactions
+        WHEN {merchant} = '' OR {description} = ''
+        BEGIN
+          UPDATE transactions SET
+            merchant_source = CASE WHEN {merchant} = '' THEN
+              CASE WHEN {description} = '' THEN 'missing' ELSE 'backfilled' END ELSE NEW.merchant_source END,
+            description_source = CASE WHEN {description} = '' THEN
+              CASE WHEN {merchant} = '' THEN 'missing' ELSE 'backfilled' END ELSE NEW.description_source END,
+            merchant = CASE WHEN {merchant} = '' THEN CASE WHEN {description} != '' THEN NEW.description ELSE '' END ELSE NEW.merchant END,
+            description = CASE WHEN {description} = '' THEN CASE WHEN {merchant} != '' THEN NEW.merchant ELSE '' END ELSE NEW.description END
+          WHERE id = NEW.id;
+        END""")
+
+
 VALIDATORS = {
     0: _validate_version_zero,
     1: _validate_version_one,
@@ -597,6 +659,7 @@ VALIDATORS = {
     13: _validate_version_twelve,
     14: _validate_version_twelve,
     15: _validate_version_fifteen,
+    16: _validate_version_sixteen,
 }
 MIGRATIONS = {
     0: _migrate_zero_to_one,
@@ -614,6 +677,7 @@ MIGRATIONS = {
     12: _migrate_twelve_to_thirteen,
     13: _migrate_thirteen_to_fourteen,
     14: _migrate_fourteen_to_fifteen,
+    15: _migrate_fifteen_to_sixteen,
 }
 
 
@@ -764,7 +828,7 @@ def create_schema(connection):
                 ('Loan Disbursements', 'earned_income'),
                 ('Reimbursed Work Travel', 'earned_income'),
                 ('Transfer', 'transfer');
-            PRAGMA user_version = {CURRENT_SCHEMA_VERSION};
+            PRAGMA user_version = 15;
 
             COMMIT;
             """
@@ -772,6 +836,7 @@ def create_schema(connection):
     except Exception:
         connection.rollback()
         raise
+    migrate_schema(connection)
     validate_schema(connection)
 
 
@@ -843,5 +908,5 @@ def prepare_encrypted_database(database, data_key, auth_path):
         database.unlock(data_key)
         raise
     else:
-        delete_encrypted_backup(backup_dir)
+        # Keep the encrypted vault/auth pair available for deliberate rollback.
         return True

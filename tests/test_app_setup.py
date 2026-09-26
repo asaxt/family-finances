@@ -49,10 +49,98 @@ class AppSetupTests(unittest.TestCase):
             rb'name="csrf_token" value="([^"]+)"', response.data
         ).group(1).decode()
 
+    def post_with_rule_review(self, path, **kwargs):
+        response = self.client.post(path, **kwargs)
+        if response.status_code == 303 and '/category-rules/preview/' in response.location:
+            page = self.client.get(response.location)
+            self.assertEqual(page.status_code, 200)
+            response = self.client.post(response.location, data={
+                'csrf_token': self.csrf_token(page), 'choice': 'replace'})
+        return response
+
+    def prepare_bulk_review(self):
+        page = self.client.get("/setup")
+        self.post_with_rule_review("/setup", data={
+            "csrf_token": self.csrf_token(page),
+            "password": "fictional bulk test password",
+            "confirmation": "fictional bulk test password",
+        })
+        with self.application.db() as connection:
+            connection.execute("INSERT INTO connections (id, owner_name, institution, access_token) "
+                               "VALUES (1, 'EXAMPLE PERSON', 'EXAMPLE BANK', 'fake-token')")
+            for account in ("sample-a", "sample-b"):
+                connection.execute(
+                    "INSERT INTO accounts (id, connection_id, institution, name, type) "
+                    "VALUES (?, 1, 'EXAMPLE BANK', 'EXAMPLE ACCOUNT', 'depository')", (account,))
+            for identifier, account, description in (
+                ("sample-1", "sample-a", "SAMPLE CAFE ALPHA"),
+                ("sample-2", "sample-b", "SAMPLE CAFE BETA"),
+                ("sample-3", "sample-b", "SAMPLE CAFE GAMMA"),
+            ):
+                connection.execute(
+                    "INSERT INTO transactions (id, account_id, amount, currency, description, "
+                    "pending, transacted_at, category, excluded, flow_override) "
+                    "VALUES (?, ?, 123, 'USD', ?, 0, '2001-01-02', 'EXAMPLE CATEGORY', 1, 'transfer')",
+                    (identifier, account, description))
+            connection.execute("INSERT INTO category_rules (name, flow_type) "
+                               "VALUES ('EXAMPLE CATEGORY', 'spending')")
+        page = self.client.get("/transactions?purpose=all&view=all")
+        self.assertIn(b"Review details for selected transactions", page.data)
+        return {"csrf_token": self.csrf_token(page), "action": "apply",
+                "transaction_ids": ["sample-1", "sample-2"],
+                "category_choice": "EXAMPLE CATEGORY"}
+
+    def test_bulk_review_shared_phrase_and_treatment(self):
+        data = self.prepare_bulk_review()
+        data.update(rule_action="remember", match_value="sample cafe", apply_all_accounts="on",
+                    edit_category_treatment="on", category_flow_type="earned_income", inclusion="include")
+        self.assertEqual(self.post_with_rule_review("/api/transactions/bulk", data=data).status_code, 302)
+        with self.application.db() as connection:
+            rules = connection.execute("SELECT match_type, match_value, applies_all_accounts FROM merchant_rules").fetchall()
+            self.assertEqual([tuple(row) for row in rules], [("description_contains", "sample cafe", 1)])
+            rows = connection.execute("SELECT id, category_override_source, flow_override, excluded FROM transactions ORDER BY id").fetchall()
+            self.assertEqual([tuple(row) for row in rows], [
+                ("sample-1", None, None, 0), ("sample-2", None, None, 0),
+                ("sample-3", None, "transfer", 1)])
+            self.assertEqual(connection.execute("SELECT flow_type FROM category_rules WHERE name = 'EXAMPLE CATEGORY'").fetchone()[0], "earned_income")
+
+    def test_bulk_review_account_scope_and_exact_descriptions(self):
+        data = self.prepare_bulk_review()
+        data.update(rule_action="remember", match_value="SAMPLE CAFE")
+        self.post_with_rule_review("/api/transactions/bulk", data=data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM merchant_rules WHERE applies_all_accounts = 0").fetchone()[0], 2)
+        data.update(match_value="", apply_all_accounts="on")
+        self.post_with_rule_review("/api/transactions/bulk", data=data)
+        with self.application.db() as connection:
+            rules = connection.execute("SELECT match_type, match_value FROM merchant_rules ORDER BY match_value").fetchall()
+            self.assertEqual([tuple(row) for row in rules], [
+                ("description", "SAMPLE CAFE ALPHA"), ("description", "SAMPLE CAFE BETA")])
+
+    def test_bulk_review_invalid_phrase_is_atomic_and_defaults_preserve_rules(self):
+        data = self.prepare_bulk_review()
+        data.update(rule_action="remember", match_value="SAMPLE CAFE", apply_all_accounts="on")
+        self.post_with_rule_review("/api/transactions/bulk", data=data)
+        data.update(match_value="SAMPLE CAFE ALPHA", category_choice="__new__",
+                    new_category="EXAMPLE NEW CATEGORY", new_category_flow_type="spending", inclusion="include")
+        self.assertEqual(self.post_with_rule_review("/api/transactions/bulk", data=data).status_code, 400)
+        with self.application.db() as connection:
+            self.assertIsNone(connection.execute("SELECT name FROM category_rules WHERE name = 'EXAMPLE NEW CATEGORY'").fetchone())
+            self.assertEqual(connection.execute("SELECT SUM(excluded) FROM transactions").fetchone()[0], 3)
+        data.update(rule_action="__no_change__", category_choice="__no_change__")
+        self.post_with_rule_review("/api/transactions/bulk", data=data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0], 1)
+        data.update(rule_action="remove")
+        self.post_with_rule_review("/api/transactions/bulk", data=data)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM merchant_rules").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE category_override_source = 'user'").fetchone()[0], 0)
+
     def test_new_installation_creates_current_schema_and_encrypted_settings(self):
         password = "a long setup password"
         setup_page = self.client.get("/setup")
-        response = self.client.post(
+        response = self.post_with_rule_review(
             "/setup",
             data={
                 "csrf_token": self.csrf_token(setup_page),
@@ -79,7 +167,7 @@ class AppSetupTests(unittest.TestCase):
         savings_page = self.client.get("/savings")
         token = self.csrf_token(savings_page)
         with self.application.db() as connection:
-            self.assertEqual(schema_version(connection), 15)
+            self.assertEqual(schema_version(connection), 16)
             initial_goal = connection.execute(
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
@@ -174,7 +262,7 @@ class AppSetupTests(unittest.TestCase):
         finally:
             css_response.close()
         self.assertEqual(
-            self.client.post(
+            self.post_with_rule_review(
                 "/api/transaction/deposit",
                 data={
                     "csrf_token": self.csrf_token(transactions_page),
@@ -201,7 +289,7 @@ class AppSetupTests(unittest.TestCase):
         self.assertIn(b"Money in", self.client.get("/cash-flow").data)
 
         transactions_page = self.client.get("/transactions?purpose=all")
-        self.client.post(
+        self.post_with_rule_review(
             "/api/transaction/deposit",
             data={
                 "csrf_token": self.csrf_token(transactions_page),
@@ -222,7 +310,7 @@ class AppSetupTests(unittest.TestCase):
 
         transactions_page = self.client.get("/transactions?purpose=all")
         self.assertEqual(
-            self.client.post(
+            self.post_with_rule_review(
                 "/api/transactions/bulk",
                 data={
                     "csrf_token": self.csrf_token(transactions_page),
@@ -241,21 +329,21 @@ class AppSetupTests(unittest.TestCase):
         self.assertEqual(tuple(transaction), ("Payback", None, 1))
 
         self.assertEqual(
-            self.client.post(
+            self.post_with_rule_review(
                 "/api/app-name",
                 data={"csrf_token": token, "app_name": "My Money"},
             ).status_code,
             302,
         )
         self.assertEqual(
-            self.client.post(
+            self.post_with_rule_review(
                 "/api/savings-goal",
                 data={"csrf_token": token, "goal": "2500000"},
             ).status_code,
             302,
         )
         self.assertEqual(
-            self.client.post(
+            self.post_with_rule_review(
                 "/api/plaid-settings",
                 data={
                     "csrf_token": token,
@@ -286,7 +374,7 @@ class AppSetupTests(unittest.TestCase):
         settings_page = self.client.get("/settings")
         self.assertIn(b"Accounts included in reporting", settings_page.data)
         self.assertIn(b"Include in reporting", settings_page.data)
-        saved_roles = self.client.post(
+        saved_roles = self.post_with_rule_review(
             "/api/account-roles",
             data={
                 "csrf_token": self.csrf_token(settings_page),
@@ -306,7 +394,7 @@ class AppSetupTests(unittest.TestCase):
         self.assertEqual(tuple(role), ("cash_flow", 1))
 
         settings_page = self.client.get("/settings")
-        ignored_role = self.client.post(
+        ignored_role = self.post_with_rule_review(
             "/api/account-roles",
             data={
                 "csrf_token": self.csrf_token(settings_page),
@@ -325,7 +413,7 @@ class AppSetupTests(unittest.TestCase):
         self.assertEqual(tuple(role), ("other", 0))
 
         settings_page = self.client.get("/settings")
-        rejected_roles = self.client.post(
+        rejected_roles = self.post_with_rule_review(
             "/api/account-roles",
             data={
                 "csrf_token": self.csrf_token(settings_page),
@@ -341,7 +429,7 @@ class AppSetupTests(unittest.TestCase):
         self.assertNotIn(b"test-client-id", encrypted)
 
         self.assertEqual(
-            self.client.post(
+            self.post_with_rule_review(
                 "/logout",
                 data={"csrf_token": token},
             ).status_code,
@@ -350,7 +438,7 @@ class AppSetupTests(unittest.TestCase):
         login_page = self.client.get("/login")
         login_token = self.csrf_token(login_page)
         self.assertEqual(self.client.get("/favicon.ico").status_code, 204)
-        rejected_login = self.client.post(
+        rejected_login = self.post_with_rule_review(
             "/login",
             data={
                 "csrf_token": login_token,
@@ -363,7 +451,7 @@ class AppSetupTests(unittest.TestCase):
     def test_local_ai_can_be_enabled_in_the_normal_app_and_defaults_off(self):
         password = "a long setup password"
         setup_page = self.client.get("/setup")
-        self.client.post(
+        self.post_with_rule_review(
             "/setup",
             data={
                 "csrf_token": self.csrf_token(setup_page),
@@ -376,14 +464,14 @@ class AppSetupTests(unittest.TestCase):
         self.assertIn(b"Local AI assistance", settings.data)
         self.assertNotIn(b'name="enabled" checked', settings.data)
         token = self.csrf_token(settings)
-        blocked = self.client.post(
+        blocked = self.post_with_rule_review(
             "/api/local-ai/evaluation",
             json={},
             headers={"X-CSRF-Token": token},
         )
         self.assertEqual(blocked.status_code, 403)
 
-        response = self.client.post(
+        response = self.post_with_rule_review(
             "/api/local-ai",
             data={"csrf_token": token, "enabled": "on"},
         )
@@ -392,7 +480,7 @@ class AppSetupTests(unittest.TestCase):
         transactions = self.client.get("/transactions")
         self.assertIn(b"Set up categories", transactions.data)
         self.assertNotIn(b'id="run-local-categorization"', transactions.data)
-        needs_categories = self.client.post(
+        needs_categories = self.post_with_rule_review(
             "/api/local-ai/evaluation",
             json={},
             headers={"X-CSRF-Token": token},
@@ -401,7 +489,7 @@ class AppSetupTests(unittest.TestCase):
 
     def test_recurring_transaction_rule_updates_existing_and_future_matches(self):
         setup_page = self.client.get("/setup")
-        self.client.post(
+        self.post_with_rule_review(
             "/setup",
             data={
                 "csrf_token": self.csrf_token(setup_page),
@@ -463,7 +551,7 @@ class AppSetupTests(unittest.TestCase):
             )
 
         page = self.client.get("/transactions?purpose=all")
-        self.client.post(
+        self.post_with_rule_review(
             "/api/transaction/reviewed",
             data={
                 "csrf_token": self.csrf_token(page),
@@ -542,7 +630,7 @@ class AppSetupTests(unittest.TestCase):
         self.assertEqual(overridden["flow_type"], "transfer")
 
         page = self.client.get("/transactions?purpose=all")
-        self.client.post(
+        self.post_with_rule_review(
             "/api/transaction/reviewed",
             data={
                 "csrf_token": self.csrf_token(page),
@@ -565,7 +653,7 @@ class AppSetupTests(unittest.TestCase):
         self.assertTrue(reverted["spending_included"])
 
         page = self.client.get("/transactions?purpose=all")
-        self.client.post(
+        self.post_with_rule_review(
             "/api/transaction/reviewed",
             data={
                 "csrf_token": self.csrf_token(page),
@@ -607,7 +695,7 @@ class AppSetupTests(unittest.TestCase):
         self.assertNotIn(b"Payment detail", category_filtered.data)
 
         rules_page = self.client.get("/category-rules")
-        self.client.post(
+        self.post_with_rule_review(
             "/api/category-rules/bulk",
             data={
                 "csrf_token": self.csrf_token(rules_page),
@@ -630,7 +718,7 @@ class AppSetupTests(unittest.TestCase):
 
         rule_id = rule_ids["Payment detail"]
         rules_page = self.client.get("/category-rules")
-        self.client.post(
+        self.post_with_rule_review(
             f"/api/category-rule/{rule_id}",
             data={
                 "csrf_token": self.csrf_token(rules_page),
@@ -648,12 +736,12 @@ class AppSetupTests(unittest.TestCase):
                 1,
             )
         rules_page = self.client.get("/category-rules")
-        self.client.post(
+        self.post_with_rule_review(
             f"/api/category-rule/{rule_id}/delete",
             data={"csrf_token": self.csrf_token(rules_page)},
         )
         rules_page = self.client.get("/category-rules")
-        self.client.post(
+        self.post_with_rule_review(
             f"/api/category-rule/{rule_ids['Example deposit']}/delete",
             data={"csrf_token": self.csrf_token(rules_page)},
         )

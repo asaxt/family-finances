@@ -1,4 +1,7 @@
 import os
+from contextlib import contextmanager
+from werkzeug.datastructures import MultiDict
+import rule_review
 import io
 import base64
 import hashlib
@@ -13,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
-from flask import Flask, Request, Response, abort, has_request_context, jsonify, redirect, render_template, request, session, url_for
+from flask import g, Flask, Request, Response, abort, has_request_context, jsonify, redirect, render_template, request, session, url_for
 from plaid.api import plaid_api
 from plaid.api_client import ApiClient
 from plaid.configuration import Configuration
@@ -60,6 +63,9 @@ from analytics import (
     spending_summary,
     transaction_list,
 )
+from category_matching import complete_text, winning_rule_sql, conflict_sql, match_sql
+import category_review
+
 from llm_evaluation import (
     AI_REVIEW_SETTING,
     apply_categorized_suggestions,
@@ -242,8 +248,6 @@ def unlock_data(password):
     prepare_encrypted_database(vault, data_key, AUTH_PATH)
     if READ_ONLY_MIRROR:
         vault.make_read_only()
-    else:
-        reconcile_saved_model_rules()
     vault_last_activity = time.monotonic()
 
 
@@ -461,6 +465,109 @@ def db():
     return vault.connection()
 
 
+@contextmanager
+def rule_edit_db():
+    with db() as connection:
+        version = rule_review.snapshot(connection)
+        approval = getattr(g, 'rule_approval', None)
+        if approval and approval['snapshot'] != version:
+            abort(409, 'Transactions or rules changed since the preview. Cancel and review the edit again.')
+        before = rule_review.rules(connection)
+        old_categories = rule_review.categories(connection)
+        yield connection
+        after = rule_review.rules(connection)
+        forced = getattr(g, 'resolve_rule_id', None)
+        if before == after and not forced:
+            return
+        if forced:
+            before = {key: value for key, value in before.items() if key != forced}
+        changed, pairs = rule_review.review_changes(connection, before, after)
+        if approval:
+            rule_review.resolve(connection, pairs, approval['choice'])
+            return
+        # Every saved-rule change is reviewable before it affects history.
+        impacts = {}
+        for choice in ('replace', 'fallback'):
+            connection.execute('SAVEPOINT preview_choice')
+            rule_review.resolve(connection, pairs, choice)
+            impacts[choice] = rule_review.impact(old_categories, rule_review.categories(connection))
+            connection.execute('ROLLBACK TO preview_choice')
+            connection.execute('RELEASE preview_choice')
+        raise rule_review.PreviewRequired({
+            'snapshot': version, 'endpoint': request.endpoint, 'args': request.view_args or {},
+            'form': request.form.to_dict(flat=False), 'proposed': changed,
+            'old': [before[key] for key in before if key not in after or before[key] != after[key]],
+            'overlaps': [after[key] for key in sorted({old for _, old in pairs})], 'impacts': impacts,
+        })
+
+
+@app.errorhandler(rule_review.RuleConflict)
+def rule_conflict_error(error):
+    if request.headers.get('Accept') == 'application/json':
+        return jsonify(error=str(error)), 400
+    return str(error), 400
+
+
+@app.errorhandler(rule_review.PreviewRequired)
+def show_rule_preview(error):
+    token = secrets.token_hex(16)
+    preview = {**error.preview, 'created_at': time.time()}
+    with db() as connection:
+        # Expire encrypted drafts after one hour.
+        connection.execute("DELETE FROM settings WHERE key LIKE 'rule_preview_%' AND CAST(json_extract(value, '$.created_at') AS REAL) < ?", (time.time() - 3600,))
+        connection.execute("INSERT INTO settings (key, value) VALUES (?, ?)", ('rule_preview_' + token, json.dumps(preview)))
+    return redirect(url_for('rule_preview', token=token), code=303)
+
+
+def load_rule_preview(connection, token):
+    row = connection.execute("SELECT value FROM settings WHERE key = ?", ('rule_preview_' + token,)).fetchone()
+    if not row:
+        abort(410, 'This preview has expired or was already applied.')
+    preview = json.loads(row[0])
+    if time.time() - preview['created_at'] > 3600:
+        abort(410, 'This preview has expired. Review the edit again.')
+    return preview
+
+
+@app.route('/category-rules/preview/<token>', methods=['GET', 'POST'])
+def rule_preview(token):
+    with db() as connection:
+        preview = load_rule_preview(connection, token)
+    if request.method == 'POST':
+        choice = request.form.get('choice')
+        if choice == 'cancel':
+            with db() as connection:
+                connection.execute('DELETE FROM settings WHERE key = ?', ('rule_preview_' + token,))
+            return redirect(url_for('category_rules'))
+        if choice not in {'replace', 'fallback'}:
+            abort(400)
+        allowed = {'update_transaction', 'bulk_update_transactions', 'update_category_rule',
+                   'bulk_update_category_rules', 'delete_category_rule', 'resolve_existing_rule'}
+        if preview['endpoint'] not in allowed:
+            abort(400)
+        g.rule_approval = {'snapshot': preview['snapshot'], 'choice': choice}
+        request.__dict__['form'] = MultiDict((key, value) for key, values in preview['form'].items() for value in values)
+        response = app.view_functions[preview['endpoint']](**preview['args'])
+        with db() as connection:
+            connection.execute('DELETE FROM settings WHERE key = ?', ('rule_preview_' + token,))
+        return response
+    context = page_context('category_rules')
+    context.update(preview=preview, token=token)
+    return render_template('rule_preview.html', **context)
+
+
+@app.post('/api/category-rule/<int:rule_id>/resolve')
+def resolve_existing_rule(rule_id):
+    with rule_edit_db() as connection:
+        row = connection.execute('SELECT * FROM merchant_rules WHERE id = ?', (rule_id,)).fetchone()
+        if not row:
+            abort(404)
+        # Explicit promotion is included in the preview even when text is unchanged.
+        connection.execute("UPDATE merchant_rules SET source = 'user' WHERE id = ?", (rule_id,))
+        g.resolve_rule_id = rule_id
+    return redirect(url_for('category_rules'))
+
+
 def setting(key):
     with db() as connection:
         row = connection.execute(
@@ -516,19 +623,6 @@ def save_ollama_result(connection, result):
         """,
         (OLLAMA_RESULT_SETTING, json.dumps(result, separators=(",", ":"))),
     )
-
-
-def reconcile_saved_model_rules():
-    with vault.connection() as connection:
-        if not local_ai_enabled(connection):
-            return 0
-        result = load_ollama_result(connection)
-        if not result:
-            return 0
-        rule_count = create_recurring_category_rules(connection, result)
-        if rule_count:
-            save_ollama_result(connection, result)
-        return rule_count
 
 
 def overview_lookback_days():
@@ -823,7 +917,8 @@ def save_transaction(connection, transaction):
     if not connection.execute("SELECT 1 FROM transactions WHERE id = ?", (transaction.transaction_id,)).fetchone():
         imported_id = statements.matching_import(
             connection, transaction.account_id, transaction.date.isoformat(),
-            round(transaction.amount * 100), transaction.iso_currency_code or "USD", transaction.name,
+            round(transaction.amount * 100), transaction.iso_currency_code or "USD",
+            complete_text(transaction.merchant_name, transaction.name)["description"],
         ) if not transaction.pending else None
         if imported_id:
             connection.execute("UPDATE transactions SET id = ? WHERE id = ?", (transaction.transaction_id, imported_id))
@@ -831,32 +926,36 @@ def save_transaction(connection, transaction):
             if imported_id in reviews:
                 reviews[transaction.transaction_id] = reviews.pop(imported_id)
                 save_ai_reviews(connection, reviews)
+    previous = connection.execute("SELECT * FROM transactions WHERE id = ?", (transaction.transaction_id,)).fetchone()
+    text = complete_text(transaction.merchant_name, transaction.name, previous)
     category = "Uncategorized"
     connection.execute(
         """
         INSERT INTO transactions (
             id, account_id, amount, currency, description, merchant,
-            pending, transacted_at, category, excluded
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            pending, transacted_at, category, excluded, merchant_source, description_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             amount = excluded.amount,
             description = excluded.description,
             merchant = excluded.merchant,
             pending = excluded.pending,
             transacted_at = excluded.transacted_at,
-            category = excluded.category
+            merchant_source = excluded.merchant_source,
+            description_source = excluded.description_source
         """,
         (
             transaction.transaction_id,
             transaction.account_id,
             round(transaction.amount * 100),
             transaction.iso_currency_code or "USD",
-            transaction.name,
-            transaction.merchant_name,
+            text['description'],
+            text['merchant'],
             int(transaction.pending),
             transaction.date.isoformat(),
             category,
             0,
+            text['merchant_source'], text['description_source'],
         ),
     )
 
@@ -1216,6 +1315,16 @@ def categories():
     return render_template("categories.html", **context)
 
 
+CATEGORY_RULE_ERRORS = {
+    "invalid": "Choose valid settings and nonempty matching text of at most 255 characters.",
+    "duplicate": "That saved account already has a rule for this matching text.",
+    "missing": "Some selected rules no longer exist. Reload the table and select them again.",
+    "unselected": "These changes overlap an unselected rule. Select that rule too, or use different matching text.",
+    "conflict": "These changes create matching rules with different categories, scopes, or treatments. Choose consistent settings or edit fewer rules.",
+    "combine": "These changes make selected rules identical. Check Combine identical selected rules to merge them, or edit fewer rules.",
+}
+
+
 @app.get("/category-rules")
 def category_rules():
     context = page_context("category_rules")
@@ -1236,8 +1345,12 @@ def category_rules():
         "matches_desc": "match_count DESC, mr.match_value COLLATE NOCASE",
         "account_asc": "c.owner_name COLLATE NOCASE, a.name COLLATE NOCASE, mr.match_value COLLATE NOCASE",
     }.get(sort, "mr.match_value COLLATE NOCASE, mr.id")
+    transaction_id = request.args.get("transaction_id")
     conditions = []
     parameters = []
+    if transaction_id:
+        conditions.append(f"EXISTS (SELECT 1 FROM transactions t WHERE t.id = ? AND {match_sql('mr')})")
+        parameters.append(transaction_id)
     if search_query:
         conditions.append("mr.match_value LIKE ? ESCAPE '\\'")
         parameters.append(
@@ -1261,24 +1374,12 @@ def category_rules():
     with db() as connection:
         context["category_rules"] = connection.execute(
             f"""
-            SELECT mr.id, mr.match_type, mr.match_value, mr.category,
+            SELECT mr.id, mr.match_type, mr.match_value, mr.category, mr.source,
                    mr.applies_all_accounts, a.name AS account_name,
                    a.mask, c.owner_name, c.institution,
                    (
                      SELECT COUNT(*) FROM transactions t
-                     WHERE (mr.applies_all_accounts = 1
-                            OR t.account_id = mr.account_id)
-                       AND (
-                         (mr.match_type IN ('merchant', 'description')
-                          AND mr.match_value = CASE
-                            WHEN mr.match_type = 'merchant'
-                              THEN COALESCE(NULLIF(t.merchant, ''), t.description)
-                            ELSE TRIM(t.description)
-                          END COLLATE NOCASE)
-                         OR (mr.match_type = 'description_contains'
-                             AND INSTR(LOWER(TRIM(t.description)),
-                                       LOWER(mr.match_value)) > 0)
-                       )
+                     WHERE {match_sql('mr')}
                    ) AS match_count
             FROM merchant_rules mr
             JOIN accounts a ON a.id = mr.account_id
@@ -1299,7 +1400,13 @@ def category_rules():
                 """
             )
         ]
+        context["category_flow_defaults"] = dict(connection.execute("SELECT name, flow_type FROM category_rules"))
+        context['fallbacks'] = [dict(row) for row in connection.execute("SELECT f.*, p.match_value AS preferred_text, o.match_value AS fallback_text FROM rule_fallbacks f JOIN merchant_rules p ON p.id=f.preferred_id JOIN merchant_rules o ON o.id=f.fallback_id")]
+        context['conflict_count'] = connection.execute(f"SELECT COUNT(*) FROM transactions t WHERE {conflict_sql()}").fetchone()[0]
+
     context["rule_error"] = request.args.get("error")
+    context["rule_error_message"] = CATEGORY_RULE_ERRORS.get(context["rule_error"], CATEGORY_RULE_ERRORS["invalid"])
+    context["flow_types"] = FLOW_TYPES
     context.update(
         search_query=search_query,
         selected_category=category,
@@ -1308,58 +1415,118 @@ def category_rules():
         rule_match_type=match_type,
         rule_sort=sort,
         table_filters_active=bool(
-            search_query or category or scope or rule_account or match_type
+            search_query or category or scope or rule_account or match_type or transaction_id
             or sort != "match_asc"
         ),
     )
     return render_template("category_rules.html", **context)
 
 
+def category_rules_redirect(error=None):
+    return redirect(url_for(
+        "category_rules", error=error,
+        q=request.form.get("return_q", ""),
+        category=request.form.get("return_category", ""),
+        scope=request.form.get("return_scope", ""),
+        rule_account=request.form.get("return_account", ""),
+        match_type=request.form.get("return_match_type", ""),
+        sort=request.form.get("return_sort", "match_asc"),
+    ))
+
+
+def apply_category_rule_changes(connection, form):
+    try:
+        rule_ids = {int(value) for value in form.getlist("rule_ids")}
+    except ValueError:
+        raise ValueError("invalid") from None
+    if not rule_ids:
+        return
+    original = [dict(row) for row in connection.execute("SELECT * FROM merchant_rules ORDER BY id")]
+    selected = [row for row in original if row["id"] in rule_ids]
+    if len(selected) != len(rule_ids):
+        raise ValueError("missing")
+    action = form.get("action", "apply")
+    if action == "delete":
+        connection.executemany("DELETE FROM merchant_rules WHERE id = ?", [(row["id"],) for row in selected])
+        return
+    if action != "apply":
+        raise ValueError("invalid")
+    scope = form.get("scope_change", "__no_change__")
+    choice = form.get("category_change", "__no_change__")
+    match_type = form.get("match_type_change", "__no_change__")
+    replace_text = form.get("replace_match_text") == "on"
+    text = form.get("match_value", "").strip()
+    edit_treatment = form.get("edit_category_treatment") == "on"
+    treatment = form.get("category_flow_type", "")
+    if (scope not in {"__no_change__", "all", "account"}
+            or match_type not in {"__no_change__", "merchant", "description", "description_contains"}
+            or (replace_text and (not text or len(text) > 255))
+            or (edit_treatment and choice == "__no_change__")
+            or ((edit_treatment or choice == "__new__") and treatment not in FLOW_TYPES)):
+        raise ValueError("invalid")
+    changes = {}
+    if scope != "__no_change__":
+        changes["applies_all_accounts"] = int(scope == "all")
+    if match_type != "__no_change__":
+        changes["match_type"] = match_type
+    if replace_text:
+        changes["match_value"] = text
+    if choice != "__no_change__":
+        valid, category = selected_category(connection, choice, form.get("new_category"), treatment)
+        if not valid or not category:
+            raise ValueError("invalid")
+        changes.update(category=category, flow_type=None, spending_override=None)
+        if edit_treatment:
+            connection.execute(
+                "INSERT INTO category_rules (name, flow_type) VALUES (?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET flow_type = excluded.flow_type",
+                (category, treatment),
+            )
+    if not changes:
+        return
+    # Match SQLite NOCASE semantics without conflating distinct Unicode text.
+    ascii_lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    plans = {}
+    for row in original:
+        planned = {**row, **changes, 'source': 'user'} if row["id"] in rule_ids else row
+        key = (planned["account_id"], planned["match_type"], planned["match_value"].translate(ascii_lower))
+        plans.setdefault(key, []).append(planned)
+    remove_ids = []
+    updates = []
+    for group in plans.values():
+        if not any(row["id"] in rule_ids for row in group):
+            continue
+        if len(group) > 1:
+            if any(row["id"] not in rule_ids for row in group):
+                raise ValueError("unselected")
+            outcomes = {(row["category"].translate(ascii_lower), row["applies_all_accounts"],
+                         row["flow_type"], row["spending_override"]) for row in group}
+            if len(outcomes) != 1:
+                raise ValueError("conflict")
+            if form.get("combine_duplicates") != "on":
+                raise ValueError("combine")
+            remove_ids.extend(row["id"] for row in group[1:])
+        updates.append(group[0])
+    connection.executemany("DELETE FROM merchant_rules WHERE id = ?", [(value,) for value in remove_ids])
+    connection.executemany(
+        "UPDATE merchant_rules SET match_value = :match_value, match_type = :match_type, "
+        "category = :category, applies_all_accounts = :applies_all_accounts, "
+        "flow_type = :flow_type, spending_override = :spending_override, source = :source WHERE id = :id",
+        updates,
+    )
+
+
 @app.post("/api/category-rules/bulk")
 def bulk_update_category_rules():
-    rule_ids = list(dict.fromkeys(request.form.getlist("rule_ids")))
     try:
-        rule_ids = [int(rule_id) for rule_id in rule_ids]
-    except ValueError:
-        rule_ids = []
-    if not rule_ids:
-        return redirect(url_for("category_rules"))
-    scope = request.form.get("scope_change", "__no_change__")
-    category = request.form.get("category_change", "__no_change__")
-    assignments = []
-    parameters = []
-    if scope in {"all", "account"}:
-        assignments.append("applies_all_accounts = ?")
-        parameters.append(int(scope == "all"))
-    if category != "__no_change__":
-        category = normalized_category(category or "")
-        with db() as connection:
-            canonical = canonical_category(connection, category) if category else None
-        if not canonical:
-            return redirect(url_for("category_rules", error="invalid"))
-        assignments.extend(
-            ["category = ?", "flow_type = NULL", "spending_override = NULL"]
-        )
-        parameters.append(canonical[0])
-    if assignments:
-        placeholders = ",".join("?" for _ in rule_ids)
-        with db() as connection:
-            connection.execute(
-                f"UPDATE merchant_rules SET {', '.join(assignments)} "
-                f"WHERE id IN ({placeholders})",
-                [*parameters, *rule_ids],
-            )
-    return redirect(
-        url_for(
-            "category_rules",
-            q=request.form.get("return_q", ""),
-            category=request.form.get("return_category", ""),
-            scope=request.form.get("return_scope", ""),
-            rule_account=request.form.get("return_account", ""),
-            match_type=request.form.get("return_match_type", ""),
-            sort=request.form.get("return_sort", "match_asc"),
-        )
-    )
+        with rule_edit_db() as connection:
+            apply_category_rule_changes(connection, request.form)
+    except (ValueError, sqlite3.IntegrityError) as error:
+        code = str(error) if isinstance(error, ValueError) else "duplicate"
+        if request.headers.get("Accept") == "application/json":
+            return jsonify(error=CATEGORY_RULE_ERRORS.get(code, CATEGORY_RULE_ERRORS["invalid"])), 400
+        return category_rules_redirect(error=code)
+    return category_rules_redirect()
 
 
 @app.post("/api/category-rule/<int:rule_id>")
@@ -1368,14 +1535,17 @@ def update_category_rule(rule_id):
     category = normalized_category(request.form.get("category", ""))
     if not match_value or len(match_value) > 255 or not category:
         return redirect(url_for("category_rules", error="invalid"))
-    with db() as connection:
+    match_type = request.form.get("match_type")
+    if match_type and match_type not in {"merchant", "description", "description_contains"}:
+        abort(400)
+    with rule_edit_db() as connection:
         if not canonical_category(connection, category):
             return redirect(url_for("category_rules", error="invalid"))
         try:
             connection.execute(
                 """
                 UPDATE merchant_rules
-                SET match_value = ?, category = ?, applies_all_accounts = ?,
+                SET match_value = ?, category = ?, applies_all_accounts = ?, match_type = COALESCE(?, match_type), source = 'user',
                     flow_type = NULL, spending_override = NULL
                 WHERE id = ?
                 """,
@@ -1383,6 +1553,7 @@ def update_category_rule(rule_id):
                     match_value,
                     category,
                     int(request.form.get("apply_all_accounts") == "on"),
+                    match_type,
                     rule_id,
                 ),
             )
@@ -1393,7 +1564,7 @@ def update_category_rule(rule_id):
 
 @app.post("/api/category-rule/<int:rule_id>/delete")
 def delete_category_rule(rule_id):
-    with db() as connection:
+    with rule_edit_db() as connection:
         connection.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
     return redirect(url_for("category_rules"))
 
@@ -2363,6 +2534,80 @@ def recurring_match(transaction):
     return "description", transaction["description"].strip()
 
 
+def matching_transaction_rule(connection, transaction, form):
+    rule_id = form.get('merchant_rule_id', '').strip()
+    if rule_id:
+        return connection.execute('SELECT * FROM merchant_rules WHERE id = ? AND (account_id = ? OR applies_all_accounts = 1)', (rule_id, transaction['account_id'])).fetchone()
+    return connection.execute(f"""SELECT mr.* FROM (SELECT ? AS account_id, ? AS merchant, ? AS description) t
+        JOIN merchant_rules mr ON mr.id = {winning_rule_sql()}""",
+        (transaction['account_id'], transaction['merchant'], transaction['description'])).fetchone()
+
+
+def update_transaction_rule(connection, transaction, category, form, *, replace_existing=True):
+    match_type, full_match_value = recurring_match(transaction)
+    existing_rule = matching_transaction_rule(connection, transaction, form) if replace_existing else None
+    if form.get("remember_match") == "on":
+        applies_all_accounts = int(
+            form.get("apply_all_accounts") == "on"
+        )
+        match_value = form.get("match_value", "").strip() or full_match_value
+        if not match_value or len(match_value) > 255:
+            return False
+        match_type = (
+            "description"
+            if match_value.casefold() == full_match_value.casefold()
+            else "description_contains"
+        )
+        requested_type = form.get("rule_match_type")
+        if requested_type:
+            if requested_type not in {"merchant", "description", "description_contains"}:
+                abort(400)
+            match_type = requested_type
+        recurring_category = category or (
+            existing_rule["category"] if existing_rule else transaction["category"]
+        )
+        same_rule = existing_rule and (
+            existing_rule["match_type"] == match_type
+            and existing_rule["match_value"].casefold() == match_value.casefold()
+        )
+        if same_rule:
+            connection.execute(
+                """
+                UPDATE merchant_rules
+                SET category = ?, flow_type = NULL, spending_override = NULL, source = 'user',
+                    applies_all_accounts = ?
+                WHERE id = ?
+                """,
+                (recurring_category, applies_all_accounts, existing_rule["id"]),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO merchant_rules (
+                    account_id, match_type, match_value, category,
+                    applies_all_accounts
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
+                    category = excluded.category,
+                    flow_type = NULL,
+                    spending_override = NULL, source = 'user',
+                    applies_all_accounts = excluded.applies_all_accounts
+                """,
+                (
+                    transaction["account_id"],
+                    match_type,
+                    match_value,
+                    recurring_category,
+                    applies_all_accounts,
+                ),
+            )
+    elif existing_rule and existing_rule["source"] == "user":
+        connection.execute(
+            "DELETE FROM merchant_rules WHERE id = ?",
+            (existing_rule["id"],),
+        )
+
+
 @app.post("/api/transaction/<transaction_id>")
 def update_transaction(transaction_id):
     category_flow_type = request.form.get("category_flow_type", "")
@@ -2371,12 +2616,13 @@ def update_transaction(transaction_id):
     if (edit_treatment or new_category) and category_flow_type not in FLOW_TYPES:
         return transaction_cleanup_redirect()
     excluded = int(request.form.get("excluded") == "on")
-    with db() as connection:
+    with rule_edit_db() as connection:
         transaction = connection.execute(
-            """
-            SELECT account_id, merchant, description,
-                   COALESCE(category_override, category) AS category
-            FROM transactions WHERE id = ?
+            f"""
+            SELECT t.account_id, t.merchant, t.description, t.category_override,
+                   t.category_override_source, mr.source AS rule_source,
+                   {EFFECTIVE_CATEGORY_SQL} AS category
+            FROM transactions t {CATEGORY_RULE_JOIN} WHERE t.id = ?
             """,
             (transaction_id,),
         ).fetchone()
@@ -2398,92 +2644,21 @@ def update_transaction(transaction_id):
                 """,
                 (category, category_flow_type),
             )
-        match_type, full_match_value = recurring_match(transaction)
-        rule_id = request.form.get("merchant_rule_id", "").strip()
-        existing_rule = connection.execute(
-            """
-            SELECT id, category, match_type, match_value FROM merchant_rules
-            WHERE id = ? AND (account_id = ? OR applies_all_accounts = 1)
-            """,
-            (rule_id, transaction["account_id"]),
-        ).fetchone() if rule_id else connection.execute(
-            """
-            SELECT id, category, match_type, match_value FROM merchant_rules
-            WHERE (account_id = ? OR applies_all_accounts = 1) AND (
-              (match_type = 'description'
-               AND match_value = ? COLLATE NOCASE)
-              OR (match_type = 'description_contains'
-                  AND INSTR(LOWER(?), LOWER(match_value)) > 0)
-            )
-            ORDER BY CASE match_type WHEN 'description' THEN 0 ELSE 1 END,
-                     LENGTH(match_value) DESC,
-                     applies_all_accounts, id
-            LIMIT 1
-            """,
-            (
-                transaction["account_id"], full_match_value, full_match_value,
-            ),
-        ).fetchone()
-        if request.form.get("remember_match") == "on":
-            applies_all_accounts = int(
-                request.form.get("apply_all_accounts") == "on"
-            )
-            match_value = request.form.get("match_value", "").strip() or full_match_value
-            if not match_value or len(match_value) > 255:
-                return transaction_cleanup_redirect()
-            match_type = (
-                "description"
-                if match_value.casefold() == full_match_value.casefold()
-                else "description_contains"
-            )
-            recurring_category = category or (
-                existing_rule["category"] if existing_rule else transaction["category"]
-            )
-            same_rule = existing_rule and (
-                existing_rule["match_type"] == match_type
-                and existing_rule["match_value"].casefold() == match_value.casefold()
-            )
-            if same_rule:
-                connection.execute(
-                    """
-                    UPDATE merchant_rules
-                    SET category = ?, flow_type = NULL, spending_override = NULL,
-                        applies_all_accounts = ?
-                    WHERE id = ?
-                    """,
-                    (recurring_category, applies_all_accounts, existing_rule["id"]),
-                )
-            else:
-                if existing_rule:
-                    connection.execute(
-                        "DELETE FROM merchant_rules WHERE id = ?",
-                        (existing_rule["id"],),
-                    )
-                connection.execute(
-                    """
-                    INSERT INTO merchant_rules (
-                        account_id, match_type, match_value, category,
-                        applies_all_accounts
-                    ) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(account_id, match_type, match_value) DO UPDATE SET
-                        category = excluded.category,
-                        flow_type = NULL,
-                        spending_override = NULL,
-                        applies_all_accounts = excluded.applies_all_accounts
-                    """,
-                    (
-                        transaction["account_id"],
-                        match_type,
-                        match_value,
-                        recurring_category,
-                        applies_all_accounts,
-                    ),
-                )
-        elif existing_rule:
-            connection.execute(
-                "DELETE FROM merchant_rules WHERE id = ?",
-                (existing_rule["id"],),
-            )
+        individual_only = request.form.get('individual_only') == 'on'
+        if not individual_only and update_transaction_rule(connection, transaction, category, request.form) is False:
+            return transaction_cleanup_redirect()
+        individual = individual_only or request.form.get('remember_match') != 'on' or request.form.get('individual_override') == 'on'
+        override_category = category if individual else None
+        override_source = 'user' if category and individual else None
+        model_unchanged = (
+            category == transaction['category'] and not individual_only
+            and request.form.get('remember_match') != 'on'
+            and transaction['rule_source'] != 'user'
+            and (transaction['rule_source'] == 'model' or transaction['category_override_source'] == 'model')
+        )
+        if model_unchanged:
+            override_category = transaction['category_override']
+            override_source = transaction['category_override_source']
         connection.execute(
             """
             UPDATE transactions
@@ -2493,8 +2668,8 @@ def update_transaction(transaction_id):
             WHERE id = ?
             """,
             (
-                category,
-                "user" if category else None,
+                override_category,
+                override_source,
                 None,
                 None,
                 excluded,
@@ -2518,7 +2693,7 @@ def confirm_ai_review(transaction_id):
                 and transaction["category_override_source"] != "user"
                 and transaction["category"].casefold() == review["category"].casefold()):
             connection.execute(
-                "UPDATE transactions SET category_override = ?, category_override_source = 'user' "
+                "UPDATE transactions SET category_override = ?, category_override_source = 'model' "
                 "WHERE id = ?",
                 (transaction["category"], transaction_id),
             )
@@ -2531,13 +2706,43 @@ def bulk_update_transactions():
     transaction_ids = list(dict.fromkeys(request.form.getlist("transaction_ids")))
     action = request.form.get("action")
     if transaction_ids and action in {"exclude", "restore", "apply"}:
-        with db() as connection:
+        with rule_edit_db() as connection:
             category = "__no_change__"
             if action == "apply":
                 inclusion = request.form.get("inclusion", "__no_change__")
                 if inclusion not in {"__no_change__", "include", "exclude"}:
                     return transaction_cleanup_redirect()
                 choice = request.form.get("category_choice", "__no_change__")
+                rule_action = request.form.get("rule_action", "__no_change__")
+                edit_treatment = request.form.get("edit_category_treatment") == "on"
+                treatment = request.form.get("category_flow_type", "")
+                match_value = request.form.get("match_value", "").strip()
+                if rule_action not in {"__no_change__", "remember", "remove"}:
+                    return "Choose a valid remembered-rule action.", 400
+                if edit_treatment and treatment not in FLOW_TYPES:
+                    return "Choose a category treatment.", 400
+                if (edit_treatment or rule_action == "remember") and choice in {"", "__no_change__"}:
+                    return "Choose a category when changing treatment or remembering a rule.", 400
+                if rule_action == "remember" and len(match_value) > 255:
+                    return "Description text must be at most 255 characters.", 400
+                selected = []
+                for start in range(0, len(transaction_ids), 500):
+                    batch = transaction_ids[start:start + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    selected.extend(connection.execute(
+                        f"SELECT id, account_id, description, merchant, "
+                        f"COALESCE(category_override, category) AS category "
+                        f"FROM transactions WHERE id IN ({placeholders}) ORDER BY id", batch,
+                    ).fetchall())
+                if not selected:
+                    return transaction_cleanup_redirect()
+                if rule_action == "remember" and any(
+                    not row["description"].strip()
+                    or len(match_value or row["description"].strip()) > 255
+                    or (match_value and match_value.casefold() not in row["description"].casefold())
+                    for row in selected
+                ):
+                    return "Description text must match every selected transaction. Adjust the text or selection.", 400
                 if choice != "__no_change__":
                     valid, category = selected_category(
                         connection,
@@ -2547,6 +2752,42 @@ def bulk_update_transactions():
                     )
                     if not valid:
                         return transaction_cleanup_redirect()
+                if edit_treatment:
+                    connection.execute(
+                        "INSERT INTO category_rules (name, flow_type) VALUES (?, ?) "
+                        "ON CONFLICT(name) DO UPDATE SET flow_type = excluded.flow_type",
+                        (category, treatment),
+                    )
+                if rule_action != "__no_change__":
+                    form = {
+                        "remember_match": "on" if rule_action == "remember" else "",
+                        "apply_all_accounts": request.form.get("apply_all_accounts", ""),
+                        "match_value": match_value,
+                    }
+                    # Resolve original matches before changes so shared rules are
+                    # replaced once, independent of the order of selected rows.
+                    existing_ids = {
+                        rule["id"] for row in selected
+                        if (rule := matching_transaction_rule(connection, row, {}))
+                    }
+                    if rule_action == "remove":
+                        for rule_id in existing_ids:
+                            connection.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
+                    if rule_action == "remember":
+                        seen = set()
+                        for transaction in selected:
+                            full_description = transaction["description"].strip()
+                            value = match_value or full_description
+                            key = (
+                                None if form["apply_all_accounts"] == "on" else transaction["account_id"],
+                                value.casefold() == full_description.casefold(),
+                                value.casefold(),
+                            )
+                            if key not in seen:
+                                update_transaction_rule(
+                                    connection, transaction, category, form, replace_existing=False,
+                                )
+                                seen.add(key)
             for start in range(0, len(transaction_ids), 500):
                 batch = transaction_ids[start : start + 500]
                 placeholders = ",".join("?" for _ in batch)
@@ -2560,9 +2801,10 @@ def bulk_update_transactions():
                 values = []
                 if category != "__no_change__":
                     assignments.append("category_override = ?")
-                    values.append(category)
+                    individual = rule_action != 'remember' or request.form.get('individual_override') == 'on'
+                    values.append(category if individual else None)
                     assignments.append("category_override_source = ?")
-                    values.append("user" if category else None)
+                    values.append("user" if category and individual else None)
                     assignments.extend(
                         ["flow_override = NULL", "spending_override = NULL"]
                     )
@@ -2598,6 +2840,81 @@ def transaction_cleanup_redirect():
             ai_review="1" if request.form.get("return_ai_review") == "1" else None,
         )
     )
+
+
+def run_category_review(result, groups, examples):
+    try:
+        for start in range(0, len(groups), category_review.BATCH_SIZE):
+            category_review.review_batch(result, groups[start:start + category_review.BATCH_SIZE], examples)
+            with db() as connection:
+                category_review.save(connection, result)
+        result["status"] = "completed"
+    except Exception:
+        result["status"] = "interrupted"
+        result["error"] = "The local review stopped early. Completed suggestions are saved; no categories were changed."
+        app.logger.warning("Local category review interrupted.")
+    finally:
+        try:
+            with db() as connection:
+                category_review.save(connection, result)
+        except Exception:
+            app.logger.warning("Category review could not save progress; the vault may be locked.")
+        OLLAMA_EVALUATION_LOCK.release()
+
+
+@app.post("/api/local-ai/category-review/start")
+def start_category_review():
+    if not local_ai_enabled():
+        return jsonify(error="Turn on Local AI in Settings before starting a review."), 403
+    if not OLLAMA_EVALUATION_LOCK.acquire(blocking=False):
+        return jsonify(error="Another local categorization or review is running. Wait for it to finish."), 409
+    try:
+        with db() as connection:
+            previous = category_review.load(connection)
+            if previous and any(item["decision"] == "pending" for item in previous["suggestions"]):
+                OLLAMA_EVALUATION_LOCK.release()
+                return jsonify(error="Accept or keep the pending suggestions before starting another review."), 409
+            result, groups, examples = category_review.prepare(connection)
+            category_review.save(connection, result)
+        threading.Thread(target=run_category_review, args=(result, groups, examples), daemon=True).start()
+        return jsonify(report_url=url_for("category_review_report"))
+    except ValueError as error:
+        OLLAMA_EVALUATION_LOCK.release()
+        return jsonify(error=str(error)), 400
+    except Exception:
+        OLLAMA_EVALUATION_LOCK.release()
+        return jsonify(error="The category review could not start. Try again after unlocking the app."), 500
+
+
+@app.get("/local-ai/category-review")
+def category_review_report():
+    with db() as connection:
+        result = category_review.load(connection)
+        if result and result["status"] == "running" and not OLLAMA_EVALUATION_LOCK.locked():
+            result["status"] = "interrupted"
+            result["error"] = "The review was interrupted. Completed suggestions are saved; no categories were changed."
+            if not READ_ONLY_MIRROR:
+                category_review.save(connection, result)
+    context = page_context("transactions")
+    pending = [item for item in result["suggestions"] if item["decision"] == "pending"] if result else []
+    context.update(result=result, pending=pending)
+    return render_template("category_review.html", **context)
+
+
+@app.post("/api/local-ai/category-review/decide")
+def decide_category_review():
+    action = request.form.get("action")
+    if action not in {"accept", "keep"}:
+        abort(400)
+    with db() as connection:
+        result = category_review.load(connection)
+        if not result or request.form.get("review_id") != result["id"]:
+            return "This review has been replaced. Reload the category review page.", 409
+        if result["status"] == "running" and OLLAMA_EVALUATION_LOCK.locked():
+            return "Wait for the review to finish before making decisions.", 409
+        transaction_ids = request.form.getlist("transaction_ids")
+        category_review.decide(connection, result, transaction_ids, action)
+    return redirect(url_for("category_review_report"))
 
 
 @app.post("/api/local-ai/evaluation")

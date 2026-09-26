@@ -28,7 +28,7 @@ class ProductionMirrorTests(unittest.TestCase):
         self.mode.start()
         self.addCleanup(self.mode.stop)
         self.application.lock_data()
-        with patch.object(self.application, 'reconcile_saved_model_rules') as reconcile:
+        with patch.object(self.application, 'create_recurring_category_rules') as reconcile:
             self.application.unlock_data(self.password)
             reconcile.assert_not_called()
 
@@ -91,7 +91,7 @@ class ProductionMirrorTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn(b'Read-only production snapshot', page.data)
         token = self.csrf_token(page)
-        for url in ('/api/local-ai/evaluation', '/api/category-rules/bulk', '/api/transaction/sample', '/api/transactions/bulk', '/category-setup', '/statement-import', '/api/account-roles', '/api/savings', '/api/password', '/api/app-name'):
+        for url in ('/api/local-ai/category-review/start', '/api/local-ai/category-review/decide', '/api/local-ai/evaluation', '/api/category-rules/bulk', '/api/transaction/sample', '/api/transactions/bulk', '/category-setup', '/statement-import', '/api/account-roles', '/api/savings', '/api/password', '/api/app-name'):
             response = self.client.post(url, data={'csrf_token': token})
             self.assertEqual(response.status_code, 403, url)
             self.assertIn('read-only', response.json['error'])

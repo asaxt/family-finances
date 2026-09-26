@@ -300,6 +300,10 @@ input:focus, select:focus { border-color: var(--forest-2); box-shadow: 0 0 0 3px
 .bulk-action-bar .bulk-fields { flex-wrap: wrap; justify-content: flex-end; }
 .bulk-action-bar .button { padding: 7px 10px; font-size: 12px; }
 .bulk-action-bar .button:disabled { cursor: not-allowed; }
+#bulk-rule-form { flex-wrap: wrap; }
+.bulk-rule-details { flex-basis: 100%; }
+.bulk-rule-details summary { cursor: pointer; font-weight: 600; }
+.bulk-rule-details .review-form { margin-top: 12px; max-width: 640px; }
 .transaction-table-wrap { overflow: visible; }
 .transaction-table-wrap th { position: sticky; top: 0; z-index: 1; background: white; box-shadow: 0 1px var(--line); }
 .transaction-table-wrap th:has(.table-filter[open]) { z-index: 5; }
@@ -490,3 +494,8 @@ tr:last-child td { border-bottom: 0; }
 .plan-monthly dt { color: var(--muted); font-size: 13px; margin-top: 14px; }
 .plan-monthly dd { margin: 3px 0 0; font-weight: 650; }
 .plan-field select { width: 100%; min-width: 0; }
+
+.bulk-action-bar { flex-wrap: wrap; }
+.bulk-review-details { flex-basis: 100%; }
+.bulk-review-details summary { cursor: pointer; font-weight: 600; }
+.bulk-review-details .review-form { margin-top: 12px; max-width: 640px; }

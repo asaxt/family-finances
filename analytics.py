@@ -2,34 +2,24 @@ import calendar
 from datetime import date, datetime, timedelta
 
 
-RAW_CATEGORY_SQL = "COALESCE(t.category_override, mr.category, t.category)"
+from category_matching import winning_rule_sql, conflict_sql
 
-MATCHED_TRANSFER_SQL = """
+RAW_CATEGORY_SQL = "CASE WHEN t.category_override IS NOT NULL AND COALESCE(t.category_override_source, 'user') = 'user' THEN t.category_override WHEN mr.source = 'user' THEN mr.category ELSE COALESCE(t.category_override, mr.category, t.category) END"
+
+MATCHED_TRANSFER_SQL = f"""
 EXISTS (
     WITH eligible AS (
         SELECT p.id, p.account_id, p.amount, p.currency, p.transacted_at
         FROM transactions p JOIN accounts pa ON pa.id = p.account_id
-        LEFT JOIN merchant_rules pm ON pm.id = (
-          SELECT candidate.id FROM merchant_rules candidate
-          WHERE (candidate.account_id = p.account_id
-                 OR candidate.applies_all_accounts = 1) AND (
-            (candidate.match_type = 'description'
-             AND candidate.match_value = TRIM(p.description) COLLATE NOCASE)
-            OR (candidate.match_type = 'description_contains'
-                AND INSTR(LOWER(TRIM(p.description)), LOWER(candidate.match_value)) > 0)
-          )
-          ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
-                   LENGTH(candidate.match_value) DESC,
-                   candidate.applies_all_accounts, candidate.id
-          LIMIT 1
-        )
-        LEFT JOIN category_rules pc ON pc.name = COALESCE(p.category_override, pm.category, p.category) COLLATE NOCASE
+        LEFT JOIN merchant_rules pm ON pm.id = {winning_rule_sql('p')}
+        LEFT JOIN category_rules pc ON pc.name = (CASE WHEN p.category_override IS NOT NULL AND COALESCE(p.category_override_source, 'user') = 'user' THEN p.category_override WHEN pm.source = 'user' THEN pm.category ELSE COALESCE(p.category_override, pm.category, p.category) END) COLLATE NOCASE
         WHERE p.pending = 0 AND p.excluded = 0 AND p.amount != 0
           AND pa.cash_flow_role = 'cash_flow' AND pa.spending_enabled = 1
+          AND NOT {conflict_sql('p')}
           AND (
-            (LOWER(COALESCE(p.category_override, pm.category, p.category)) = 'uncategorized'
+            (LOWER((CASE WHEN p.category_override IS NOT NULL AND COALESCE(p.category_override_source, 'user') = 'user' THEN p.category_override WHEN pm.source = 'user' THEN pm.category ELSE COALESCE(p.category_override, pm.category, p.category) END)) = 'uncategorized'
              AND COALESCE(p.category_override_source, '') != 'user' AND pm.category IS NULL)
-            OR (pc.flow_type IS NULL AND LOWER(COALESCE(p.category_override, pm.category, p.category)) = 'transfer')
+            OR (pc.flow_type IS NULL AND LOWER((CASE WHEN p.category_override IS NOT NULL AND COALESCE(p.category_override_source, 'user') = 'user' THEN p.category_override WHEN pm.source = 'user' THEN pm.category ELSE COALESCE(p.category_override, pm.category, p.category) END)) = 'transfer')
             OR pc.flow_type = 'transfer'
           )
     )
@@ -84,20 +74,7 @@ CASE WHEN ({SPEND_SQL}) != 0 THEN 1 ELSE 0 END
 """
 
 CATEGORY_RULE_JOIN = f"""
-LEFT JOIN merchant_rules mr ON mr.id = (
-  SELECT candidate.id FROM merchant_rules candidate
-  WHERE (candidate.account_id = t.account_id
-         OR candidate.applies_all_accounts = 1) AND (
-    (candidate.match_type = 'description'
-     AND candidate.match_value = TRIM(t.description) COLLATE NOCASE)
-    OR (candidate.match_type = 'description_contains'
-        AND INSTR(LOWER(TRIM(t.description)), LOWER(candidate.match_value)) > 0)
-  )
-  ORDER BY CASE candidate.match_type WHEN 'description' THEN 0 ELSE 1 END,
-           LENGTH(candidate.match_value) DESC,
-           candidate.applies_all_accounts, candidate.id
-  LIMIT 1
-)
+LEFT JOIN merchant_rules mr ON mr.id = {winning_rule_sql()}
 LEFT JOIN category_rules r
   ON r.name = {EFFECTIVE_CATEGORY_SQL} COLLATE NOCASE
 """
@@ -997,7 +974,8 @@ def transaction_list(
                c.owner_name,
                {EFFECTIVE_CATEGORY_SQL} AS effective_category,
                r.flow_type AS category_flow_type,
-               mr.id AS merchant_rule_id,
+               mr.id AS merchant_rule_id, mr.source AS merchant_rule_source,
+               {conflict_sql()} AS rule_conflict,
                mr.match_type AS merchant_rule_match_type,
                mr.match_value AS merchant_rule_match_value,
                mr.applies_all_accounts AS merchant_rule_applies_all_accounts
