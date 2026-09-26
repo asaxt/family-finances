@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime
 
 from analytics import CATEGORY_RULE_JOIN, RAW_CATEGORY_SQL
+from local_chat import NoRedirect
 
 
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
@@ -153,11 +154,13 @@ def model_transactions(rows):
     return [
         {
             "id": row["evaluation_id"],
+            **({"current_category": row["current_category"]} if "current_category" in row else {}),
             "date": row["transacted_at"],
             "merchant": row["merchant"],
             "description": row["description"],
             "direction": "money_in" if row["amount"] < 0 else "money_out",
-            "amount_usd": round(abs(row["amount"]) / 100, 2),
+            **({"amount": round(abs(row["amount"]) / 100, 2), "currency": row["currency"]}
+               if "current_category" in row else {"amount_usd": round(abs(row["amount"]) / 100, 2)}),
             "account_type": row["account_type"],
             "account_subtype": row["account_subtype"],
             "occurrence_count": row["occurrence_count"],
@@ -171,7 +174,7 @@ def model_transactions(rows):
     ]
 
 
-def classify_batch(model, categories, rows, timeout=300, category_examples=None):
+def classify_batch(model, categories, rows, timeout=300, category_examples=None, review_existing=False):
     system_prompt = """
 You assign transactions to existing categories in a US household finance application.
 
@@ -225,6 +228,21 @@ household line item is not a transfer.
 Account type and subtype are reliable context. Venmo is a payment rail, not a
 category. Return only the structured result and exactly one result for every id.
 """.strip()
+    if review_existing:
+        system_prompt = system_prompt.replace(
+            "Make a best guess when evidence is incomplete: broad coverage is more useful\n"
+            "than leaving uncertain transactions uncategorized.",
+            "Review the current_category against all supplied labels, including newer, more specific labels. "
+            "Propose a different label only when the transaction evidence supports a better fit. "
+            "Otherwise return current_category if it is still allowed, or an empty category. "
+            "Do not change a category merely because another label is more specific. "
+            "A correct existing category is a valid outcome. Explain why a proposed label fits better. "
+            "These are suggestions for human approval; no category will be applied automatically.",
+        )
+        system_prompt = system_prompt.replace(
+            "Use confidence 1 for uncertainty instead of abstaining. Reserve confidence 0",
+            "Keep the current label when evidence for a change is weak. Reserve confidence 0",
+        )
     payload = {
         "model": model,
         "stream": False,
@@ -256,7 +274,12 @@ category. Return only the structured result and exactly one result for every id.
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    open_request = urllib.request.urlopen
+    if review_existing:
+        open_request = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), NoRedirect()
+        ).open
+    with open_request(request, timeout=timeout) as response:
         result = json.load(response)
     predictions = json.loads(result["message"]["content"]).get("results", [])
     expected_ids = {row["evaluation_id"] for row in rows}

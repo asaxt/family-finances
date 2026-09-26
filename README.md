@@ -69,6 +69,21 @@ SQL, modify records, or initiate bank operations. The app does not save chat
 history or log prompt/answer text. Leaving the page or choosing **New chat**
 clears the conversation. The existing local AI switch also disables chat.
 
+### Review existing categories with local AI
+
+After adding more specific category labels, open **Transactions → AI category review**
+and choose **Review existing categories**. The scan compares all posted, categorized
+transactions with the current labels, including manual choices and excluded records.
+It saves proposals in the encrypted vault without changing transaction categories.
+
+Compare the current and proposed categories and the model's reason. Choose **Accept**
+or **Keep current**, individually or using the selection checkboxes. Accepting only
+changes selected transaction categories; labels and remembered rules are unchanged.
+Suggestions are skipped if the transaction, matching rule, or label definitions have
+changed since the scan. Resolve pending suggestions before starting another review.
+The read-only development mirror does not permit scans or approval writes.
+
+
 ## Lifetime planning (development preview)
 
 **Plan** models two spouses with independent income, saving rates, pre-tax/Roth
