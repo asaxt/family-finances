@@ -5,7 +5,7 @@ import re
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
-from analytics import CATEGORY_RULE_JOIN, EFFECTIVE_CATEGORY_SQL, EFFECTIVE_CASH_FLOW_SQL, month_range, shift_month
+from analytics import CATEGORY_RULE_JOIN, EFFECTIVE_CATEGORY_SQL, EFFECTIVE_CASH_FLOW_SQL, month_range, shift_month, scope_filter, DISPLAY_NAME_SQL
 
 SETTING = 'monthly_budget_v1'
 
@@ -103,7 +103,8 @@ def renamed_categories(connection, mapping):
         save(connection, state)
 
 
-def activity(connection, first, last, today):
+def activity(connection, first, last, today, account_id=None, connection_id=None):
+    scope_sql, scope_params = scope_filter(account_id, connection_id)
     rows = connection.execute(f'''
         SELECT substr(t.transacted_at,1,7) AS month, COALESCE(r.name, {EFFECTIVE_CATEGORY_SQL}) AS category,
                {EFFECTIVE_CASH_FLOW_SQL} AS treatment, t.currency, a.spending_enabled,
@@ -112,8 +113,9 @@ def activity(connection, first, last, today):
         FROM transactions t JOIN accounts a ON a.id=t.account_id {CATEGORY_RULE_JOIN}
         WHERE t.pending=0 AND t.excluded=0 AND t.transacted_at >= ? AND t.transacted_at < ?
               AND t.transacted_at <= ? AND (a.spending_enabled=1 OR a.cash_flow_role='cash_flow')
+        {scope_sql}
         GROUP BY 1, 2, 3, 4, 5, 6
-    ''', (first+'-01', shift_month(last,1)+'-01', today.isoformat())).fetchall()
+    ''', (first+'-01', shift_month(last,1)+'-01', today.isoformat(), *scope_params)).fetchall()
     grouped = {}
     for row in rows:
         grouped.setdefault(row['month'], []).append(dict(row))
@@ -131,10 +133,11 @@ def period(first, last):
     return months
 
 
-def report(connection, state, first, last, today=None):
+def report(connection, state, first, last, today=None, account_id=None, connection_id=None, recorded=None):
     today = today or date.today()
     months = period(first, last)
-    recorded = activity(connection,first,last,today)
+    if recorded is None:
+        recorded = activity(connection,first,last,today,account_id,connection_id)
     history, totals = [], {}
     for target in months:
         effective, plan = plan_for(state,target)
@@ -184,3 +187,100 @@ def report(connection, state, first, last, today=None):
             'first':first,'last':last,'missing_plans':sum(row['plan'] is None for row in history),
             'empty_months':sum(row['records']==0 and not row['future'] for row in history),
             'unknown':sum(row['unknown'] for row in history),'foreign':sum(row['foreign'] for row in history)}
+
+
+def sparkline(values):
+    """Small SVG paths with gaps for unavailable months, including negative refunds."""
+    known = [value for value in values if value is not None]
+    if not known:
+        return ''
+    low, high = min(known), max(known)
+    path, drawing = [], False
+    for index, value in enumerate(values):
+        if value is None:
+            drawing = False
+            continue
+        x = 2 + 116 * index / max(1, len(values)-1)
+        y = 28 - 24 * (value-low) / (high-low) if high > low else 16
+        path.append(f"{'L' if drawing else 'M'}{x:.1f},{y:.1f}")
+        # A tiny horizontal segment makes a single observed month visible.
+        path.append(f'L{x+0.5:.1f},{y:.1f}')
+        drawing = True
+    return ' '.join(path)
+
+
+def dashboard(connection, state, first, last, account_id=None, connection_id=None, today=None):
+    today = today or date.today()
+    household = not account_id and not connection_id
+    # A scoped spending view must never compare a subset with a household allowance.
+    visible_state = state if household else {'plans': {}}
+    period(first,last)
+    earlier = max('1900-01', min(first, shift_month(last, -23)))
+    recorded = activity(connection,earlier,last,today,account_id,connection_id)
+    data = report(connection, visible_state, first, last, today, account_id, connection_id, recorded)
+    history = report(connection, visible_state, earlier, last, today, account_id, connection_id, recorded)['history']
+    def observed(row):
+        return bool(row['records']) and not row['future'] and not row['unknown'] and not row['foreign']
+    for index, row in enumerate(history):
+        for window in (3, 6, 12, 24):
+            sample = history[max(0,index-window+1):index+1]
+            row[f'ma_{window}'] = round(sum(item['actual'] for item in sample)/window) if len(sample)==window and all(observed(item) for item in sample) else None
+    current = data['current']
+    prior = history[-13] if len(history)>=13 else None
+    data['yoy'] = ((current['actual']-prior['actual'])/abs(prior['actual'])*100
+                   if prior and prior['actual'] and observed(prior) and observed(current) and not current['partial'] else None)
+    data['averages'] = {window:history[-1][f'ma_{window}'] for window in (3,6,12,24)}
+    data['chart'] = [row for row in history if row['month']>=first]
+    data['sparks'] = {key:sparkline([row[key] if observed(row) else None for row in history[-12:]])
+                      for key in ('actual','deposited','brokerage_actual','allowance')}
+    heat_months = data['history'][-12:]
+    data['heat_months'] = [row['month'] for row in heat_months]
+    data['heat_budget'] = household and any(row['plan'] for row in heat_months)
+    current_rows = {row['category']:row for row in current['rows']}
+    accumulated = {row['category'] for row in data['totals']}
+    for name in current_rows.keys()-accumulated:
+        data['totals'].append({'category':name,'actual':0,'allowance':0,'remaining':0,'percent':None})
+    for total in data['totals']:
+        name = total['category']
+        total['current'] = current_rows.get(name, {'actual':0,'allowance':0,'unbudgeted':True})
+        total['heat'] = []
+        cells = [next((row for row in point['rows'] if row['category']==name), None) for point in heat_months]
+        peak = max([abs(row['actual']) for row in cells if row] or [0])
+        for point, row in zip(heat_months,cells):
+            actual, allowance = (row['actual'],row['allowance']) if row else (0,0)
+            ratio = utilization(actual,allowance)
+            if not observed(point):
+                level, label = 'missing', 'Incomplete or unavailable records'
+            elif not data['heat_budget']:
+                level = f'intensity-{min(4, max(1, (abs(actual)*4+peak-1)//peak))}' if actual and peak else 'empty'
+                label = 'Net refund' if actual<0 else 'Recorded spending'
+            elif not point['plan'] or not allowance:
+                level, label = ('unbudgeted' if actual else 'empty'), 'No allowance'
+            elif ratio > 100:
+                level, label = 'over', f'{ratio:g}% used'
+            elif ratio >= 80:
+                level, label = 'near', f'{ratio:g}% used'
+            else:
+                level, label = 'low', f'{ratio:g}% used'
+            total['heat'].append({'month':point['month'],'actual':actual,'allowance':allowance,
+                                  'level':level,'label':label,'percent':ratio})
+    data['totals'].sort(key=lambda row:row['actual'],reverse=True)
+    # Five recent transactions per category, using precisely the report's scope.
+    scope_sql, params = scope_filter(account_id,connection_id)
+    rows = connection.execute(f"""
+        WITH ranked AS (
+          SELECT COALESCE(r.name, {EFFECTIVE_CATEGORY_SQL}) AS category,
+                 {DISPLAY_NAME_SQL} AS name, t.transacted_at, t.amount,
+                 ROW_NUMBER() OVER (PARTITION BY COALESCE(r.name, {EFFECTIVE_CATEGORY_SQL})
+                                    ORDER BY t.transacted_at DESC, ABS(t.amount) DESC, t.id) AS position
+          FROM transactions t JOIN accounts a ON a.id=t.account_id {CATEGORY_RULE_JOIN}
+          WHERE t.pending=0 AND t.excluded=0 AND t.currency='USD' AND a.spending_enabled=1
+                AND ({EFFECTIVE_CASH_FLOW_SQL})='spending' AND t.amount!=0
+                AND substr(t.transacted_at,1,7)=? AND t.transacted_at<=? {scope_sql}
+        ) SELECT category,name,transacted_at,amount FROM ranked WHERE position<=5
+        ORDER BY category,position
+    """, (last,today.isoformat(),*params)).fetchall()
+    data['details'] = {}
+    for row in rows:
+        data['details'].setdefault(row['category'],[]).append(dict(row))
+    return data

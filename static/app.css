@@ -510,3 +510,72 @@ tr:last-child td { border-bottom: 0; }
 #budget-editor .plan-fields { margin: 18px 0; }
 #budget-editor [name="value"] { width: 140px; }
 #budget-editor select { max-width: 100%; }
+
+/* Unified spending overview, patterns, and details. */
+.spending-page { margin-top: 22px; }
+.spending-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; justify-content: space-between; }
+.spending-toolbar .filter-form { flex-wrap: wrap; gap: 8px; }
+.spending-toolbar label, .category-patterns label { font-size: 11px; color: var(--muted); display: grid; gap: 4px; }
+.spending-toolbar select { max-width: 160px; }
+.spending-context { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); margin: 12px 0; }
+.spending-metrics .metric-card { padding: 16px; min-width: 0; }
+.spending-metrics .metric-value { font-size: clamp(20px, 2.3vw, 30px); }
+.metric-footer { display: flex; align-items: center; justify-content: space-between; gap: 5px; }
+.budget-spark { width: 85px; height: 32px; flex: 0 0 85px; color: var(--forest-2); }
+.budget-spark path { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.hero .budget-spark { color: var(--lime); }
+.spending-charts { display: grid; grid-template-columns: minmax(0, 2fr) minmax(250px, 1fr); gap: 16px; margin-top: 16px; }
+.spending-page .panel { padding: 20px; margin: 0 0 16px; min-width: 0; }
+.spending-charts .panel { margin-bottom: 0; }
+.spending-page .panel-header { margin-bottom: 12px; }
+.spending-page .panel-header p { margin: 4px 0 0; }
+.spending-series { justify-content: flex-start; gap: 12px; }
+.spending-charts .budget-chart { height: 225px; margin: 12px 0; }
+.spending-baselines { display: flex; flex-wrap: wrap; gap: 18px; color: var(--muted); font-size: 11px; }
+.spending-baselines strong { display: block; font-size: 14px; color: var(--ink); margin-top: 4px; }
+#budget-mix-legend { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 11px; }
+#budget-mix-legend span { display: inline-flex; gap: 5px; align-items: center; }
+#budget-mix-legend i { width: 8px; height: 8px; border-radius: 50%; }
+.category-patterns { margin-top: 16px !important; }
+.budget-category-table { font-size: 12px; }
+.budget-category-table th, .budget-category-table td { padding: 12px 10px; }
+.budget-category-table tbody th { text-transform: none; letter-spacing: 0; color: var(--ink); font-size: 12px; min-width: 150px; }
+.budget-category-table small { display: block; color: var(--muted); font-weight: 400; margin-top: 4px; }
+.budget-category-table thead small { font-size: 10px; }
+.budget-category-table .budget-progress { width: 80px; height: 5px; margin: 5px 0; }
+.heat-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; color: var(--muted); font-size: 10px; }
+.heat-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.heat-legend i { width: 10px; height: 10px; border-radius: 3px; }
+.heat-cells, .heat-months { display: flex; gap: 4px; }
+.heat-months { margin-top: 8px; }
+.heat-cell, .heat-months span { flex: 1 0 22px; width: 22px; text-align: center; }
+.heat-months span { font-size: 9px; color: var(--muted); }
+.heat-cell { height: 25px; border-radius: 4px; line-height: 25px; color: #562821; font-weight: 800; }
+.heat-cell:hover, .heat-cell:focus-visible { outline: 2px solid var(--forest); outline-offset: 1px; }
+.heat-low { background: #bce0c9; }
+.heat-near { background: #efd591; }
+.heat-over { background: #e9a39b; }
+.heat-unbudgeted { background: #c2cfe5; }
+.heat-empty { background: #edf2ed; }
+.heat-missing { background: repeating-linear-gradient(135deg, #eceeec, #eceeec 3px, #fafbfa 3px, #fafbfa 6px); }
+.budget-coverage { font-size: 12px; color: var(--muted); padding: 10px 0 0; }
+.budget-coverage summary, .budget-transactions summary { cursor: pointer; }
+.budget-transactions { border-top: 1px solid var(--line); padding: 12px 0; }
+.budget-transactions summary { font-weight: 650; }
+.budget-transactions summary span { color: var(--muted); font-size: 11px; font-weight: 400; margin-left: 10px; }
+.budget-transactions .text-link { font-size: 12px; }
+.spending-footnote { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.budget-dialog { width: min(800px, calc(100% - 24px)); max-height: 90vh; overflow-y: auto; padding: 24px; }
+.budget-dialog .plan-fields label { display: grid; gap: 5px; font-size: 12px; }
+.budget-dialog table { font-size: 13px; }
+.budget-dialog td { padding: 9px; }
+.budget-dialog-footer { margin-top: 16px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; }
+.budget-dialog-footer .text-link { display: block; margin-top: 12px; }
+.budget-dialog small { display: block; font-size: 10px; color: var(--muted); }
+@media (max-width: 1100px) { .spending-charts { grid-template-columns: minmax(0, 1fr); } .spending-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } .spending-mix .budget-chart { height: 180px; } }
+@media (max-width: 600px) { .spending-toolbar .filter-form { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); width: 100%; } .spending-toolbar input, .spending-toolbar select { min-width: 0; max-width: 100%; width: 100%; } .spending-page .panel { padding: 15px; } .spending-page .panel-header { flex-wrap: wrap; gap: 10px; } .metric-footer { display: block; } .budget-spark { display: block; margin-top: 6px; width: 100%; } .budget-dialog { padding: 16px; } }
+
+.heat-intensity-1 { background: #e0eee5; }
+.heat-intensity-2 { background: #b0d4bd; }
+.heat-intensity-3 { background: #6aab84; }
+.heat-intensity-4 { background: #24634e; }

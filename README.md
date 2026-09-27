@@ -77,13 +77,20 @@ Upgrades retain an encrypted migration recovery copy. Existing rules with no
 recorded origin are conservatively treated as user rules. The development
 production mirror remains read-only.
 
-## Monthly budget
+## Spending and budget
 
-Open **Budget**, choose a month and an accumulation start, and save fixed-dollar
-or percentage allowances for spending categories. All percentages use the same
-monthly income base. Existing recorded income is the default; optional planned
+Open **Spending & budget** for the combined spending, category, and budget view.
+Choose a month and accumulation start, then open **Edit monthly plan** to set
+allowances. New lines default to **% of income**; fixed dollars remain available.
+Both types carry forward automatically until the next saved change. All
+percentages use the same monthly income base. Existing recorded income is the default; optional planned
 income keeps allowances steady while deposits arrive. There are no additional
 payroll deductions to enter.
+
+Summary sparklines and the income/spending chart lead into a category heatmap,
+cumulative utilization, and expandable transaction details. Month cells link to
+transactions. Account and person filters show scoped spending without comparing
+it to household allowances. Earnings trends remain available from this page.
 
 Compare monthly spending and cumulative utilization, including refunds and
 negative overspending. Accumulation does not reset in January. Each month uses

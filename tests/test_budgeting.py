@@ -129,6 +129,38 @@ class BudgetMathTests(unittest.TestCase):
         with self.assertRaises(budgeting.BudgetError):
             budgeting.validate_plan({'lines':[line,line]},{'SAMPLE ALPHA'})
 
+    def test_percent_and_dollar_allowances_continue_until_next_saved_change(self):
+        plan=budgeting.validate_plan({'lines':[{'category':'SAMPLE ALPHA','kind':'percent','value':'12.50'},{'category':'SAMPLE BETA','kind':'amount','value':'11.75'}]}, {'SAMPLE ALPHA','SAMPLE BETA'})
+        state={'plans':{'2001-12':plan,'2002-02':fixed('18.93')}}
+        for target,income in [('2001-12',18317),('2002-01',20131)]:
+            transaction(self.connection,'sample-income-'+target,target,-income,'Income','sample-bank')
+        result=self.report(state)
+        self.assertEqual([row['allowance'] for row in result['history']],[3465,3691,1893])
+        self.assertEqual(len(state['plans']),2)
+
+    def test_dashboard_heatmap_scope_recent_details_and_missing_months(self):
+        state={'plans':{'2001-12':fixed()}}
+        transaction(self.connection,'sample-dec','2001-12',413)
+        transaction(self.connection,'sample-jan','2002-01',1331)
+        for index in range(7):
+            transaction(self.connection,f'sample-feb-{index}','2002-02',231+index)
+        transaction(self.connection,'sample-bank','2002-02',811,account='sample-bank')
+        transaction(self.connection,'sample-foreign','2002-02',913,currency='EUR')
+        result=budgeting.dashboard(self.connection,state,'2001-12','2002-02',today=date(2002,3,1))
+        self.assertEqual([cell['level'] for cell in result['totals'][0]['heat']],['low','over','missing'])
+        self.assertIsNone(result['averages'][3])
+        self.assertEqual(len(result['details']['SAMPLE ALPHA']),5)
+        self.assertNotIn(913,[row['amount'] for row in result['details']['SAMPLE ALPHA']])
+        scoped=budgeting.dashboard(self.connection,state,'2001-12','2002-02',account_id='sample-bank',today=date(2002,3,1))
+        self.assertEqual(scoped['current']['actual'],811)
+        self.assertIsNone(scoped['current']['plan'])
+        self.assertEqual(len(scoped['details']['SAMPLE ALPHA']),1)
+        self.assertEqual(scoped['totals'][0]['allowance'],0)
+        self.assertFalse(scoped['heat_budget'])
+        self.assertEqual(scoped['totals'][0]['heat'][-1]['level'],'intensity-4')
+        self.assertIn('M',budgeting.sparkline([None,4,None,7]))
+        self.assertNotIn('nan',budgeting.sparkline([0,0]))
+
     def test_rename_keeps_historical_allowances_without_changing_transactions(self):
         state={'plans':{'2001-12':fixed()}}
         budgeting.save(self.connection,state)
@@ -200,6 +232,23 @@ class BudgetRouteTests(unittest.TestCase):
         self.assertEqual(self.post().status_code,409)
         page=self.client.get('/budget?month=2003-01')
         self.assertIn(b'2002-02 through 2003-01',page.data)
+
+    def test_consolidated_routes_defaults_and_scoped_views(self):
+        self.ready()
+        for route in ('/budget','/categories','/trends'):
+            page=self.client.get(route+'?month=2002-02&since=2002-01')
+            self.assertEqual(page.status_code,200)
+            self.assertIn(b'<dialog id="budget-editor"',page.data)
+            self.assertIn(b'<option value="percent" selected>',page.data)
+            self.assertIn(b'id="category-patterns"',page.data)
+            self.assertIn(b'id="spending-details"',page.data)
+            self.assertNotIn(b'> Trends</a>',page.data)
+        self.assertEqual(self.post().status_code,200)
+        page=self.client.get('/categories?month=2002-02&account=sample-card')
+        self.assertIn(b'household allowances hidden',page.data)
+        self.assertIn(b'account=sample-card',page.data)
+        self.assertNotIn(b'id="open-budget-editor"',page.data)
+        self.assertIn(b'Earnings trends',self.client.get('/trends?view=earnings').data)
 
     def test_mirror_readable_but_saving_is_blocked(self):
         self.ready()

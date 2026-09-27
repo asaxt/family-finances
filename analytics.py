@@ -753,7 +753,7 @@ def long_term_trends(connection, account_id=None, connection_id=None, kind="spen
             point["yoy_pct"] = None
 
     usable_points = [point for point in points if point["usable"]]
-    latest = usable_points[-1]
+    latest = (usable_points or points)[-1]
     recent = usable_points[-3:]
     preceding = usable_points[-6:-3]
     recent_average = (
@@ -844,7 +844,7 @@ def long_term_trends(connection, account_id=None, connection_id=None, kind="spen
         "category_series": category_series,
         "kind": kind,
         "coverage_label": (
-            f"{month_label(usable_points[0]['month'])}–{month_label(usable_points[-1]['month'])}"
+            f"{month_label((usable_points or points)[0]['month'])}–{month_label((usable_points or points)[-1]['month'])}"
         ),
     }
 
