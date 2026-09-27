@@ -88,7 +88,12 @@ income keeps allowances steady while deposits arrive. There are no additional
 payroll deductions to enter.
 
 Calendar quarters are the default reporting view, with monthly viewing still
-available. Quarterly allowances sum the applicable monthly plans. Full-history
+available. Quarterly allowances sum the applicable monthly plans. The plan editor shows a
+monthly timeline of saved percentages and dollar amounts. Review a proposed plan
+before applying it from an effective month onward: later saved plans are replaced,
+with affected intervals and old/new settings shown first. Modify or cancel the
+draft without saving; earlier months retain their settings. The accumulation
+filter changes reporting only, not the saved plan dates. Full-history
 spending charts and a category selector show actual dollars independently of
 budget amounts and the selected snapshot. The spending-mix pie uses the same full
 history; refunds reduce category totals, and nonpositive totals have no pie slice.

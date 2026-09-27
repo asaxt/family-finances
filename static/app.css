@@ -582,3 +582,11 @@ tr:last-child td { border-bottom: 0; }
 .spending-category-trend label { display: grid; gap: 5px; font-size: 12px; }
 .spending-category-trend select { max-width: 260px; }
 .heat-months span { font-size: 8px; white-space: nowrap; }
+
+#budget-plan-timeline { max-height: 260px; margin: 12px 0; }
+#budget-plan-timeline th, #budget-plan-timeline td { white-space: nowrap; }
+#budget-plan-timeline thead th { position: sticky; top: 0; background: var(--surface, #fff); }
+.budget-review-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
+#budget-review-changes table { margin-bottom: 16px; }
+#budget-plan-timeline button { border: 0; background: transparent; padding: 0; cursor: pointer; }
+#budget-plan-timeline tbody th { position: sticky; left: 0; background: var(--surface, #fff); }
