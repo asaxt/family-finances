@@ -91,6 +91,33 @@ def allocations(plan, recorded_income=0):
     return result
 
 
+def replacement_review(state, target, plan, revision, first):
+    """Describe every effective interval replaced by an ongoing plan."""
+    starts = sorted({target} | {key for key in state['plans'] if key > target})
+    intervals = []
+    def values(item):
+        if item is None:
+            return {}
+        return {line['category']: (line['kind'],line['value']) for line in item['lines']}
+    proposed = values(plan)
+    for index, start in enumerate(starts):
+        source, old = plan_for(state,start)
+        previous = values(old)
+        changes = [{'category':name, 'before':previous.get(name), 'after':proposed.get(name)}
+                   for name in sorted(previous.keys() | proposed.keys(),key=str.casefold)
+                   if previous.get(name)!=proposed.get(name)]
+        def income(item):
+            return None if item is None else ('recorded', None) if item['income_mode']=='recorded' else ('amount',item['income'])
+        if income(old)!=income(plan):
+            changes.insert(0,{'category':'Income base','before':income(old),'after':income(plan)})
+        intervals.append({'first':start,'last':shift_month(starts[index+1],-1) if index+1<len(starts) else None,
+                          'source':source,'changes':changes})
+    token = hashlib.sha256(json.dumps([revision,target,first,plan],sort_keys=True).encode()).hexdigest()
+    return {'intervals':intervals,'confirmation':token,
+            'conflict':any(row['source'] and row['changes'] for row in intervals),
+            'replaced_starts':[key for key in sorted(state['plans']) if key>=target]}
+
+
 def renamed_categories(connection, mapping):
     state = load(connection)
     changed = False

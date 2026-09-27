@@ -297,6 +297,71 @@ class BudgetRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code,200)
         self.assertIn('quarter=2002-Q1',response.json['url'])
 
+    def test_backdated_replacement_reviews_all_intervals_and_recalculates_quarter(self):
+        self.ready()
+        with self.application.db() as connection:
+            state={'start':'2002-03','plans':{'2001-12':fixed('13.17'),'2002-03':fixed('27.19'),'2002-05':fixed('31.23')}}
+            budgeting.save(connection,state)
+            revision=budgeting.version(connection,state)
+        payload={**self.payload,'month':'2002-01','since':'2002-01','version':revision,'granularity':'quarter'}
+        page=self.client.get('/budget?quarter=2002-Q1&since=2002-01')
+        self.assertIn(b'Saved plan timeline',page.data)
+        with self.application.db() as connection:
+            self.assertEqual(budgeting.load(connection),state)
+        preview=self.post({**payload,'preview':True})
+        self.assertEqual(preview.status_code,200)
+        review=preview.json['review']
+        self.assertTrue(review['conflict'])
+        self.assertEqual([row['first'] for row in review['intervals']],['2002-01','2002-03','2002-05'])
+        self.assertEqual(review['intervals'][0]['last'],'2002-02')
+        self.assertIsNone(review['intervals'][-1]['last'])
+        self.assertEqual(self.post(payload).status_code,409)
+        with self.application.db() as connection:
+            self.assertEqual(budgeting.load(connection),state)
+        confirmed={**payload,'confirmation':review['confirmation']}
+        self.assertEqual(self.post(confirmed).status_code,200)
+        with self.application.db() as connection:
+            saved=budgeting.load(connection)
+            self.assertEqual(set(saved['plans']),{'2001-12','2002-01'})
+            self.assertEqual(saved['plans']['2001-12'],state['plans']['2001-12'])
+            self.assertEqual(budgeting.plan_for(saved,'2002-08')[1]['lines'][0]['value'],1175)
+            report=budgeting.dashboard(connection,saved,'2002-01','2002-03',today=date(2002,4,1),granularity='quarter',snapshot_first='2002-01')
+            self.assertEqual(report['current']['allowance'],3525)
+            self.assertEqual(report['totals'][0]['allowance'],3525)
+
+    def test_confirmation_is_bound_to_draft_and_current_version(self):
+        self.ready()
+        self.post()
+        with self.application.db() as connection:
+            revision=budgeting.version(connection,budgeting.load(connection))
+        payload={**self.payload,'version':revision,'lines':[{'category':'SAMPLE ALPHA','kind':'percent','value':'13.27'}]}
+        review=self.post({**payload,'preview':True}).json['review']
+        changed={**payload,'lines':[],'confirmation':review['confirmation']}
+        self.assertEqual(self.post(changed).status_code,409)
+        with self.application.db() as connection:
+            state=budgeting.load(connection)
+            state['plans']['2002-04']=fixed('19.31')
+            budgeting.save(connection,state)
+        self.assertEqual(self.post({**payload,'confirmation':review['confirmation']}).status_code,409)
+
+    def test_backfill_before_first_plan_continues_percentages_and_preserves_actuals(self):
+        self.ready()
+        with self.application.db() as connection:
+            plan=budgeting.validate_plan({'lines':[{'category':'SAMPLE ALPHA','kind':'percent','value':'13.27'}]}, {'SAMPLE ALPHA'})
+            state={'plans':{'2002-03':plan}}
+            budgeting.save(connection,state)
+            before=[tuple(row) for row in connection.execute('SELECT * FROM transactions')]
+            payload={**self.payload,'month':'2002-01','since':'2002-01','version':budgeting.version(connection,state),'lines':[{'category':'SAMPLE ALPHA','kind':'percent','value':'13.27'}]}
+        review=self.post({**payload,'preview':True}).json['review']
+        self.assertIsNone(review['intervals'][0]['source'])
+        self.assertEqual(review['intervals'][1]['changes'],[])
+        self.assertEqual(self.post({**payload,'confirmation':review['confirmation']}).status_code,200)
+        with self.application.db() as connection:
+            saved=budgeting.load(connection)
+            self.assertEqual(set(saved['plans']),{'2002-01'})
+            self.assertEqual(budgeting.plan_for(saved,'2002-02')[1],plan)
+            self.assertEqual([tuple(row) for row in connection.execute('SELECT * FROM transactions')],before)
+
     def test_mirror_readable_but_saving_is_blocked(self):
         self.ready()
         with patch.object(self.application,'READ_ONLY_MIRROR',True):

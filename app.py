@@ -1748,6 +1748,12 @@ def budget_page():
                     editor.append({'category':row['name'],'treatment':row['flow_type'],
                                    **saved.get(row['name'],{'kind':'percent','value':None}), 'archived':False})
             editor.extend({**row, 'treatment':'spending','archived':True} for name,row in saved.items() if name not in known)
+            editor_names = {row['category'] for row in editor}
+            for historical in state['plans'].values():
+                for line in historical['lines']:
+                    if line['category'] not in editor_names:
+                        editor.append({'category':line['category'],'kind':'percent','value':None,'archived':line['category'] not in known})
+                        editor_names.add(line['category'])
             context.update(budget=report, budget_state=state, budget_plan=plan,
                            budget_version=budgeting.version(connection,state), budget_editor=editor,
                            granularity=granularity, quarter=quarter, snapshot_first=snapshot_first, editor_month=editor_month,
@@ -1784,6 +1790,12 @@ def save_budget_plan():
             allowed = {row['name'] for row in budgeting.palette(connection)}
             allowed.update(line['category'] for plan in state['plans'].values() for line in plan['lines'])
             plan = budgeting.validate_plan(payload,allowed)
+            review = budgeting.replacement_review(state,target,plan,payload['version'],first)
+            if payload.get('preview') is True:
+                return jsonify(review=review)
+            if review['conflict'] and payload.get('confirmation') != review['confirmation']:
+                return jsonify(error='Review the existing settings before replacing them.',review=review), 409
+            state['plans'] = {key:value for key,value in state['plans'].items() if key<target}
             state['plans'][target] = plan
             state['start'] = first
             budgeting.save(connection,state)
