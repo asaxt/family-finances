@@ -1721,12 +1721,24 @@ def savings():
 def budget_page():
     context = page_context('budget')
     try:
-        target = budgeting.month(request.args.get('month') or date.today().strftime('%Y-%m'))
+        today_month = date.today().strftime('%Y-%m')
+        granularity = request.args.get('granularity') or ('month' if request.args.get('month') and not request.args.get('quarter') else 'quarter')
+        if not isinstance(granularity, str) or granularity not in {'month','quarter'}:
+            raise budgeting.BudgetError('Choose monthly or calendar-quarter reporting.')
+        if granularity == 'quarter':
+            quarter = request.args.get('quarter') or budgeting.quarter_key(request.args.get('month') or today_month)
+            snapshot_first, target = budgeting.quarter_bounds(quarter)
+        else:
+            target = budgeting.month(request.args.get('month') or today_month)
+            snapshot_first, quarter = target, budgeting.quarter_key(target)
+        editor_month = today_month if snapshot_first<=today_month<=target else snapshot_first
         with db() as connection:
             state = budgeting.load(connection)
-            first = request.args.get('since') or min(target, state.get('start') or min(state['plans'], default=max('1900-01', budgeting.shift_month(target,-11))))
-            report = budgeting.dashboard(connection, state, first, target, context["account_id"], context["connection_id"])
-            effective, plan = budgeting.plan_for(state, target)
+            saved_start = state.get('start') or min(state['plans'], default=snapshot_first)
+            first = request.args.get('since') or (saved_start if saved_start<=target else snapshot_first)
+            editor_month = max(editor_month, first)
+            report = budgeting.dashboard(connection, state, first, target, context["account_id"], context["connection_id"], granularity=granularity, snapshot_first=snapshot_first)
+            effective, plan = budgeting.plan_for(state, editor_month)
             saved = {line['category']: line for line in plan['lines']} if plan else {}
             categories = budgeting.palette(connection)
             known = {row['name'] for row in categories}
@@ -1738,6 +1750,10 @@ def budget_page():
             editor.extend({**row, 'treatment':'spending','archived':True} for name,row in saved.items() if name not in known)
             context.update(budget=report, budget_state=state, budget_plan=plan,
                            budget_version=budgeting.version(connection,state), budget_editor=editor,
+                           granularity=granularity, quarter=quarter, snapshot_first=snapshot_first, editor_month=editor_month,
+                           period_label=quarter.replace('-', ' ') if granularity=='quarter' else target,
+                           quarter_options=sorted({budgeting.quarter_key(key) for key in budgeting.month_range(min(snapshot_first, (report['spending']['first'] or today_month)[:7]), max(target,budgeting.shift_month(today_month,12)))} ,reverse=True),
+                           editor_income=next((row['deposited'] for row in report['history'] if row['month']==editor_month),0),
                            budget_effective=effective, household=not context["account_id"] and not context["connection_id"],
                            budget_month_end=f'{target}-{calendar.monthrange(*map(int,target.split("-")))[1]:02d}',
                            today_month=date.today().strftime('%Y-%m'))
@@ -1758,6 +1774,9 @@ def save_budget_plan():
         target = budgeting.month(payload.get('month'))
         first = budgeting.month(payload.get('since') or target)
         budgeting.period(first, target)
+        granularity = payload.get('granularity','month')
+        if not isinstance(granularity, str) or granularity not in {'month','quarter'}:
+            raise budgeting.BudgetError('Choose monthly or calendar-quarter reporting.')
         with db() as connection:
             state = budgeting.load(connection)
             if payload.get('version') != budgeting.version(connection,state):
@@ -1768,7 +1787,8 @@ def save_budget_plan():
             state['plans'][target] = plan
             state['start'] = first
             budgeting.save(connection,state)
-        return jsonify(saved=True, url=url_for('budget_page',month=target,since=payload.get('since') or target))
+        return jsonify(saved=True, url=url_for('budget_page',since=first,granularity=granularity,
+                       **({'quarter':budgeting.quarter_key(target)} if granularity=='quarter' else {'month':target})))
     except budgeting.BudgetError as error:
         return jsonify(error=str(error)), 400
 

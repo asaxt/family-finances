@@ -32,7 +32,7 @@
     event.preventDefault();
     const button = form.querySelector('button[type=submit]');
     const status = document.querySelector('#budget-save-status');
-    const payload = Object.fromEntries(['month','income_mode','income','version','since'].map(name => [name,field(name).value]));
+    const payload = Object.fromEntries(['month','income_mode','income','version','since','granularity'].map(name => [name,field(name).value]));
     payload.lines = rows.map(row => ({category:row.querySelector('[name=category]').value,kind:row.querySelector('[name=kind]').value,value:row.querySelector('[name=value]').value})).filter(row => row.kind !== 'none' && row.value.trim() !== '');
     button.disabled = true;
     status.textContent = 'Saving…';
@@ -47,46 +47,75 @@
     }
   });
   preview();
-  const history = JSON.parse(document.querySelector('#budget-history-data').textContent);
+  const granularity = document.querySelector('#spending-granularity');
+  granularity.addEventListener('change',()=>{
+    const quarterly=granularity.value==='quarter';
+    const quarterField=document.querySelector('#spending-quarter-field');
+    const monthField=document.querySelector('#spending-month-field');
+    quarterField.hidden=!quarterly; quarterField.querySelector('select').disabled=!quarterly;
+    monthField.hidden=quarterly; monthField.querySelector('input').disabled=quarterly;
+  });
+  const spending = JSON.parse(document.querySelector('#budget-history-data').textContent);
+  const history = spending.points;
   const scope = JSON.parse(document.querySelector('#budget-scope-data').textContent);
   const colors = ['#24634e','#e7a944','#6686c4','#b76a79','#70a58b','#c19462','#8b6fac','#d68555'];
-  const observed = row => row.records && !row.future && !row.foreign && !row.unknown;
-  function openMonth(index) {
-    const params = new URLSearchParams();
-    for (const [key,value] of Object.entries(scope)) if (value) params.set(key,value);
-    params.set('month',history[index].month);
-    location.href = `/budget?${params}#category-patterns`;
+  const select = document.querySelector('#category-trend-select');
+  const allValues=history.map(row=>row.records ? row.actual/100 : null);
+  function openTransactions(index, category='') {
+    const params = new URLSearchParams({purpose:'spending',date_from:history[index].date_from,date_to:history[index].date_to});
+    for (const key of ['person','account']) if (scope[key]) params.set(key,scope[key]);
+    if (category) params.set('category',category);
+    location.href = `/transactions?${params}`;
   }
+  const chartOptions = {
+    responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+    elements:{line:{borderWidth:2,tension:0.15},point:{radius:3,hitRadius:8}},
+    scales:{x:{grid:{display:false},ticks:{maxTicksLimit:10}},y:{beginAtZero:true,ticks:{callback:value=>money(value*100)}}},
+    plugins:{legend:{labels:{boxWidth:12,font:{size:10}}},tooltip:{callbacks:{
+      title:items=>{const row=history[items[0].dataIndex];return `${row.label}${row.partial?' · In progress':row.incomplete?' · Partial history':''}`;},
+      label:context=>`${context.dataset.label}: ${money(context.parsed.y*100)}`
+    }}}
+  };
+  let categoryChart;
   if (typeof Chart !== 'undefined') {
     const chart = new Chart(document.querySelector('#budget-history-chart'), {
-      type:'line', data:{labels:history.map(row=>row.month),datasets:[
-        {label:'Spending',data:history.map(row=>observed(row) ? row.actual/100 : null),borderColor:'#24634e',backgroundColor:'#24634e14',fill:true},
-        {label:'Income',data:history.map(row=>observed(row) ? row.deposited/100 : null),borderColor:'#6686c4'},
-        {label:'Allowance',data:history.map(row=>row.plan ? row.allowance/100 : null),borderColor:'#b29449',borderDash:[5,4]},
-        ...[3,6,12,24].map((window,index)=>({label:`${window} mo average`,data:history.map(row=>row[`ma_${window}`] === null ? null : row[`ma_${window}`]/100),borderColor:colors[index+1],borderDash:[2,3],hidden:window!==3,pointRadius:0}))
-      ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
-        elements:{line:{borderWidth:2,tension:0.15},point:{radius:2,hitRadius:8}},
-        onClick:(_,elements)=>{if(elements.length) openMonth(elements[0].index);},
-        scales:{x:{grid:{display:false},ticks:{maxTicksLimit:8}},y:{beginAtZero:true,ticks:{callback:value=>money(value*100)}}},
-        plugins:{legend:{labels:{boxWidth:12,font:{size:10},filter:item=>item.datasetIndex<3 && (item.datasetIndex!==2 || history.some(row=>row.plan))}},tooltip:{callbacks:{label:context=>`${context.dataset.label}: ${money(context.parsed.y*100)}`}}}}
+      type:'line',data:{labels:history.map(row=>row.label),datasets:[
+        {label:'Actual spending',data:allValues,borderColor:'#24634e',backgroundColor:'#24634e14',fill:true},
+        ...spending.windows.map((window,index)=>({label:`${window} ${scope.granularity==='quarter'?'quarter':'month'} average`,data:history.map(row=>row[`ma_${window}`]===null ? null : row[`ma_${window}`]/100),borderColor:colors[index+1],borderDash:[2,3],hidden:index!==0,pointRadius:0}))
+      ]},options:{...chartOptions,onClick:(_,elements)=>{if(elements.length) openTransactions(elements[0].index);}}
     });
     for (const toggle of document.querySelectorAll('[data-average]')) toggle.addEventListener('change',()=>{
-      chart.setDatasetVisibility(3+[3,6,12,24].indexOf(Number(toggle.dataset.average)),toggle.checked);
-      chart.update();
+      chart.setDatasetVisibility(1+spending.windows.indexOf(Number(toggle.dataset.average)),toggle.checked); chart.update();
     });
-    const categories = history.at(-1).rows.filter(row=>row.actual>0).sort((a,b)=>b.actual-a.actual);
+    categoryChart = new Chart(document.querySelector('#category-trend-chart'), {
+      type:'line',data:{labels:history.map(row=>row.label),datasets:[{label:'All spending categories',data:allValues,borderColor:'#24634e',backgroundColor:'#24634e14',fill:true}]},
+      options:{...chartOptions,onClick:(_,elements)=>{if(elements.length) openTransactions(elements[0].index,select.value);}}
+    });
+    const positive = spending.categories.filter(row=>row.total>0);
     new Chart(document.querySelector('#budget-mix-chart'), {
-      type:'doughnut',data:{labels:categories.map(row=>row.category),datasets:[{data:categories.map(row=>row.actual/100),backgroundColor:categories.map((_,index)=>colors[index%colors.length]),borderWidth:2}]},
+      type:'doughnut',data:{labels:positive.map(row=>row.name),datasets:[{data:positive.map(row=>row.total/100),backgroundColor:positive.map((_,index)=>colors[index%colors.length]),borderWidth:2}]},
       options:{responsive:true,maintainAspectRatio:false,cutout:'72%',plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>`${context.label}: ${money(context.parsed*100)}`}}},
-        onClick:(_,elements)=>{if(elements.length){document.querySelector('#budget-category-search').value=categories[elements[0].index].category;filterCategories();document.querySelector('#category-patterns').scrollIntoView({behavior:'smooth'});}}}
+        onClick:(_,elements)=>{if(elements.length){select.value=positive[elements[0].index].name;showCategory();document.querySelector('.spending-category-trend').scrollIntoView({behavior:'smooth'});}}}
     });
-    const legend = document.querySelector('#budget-mix-legend');
-    categories.slice(0,6).forEach((row,index)=>{
-      const item=document.createElement('span'), dot=document.createElement('i');
-      dot.style.backgroundColor=colors[index%colors.length]; item.append(dot,document.createTextNode(row.category)); legend.append(item);
+    const legend=document.querySelector('#budget-mix-legend');
+    positive.slice(0,6).forEach((row,index)=>{
+      const item=document.createElement('span'),dot=document.createElement('i');
+      dot.style.backgroundColor=colors[index%colors.length];item.append(dot,document.createTextNode(row.name));legend.append(item);
     });
-    if (!categories.length) legend.textContent='No positive net spending this month.';
+    if(!positive.length) legend.textContent='No positive net spending in the recorded history.';
   }
+  function showCategory() {
+    const selected=spending.categories.find(row=>row.name===select.value);
+    const values=selected ? selected.values.map(value=>value===null ? null : value/100) : allValues;
+    const label=selected ? selected.name : 'All spending categories';
+    if(categoryChart){categoryChart.data.datasets[0].label=label;categoryChart.data.datasets[0].data=values;categoryChart.update();}
+    document.querySelector('#category-values-heading').textContent=label;
+    for(const cell of document.querySelectorAll('[data-category-value]')) {
+      const value=values[Number(cell.dataset.categoryValue)]; cell.textContent=value===null ? '—' : money(value*100);
+    }
+  }
+  select.addEventListener('change',showCategory);
+  showCategory();
   function filterCategories() {
     const query=document.querySelector('#budget-category-search').value.trim().toLocaleLowerCase();
     const items=[...document.querySelectorAll('[data-category-row]')];

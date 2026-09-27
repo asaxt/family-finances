@@ -19,7 +19,7 @@
       <a class="{{ 'active' if active == 'overview' }}" href="/?month={{ month }}{{ person_query }}{{ account_query }}">
         <span>⌂</span> Overview
       </a>
-      <a class="{{ 'active' if active in ['budget', 'trends'] }}" href="{{ url_for('budget_page',month=month,person=connection_id,account=account_id) }}">
+      <a class="{{ 'active' if active in ['budget', 'trends'] }}" href="{{ url_for('budget_page',person=connection_id,account=account_id) }}">
         <span>◫</span> Spending &amp; budget
       </a>
       <a class="{{ 'active' if active == 'category_rules' }}" href="/category-rules">

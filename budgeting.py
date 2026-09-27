@@ -1,4 +1,5 @@
 """Monthly allowances and cumulative utilization, stored in the encrypted vault."""
+import calendar
 import hashlib
 import json
 import re
@@ -189,52 +190,121 @@ def report(connection, state, first, last, today=None, account_id=None, connecti
             'unknown':sum(row['unknown'] for row in history),'foreign':sum(row['foreign'] for row in history)}
 
 
-def sparkline(values):
-    """Small SVG paths with gaps for unavailable months, including negative refunds."""
-    known = [value for value in values if value is not None]
-    if not known:
-        return ''
-    low, high = min(known), max(known)
-    path, drawing = [], False
-    for index, value in enumerate(values):
-        if value is None:
-            drawing = False
-            continue
-        x = 2 + 116 * index / max(1, len(values)-1)
-        y = 28 - 24 * (value-low) / (high-low) if high > low else 16
-        path.append(f"{'L' if drawing else 'M'}{x:.1f},{y:.1f}")
-        # A tiny horizontal segment makes a single observed month visible.
-        path.append(f'L{x+0.5:.1f},{y:.1f}')
-        drawing = True
-    return ' '.join(path)
+def quarter_key(value):
+    value = month(value)
+    return f"{value[:4]}-Q{(int(value[5:])-1)//3+1}"
 
 
-def dashboard(connection, state, first, last, account_id=None, connection_id=None, today=None):
+def quarter_bounds(value):
+    if not isinstance(value,str) or not re.fullmatch(r'\d{4}-Q[1-4]',value):
+        raise BudgetError('Choose a valid calendar quarter.')
+    first = month(f"{value[:4]}-{(int(value[-1])-1)*3+1:02d}")
+    return first, shift_month(first,2)
+
+
+def end_date(value):
+    return f"{value}-{calendar.monthrange(*map(int,value.split('-')))[1]:02d}"
+
+
+def group_periods(points, granularity):
+    """Sum monthly values, applying each month's saved allowance before grouping."""
+    groups = {}
+    for point in points:
+        key = quarter_key(point['month']) if granularity=='quarter' else point['month']
+        groups.setdefault(key,[]).append(point)
+    result = []
+    for key, sample in groups.items():
+        row = {name:sum(point.get(name,0) for point in sample) for name in
+               ('actual','allowance','deposited','records','unknown','foreign')}
+        row.update(key=key,month=sample[-1]['month'],label=key.replace('-',' '),
+                   date_from=sample[0]['month']+'-01', date_to=end_date(sample[-1]['month']),
+                   future=all(point['future'] for point in sample),
+                   partial=any(point['partial'] or point['future'] for point in sample),
+                   incomplete=len(sample)<(3 if granularity=='quarter' else 1) or any(not point['records'] and not point['future'] for point in sample),
+                   plan=any(point.get('plan') for point in sample), rows=[])
+        categories = {}
+        for point in sample:
+            for item in point['rows']:
+                total=categories.setdefault(item['category'],{'category':item['category'],'actual':0,'allowance':0})
+                total['actual']+=item['actual']
+                total['allowance']+=item['allowance']
+        for item in categories.values():
+            item.update(remaining=item['allowance']-item['actual'],percent=utilization(item['actual'],item['allowance']))
+        row['rows']=list(categories.values())
+        row['remaining']=row['allowance']-row['actual']
+        row['brokerage_plan']=sum(point['brokerage_plan'] or 0 for point in sample) if row['plan'] else None
+        covered=[point for point in sample if not point['future']]
+        row['brokerage_actual']=(row['deposited']-row['actual'] if covered and all(point['brokerage_actual'] is not None for point in covered) else None)
+        result.append(row)
+    return result
+
+
+def spending_history(recorded, granularity, today):
+    """Full recorded spending history; deliberately independent of budget settings."""
+    if not recorded:
+        return {'points':[],'categories':[],'first':None,'last':None,'windows':[], 'omitted':0}
+    monthly=[]
+    omitted=0
+    for target in month_range(min(recorded),max(recorded)):
+        amounts={}
+        records=0
+        for row in recorded.get(target,[]):
+            if row['currency']!='USD' or row['treatment'] is None:
+                omitted+=row['count']
+                continue
+            records+=row['count']
+            if row['spending_enabled'] and row['treatment']=='spending':
+                amounts[row['category']]=amounts.get(row['category'],0)+row['amount']
+        monthly.append({'month':target,'actual':sum(amounts.values()),'records':records,
+                        'future':False,'partial':target==today.strftime('%Y-%m'),
+                        'brokerage_actual':None,'brokerage_plan':None,
+                        'rows':[{'category':name,'actual':value,'allowance':0} for name,value in amounts.items()]})
+    points=group_periods(monthly,granularity)
+    if granularity=='quarter':
+        for point in points:
+            first,last=quarter_bounds(point['key'])
+            point['date_from'],point['date_to']=first+'-01',end_date(last)
+    windows=[4,8] if granularity=='quarter' else [3,6,12,24]
+    totals={}
+    for index,point in enumerate(points):
+        for row in point['rows']:
+            totals[row['category']]=totals.get(row['category'],0)+row['actual']
+        for window in windows:
+            sample=points[max(0,index-window+1):index+1]
+            point[f'ma_{window}']=(round(sum(item['actual'] for item in sample)/window)
+                                  if len(sample)==window and all(item['records'] and not item['incomplete'] for item in sample) else None)
+    categories=[]
+    for name,total in sorted(totals.items(),key=lambda pair:pair[1],reverse=True):
+        values=[next((row['actual'] for row in point['rows'] if row['category']==name),0) if point['records'] else None for point in points]
+        categories.append({'name':name,'total':total,'values':values})
+    return {'points':points,'categories':categories,'first':min(recorded)+'-01',
+            'last':min(end_date(max(recorded)),today.isoformat()),'windows':windows,'omitted':omitted}
+
+
+def dashboard(connection, state, first, last, account_id=None, connection_id=None, today=None, granularity="month", snapshot_first=None):
     today = today or date.today()
     household = not account_id and not connection_id
     # A scoped spending view must never compare a subset with a household allowance.
     visible_state = state if household else {'plans': {}}
+    if granularity not in {'month','quarter'}:
+        raise BudgetError('Choose monthly or calendar-quarter reporting.')
     period(first,last)
-    earlier = max('1900-01', min(first, shift_month(last, -23)))
-    recorded = activity(connection,earlier,last,today,account_id,connection_id)
+    snapshot_first = snapshot_first or last
+    recorded = activity(connection,'1900-01','2200-12',today,account_id,connection_id)
     data = report(connection, visible_state, first, last, today, account_id, connection_id, recorded)
-    history = report(connection, visible_state, earlier, last, today, account_id, connection_id, recorded)['history']
+    selected = report(connection, visible_state, snapshot_first, last, today, account_id, connection_id, recorded)
+    current = group_periods(selected['history'],granularity)[-1]
+    data['current'] = current
+    data['spending'] = spending_history(recorded,granularity,today)
     def observed(row):
-        return bool(row['records']) and not row['future'] and not row['unknown'] and not row['foreign']
-    for index, row in enumerate(history):
-        for window in (3, 6, 12, 24):
-            sample = history[max(0,index-window+1):index+1]
-            row[f'ma_{window}'] = round(sum(item['actual'] for item in sample)/window) if len(sample)==window and all(observed(item) for item in sample) else None
-    current = data['current']
-    prior = history[-13] if len(history)>=13 else None
-    data['yoy'] = ((current['actual']-prior['actual'])/abs(prior['actual'])*100
-                   if prior and prior['actual'] and observed(prior) and observed(current) and not current['partial'] else None)
-    data['averages'] = {window:history[-1][f'ma_{window}'] for window in (3,6,12,24)}
-    data['chart'] = [row for row in history if row['month']>=first]
-    data['sparks'] = {key:sparkline([row[key] if observed(row) else None for row in history[-12:]])
-                      for key in ('actual','deposited','brokerage_actual','allowance')}
-    heat_months = data['history'][-12:]
-    data['heat_months'] = [row['month'] for row in heat_months]
+        return bool(row['records']) and not row['future'] and not row['unknown'] and not row['foreign'] and not row.get('incomplete')
+    points=data['spending']['points']
+    previous_key=quarter_key(shift_month(last,-12)) if granularity=='quarter' else shift_month(last,-12)
+    previous=next((row for row in points if row['key']==previous_key),None)
+    data['yoy']=((current['actual']-previous['actual'])/abs(previous['actual'])*100
+                 if previous and previous['actual'] and observed(previous) and observed(current) and not current['partial'] else None)
+    heat_months = group_periods(data['history'],granularity)[-12:]
+    data['heat_months'] = [row['label'] for row in heat_months]
     data['heat_budget'] = household and any(row['plan'] for row in heat_months)
     current_rows = {row['category']:row for row in current['rows']}
     accumulated = {row['category'] for row in data['totals']}
@@ -262,7 +332,7 @@ def dashboard(connection, state, first, last, account_id=None, connection_id=Non
                 level, label = 'near', f'{ratio:g}% used'
             else:
                 level, label = 'low', f'{ratio:g}% used'
-            total['heat'].append({'month':point['month'],'actual':actual,'allowance':allowance,
+            total['heat'].append({'month':point['label'],'date_from':point['date_from'],'date_to':point['date_to'],'actual':actual,'allowance':allowance,
                                   'level':level,'label':label,'percent':ratio})
     data['totals'].sort(key=lambda row:row['actual'],reverse=True)
     # Five recent transactions per category, using precisely the report's scope.
@@ -276,10 +346,10 @@ def dashboard(connection, state, first, last, account_id=None, connection_id=Non
           FROM transactions t JOIN accounts a ON a.id=t.account_id {CATEGORY_RULE_JOIN}
           WHERE t.pending=0 AND t.excluded=0 AND t.currency='USD' AND a.spending_enabled=1
                 AND ({EFFECTIVE_CASH_FLOW_SQL})='spending' AND t.amount!=0
-                AND substr(t.transacted_at,1,7)=? AND t.transacted_at<=? {scope_sql}
+                AND t.transacted_at>=? AND t.transacted_at<=? AND t.transacted_at<=? {scope_sql}
         ) SELECT category,name,transacted_at,amount FROM ranked WHERE position<=5
         ORDER BY category,position
-    """, (last,today.isoformat(),*params)).fetchall()
+    """, (snapshot_first+'-01',end_date(last),today.isoformat(),*params)).fetchall()
     data['details'] = {}
     for row in rows:
         data['details'].setdefault(row['category'],[]).append(dict(row))

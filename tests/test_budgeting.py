@@ -148,18 +148,48 @@ class BudgetMathTests(unittest.TestCase):
         transaction(self.connection,'sample-foreign','2002-02',913,currency='EUR')
         result=budgeting.dashboard(self.connection,state,'2001-12','2002-02',today=date(2002,3,1))
         self.assertEqual([cell['level'] for cell in result['totals'][0]['heat']],['low','over','missing'])
-        self.assertIsNone(result['averages'][3])
+        self.assertTrue(result['spending']['omitted'])
         self.assertEqual(len(result['details']['SAMPLE ALPHA']),5)
         self.assertNotIn(913,[row['amount'] for row in result['details']['SAMPLE ALPHA']])
         scoped=budgeting.dashboard(self.connection,state,'2001-12','2002-02',account_id='sample-bank',today=date(2002,3,1))
         self.assertEqual(scoped['current']['actual'],811)
-        self.assertIsNone(scoped['current']['plan'])
+        self.assertFalse(scoped['current']['plan'])
         self.assertEqual(len(scoped['details']['SAMPLE ALPHA']),1)
         self.assertEqual(scoped['totals'][0]['allowance'],0)
         self.assertFalse(scoped['heat_budget'])
         self.assertEqual(scoped['totals'][0]['heat'][-1]['level'],'intensity-4')
-        self.assertIn('M',budgeting.sparkline([None,4,None,7]))
-        self.assertNotIn('nan',budgeting.sparkline([0,0]))
+
+    def test_full_history_charts_ignore_budget_dates_amounts_and_keep_refunds(self):
+        transaction(self.connection,'sample-old','1985-04',733)
+        transaction(self.connection,'sample-recent','2002-02',617)
+        transaction(self.connection,'sample-credit','2002-02',-131)
+        transaction(self.connection,'sample-nonusd','2002-02',857,currency='EUR')
+        transaction(self.connection,'sample-excluded','2002-02',911,excluded=1)
+        first=budgeting.dashboard(self.connection,{'plans':{}},'2002-02','2002-02',today=date(2002,3,1))
+        second=budgeting.dashboard(self.connection,{'plans':{'2001-12':fixed('97.31')}},'2001-12','2002-02',today=date(2002,3,1))
+        self.assertEqual(first['spending'],second['spending'])
+        series=first['spending']['categories'][0]
+        self.assertEqual(series['total'],1219)
+        self.assertEqual(series['values'][0],733)
+        self.assertEqual(series['values'][-1],486)
+        self.assertIsNone(series['values'][1])
+
+    def test_calendar_quarters_sum_monthly_changes_and_match_drilldown_dates(self):
+        for target,amount in [('2001-12',211),('2002-01',317),('2002-02',419),('2002-03',523),('2002-04',631)]:
+            transaction(self.connection,'sample-'+target,target,amount)
+        state={'plans':{'2002-01':fixed(),'2002-02':fixed('18.93')}}
+        result=budgeting.dashboard(self.connection,state,'2002-01','2002-03',today=date(2002,5,1),granularity='quarter',snapshot_first='2002-01')
+        self.assertEqual(result['current']['actual'],1259)
+        self.assertEqual(result['current']['allowance'],4961)
+        points=result['spending']['points']
+        self.assertEqual([point['key'] for point in points],['2001-Q4','2002-Q1','2002-Q2'])
+        self.assertEqual((points[1]['date_from'],points[1]['date_to']),('2002-01-01','2002-03-31'))
+        self.assertEqual(points[1]['actual'],1259)
+        self.assertEqual(result['heat_months'],['2002 Q1'])
+        self.assertEqual(budgeting.quarter_bounds('2004-Q1'),('2004-01','2004-03'))
+        self.assertEqual(budgeting.end_date('2004-02'),'2004-02-29')
+        with self.assertRaises(budgeting.BudgetError):
+            budgeting.quarter_bounds('2002-Q5')
 
     def test_rename_keeps_historical_allowances_without_changing_transactions(self):
         state={'plans':{'2001-12':fixed()}}
@@ -249,6 +279,23 @@ class BudgetRouteTests(unittest.TestCase):
         self.assertIn(b'account=sample-card',page.data)
         self.assertNotIn(b'id="open-budget-editor"',page.data)
         self.assertIn(b'Earnings trends',self.client.get('/trends?view=earnings').data)
+
+    def test_quarter_default_and_explicit_monthly_view(self):
+        self.ready()
+        default=self.client.get('/budget')
+        self.assertIn(b'<option value="quarter" selected>',default.data)
+        quarter=self.client.get('/budget?quarter=2002-Q1')
+        self.assertEqual(quarter.status_code,200)
+        self.assertIn(b'2002 Q1',quarter.data)
+        self.assertIn(b'date_from=2002-01-01',quarter.data)
+        self.assertIn(b'date_to=2002-03-31',quarter.data)
+        self.assertIn(b'id="category-trend-select"',quarter.data)
+        self.assertNotIn(b'budget-spark',quarter.data)
+        self.assertIn(b'<option value="month" selected>',self.client.get('/budget?month=2002-02').data)
+        self.assertEqual(self.client.get('/budget?quarter=2002-Q5').status_code,400)
+        response=self.post({**self.payload,'granularity':'quarter'})
+        self.assertEqual(response.status_code,200)
+        self.assertIn('quarter=2002-Q1',response.json['url'])
 
     def test_mirror_readable_but_saving_is_blocked(self):
         self.ready()

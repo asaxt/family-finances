@@ -87,9 +87,13 @@ percentages use the same monthly income base. Existing recorded income is the de
 income keeps allowances steady while deposits arrive. There are no additional
 payroll deductions to enter.
 
-Summary sparklines and the income/spending chart lead into a category heatmap,
-cumulative utilization, and expandable transaction details. Month cells link to
-transactions. Account and person filters show scoped spending without comparing
+Calendar quarters are the default reporting view, with monthly viewing still
+available. Quarterly allowances sum the applicable monthly plans. Full-history
+spending charts and a category selector show actual dollars independently of
+budget amounts and the selected snapshot. The spending-mix pie uses the same full
+history; refunds reduce category totals, and nonpositive totals have no pie slice.
+The overview leads into a category heatmap, cumulative utilization, and expandable
+transaction details. Chart points and heatmap cells link to their transactions. Account and person filters show scoped spending without comparing
 it to household allowances. Earnings trends remain available from this page.
 
 Compare monthly spending and cumulative utilization, including refunds and

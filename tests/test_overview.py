@@ -129,7 +129,7 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(top_metrics.count('<article class="metric-card'), 3)
 
         trends = self.client.get("/trends").get_data(as_text=True)
-        self.assertIn("Monthly spending and moving averages", trends)
+        self.assertIn("Spending over time", trends)
         self.assertIn("Category patterns", trends)
         self.assertIn("Earnings", trends)
         earnings = self.client.get("/trends?view=earnings").get_data(as_text=True)
