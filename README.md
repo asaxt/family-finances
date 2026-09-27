@@ -77,6 +77,25 @@ Upgrades retain an encrypted migration recovery copy. Existing rules with no
 recorded origin are conservatively treated as user rules. The development
 production mirror remains read-only.
 
+## Monthly budget
+
+Open **Budget**, choose a month and an accumulation start, and save fixed-dollar
+or percentage allowances for spending categories. All percentages use the same
+monthly income base. Existing recorded income is the default; optional planned
+income keeps allowances steady while deposits arrive. There are no additional
+payroll deductions to enter.
+
+Compare monthly spending and cumulative utilization, including refunds and
+negative overspending. Accumulation does not reset in January. Each month uses
+its applicable saved plan; a new effective month preserves earlier allowances.
+Views cover up to ten years at a time. Changes to transaction categories or
+recorded income update the report. The brokerage remainder is calculated income
+minus spending, not an actual transfer or account balance; unused allowances are
+not counted again as cash. Missing records and unsupported currencies are flagged.
+
+Budget settings stay in the existing encrypted vault. Development snapshots
+allow viewing but cannot save budget changes.
+
 ## Ask AI (preview)
 
 Enable **Local AI assistance** in Settings, then open **Ask AI**. The preview
