@@ -19,11 +19,8 @@
       <a class="{{ 'active' if active == 'overview' }}" href="/?month={{ month }}{{ person_query }}{{ account_query }}">
         <span>⌂</span> Overview
       </a>
-      <a class="{{ 'active' if active == 'trends' }}" href="/trends?month={{ month }}{{ person_query }}{{ account_query }}">
-        <span>⌁</span> Trends
-      </a>
-      <a class="{{ 'active' if active == 'categories' }}" href="/categories?month={{ month }}{{ person_query }}{{ account_query }}">
-        <span>◫</span> Categories
+      <a class="{{ 'active' if active in ['budget', 'trends'] }}" href="{{ url_for('budget_page',month=month,person=connection_id,account=account_id) }}">
+        <span>◫</span> Spending &amp; budget
       </a>
       <a class="{{ 'active' if active == 'category_rules' }}" href="/category-rules">
         <span>✓</span> Category Rules
@@ -37,7 +34,6 @@
       <a class="{{ 'active' if active == 'savings' }}" href="/savings">
         <span>◇</span> Savings
       </a>
-      <a class="{{ 'active' if active == 'budget' }}" href="/budget"><span>▤</span> Budget</a>
       <a class="{{ 'active' if active == 'plan' }}" href="/plan">
         <span>↗</span> Plan
       </a>

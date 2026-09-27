@@ -130,7 +130,7 @@ class OverviewTests(unittest.TestCase):
 
         trends = self.client.get("/trends").get_data(as_text=True)
         self.assertIn("Monthly spending and moving averages", trends)
-        self.assertIn("Category trend", trends)
+        self.assertIn("Category patterns", trends)
         self.assertIn("Earnings", trends)
         earnings = self.client.get("/trends?view=earnings").get_data(as_text=True)
         self.assertIn("Earnings trends", earnings)
@@ -150,7 +150,7 @@ class OverviewTests(unittest.TestCase):
         self.assertIn("Merchant 2", categories)
         self.assertNotIn("Merchant 1", categories)
         self.assertNotIn("Budget snapshot", categories)
-        self.assertNotIn("/api/budget", categories)
+        self.assertIn("/api/budget/plan", categories)
 
     def test_valid_lookback_is_encrypted_and_invalid_values_are_rejected(self):
         overview = self.client.get("/")

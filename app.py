@@ -55,7 +55,6 @@ from analytics import (
     EFFECTIVE_CATEGORY_SQL,
     DEFAULT_OVERVIEW_LOOKBACK_DAYS,
     MAX_OVERVIEW_LOOKBACK_DAYS,
-    category_details,
     cash_flow_summary,
     long_term_trends,
     planning_spending_trend,
@@ -1283,6 +1282,8 @@ def cash_flow():
 
 @app.get("/trends")
 def trends():
+    if request.args.get('view') != 'earnings':
+        return budget_page()
     context = page_context("trends")
     context["trend_view"] = (
         "earnings" if request.args.get("view") == "earnings" else "spending"
@@ -1299,21 +1300,7 @@ def trends():
 
 @app.get("/categories")
 def categories():
-    context = page_context("categories")
-    with db() as connection:
-        context["summary"] = spending_summary(
-            connection,
-            context["month"],
-            context["account_id"],
-            context["connection_id"],
-        )
-        context["category_details"] = category_details(
-            connection,
-            context["month"],
-            context["account_id"],
-            context["connection_id"],
-        )
-    return render_template("categories.html", **context)
+    return budget_page()
 
 
 CATEGORY_RULE_ERRORS = {
@@ -1737,8 +1724,8 @@ def budget_page():
         target = budgeting.month(request.args.get('month') or date.today().strftime('%Y-%m'))
         with db() as connection:
             state = budgeting.load(connection)
-            first = request.args.get('since') or min(target, state.get('start') or min([target, *state['plans']]))
-            report = budgeting.report(connection, state, first, target)
+            first = request.args.get('since') or min(target, state.get('start') or min(state['plans'], default=max('1900-01', budgeting.shift_month(target,-11))))
+            report = budgeting.dashboard(connection, state, first, target, context["account_id"], context["connection_id"])
             effective, plan = budgeting.plan_for(state, target)
             saved = {line['category']: line for line in plan['lines']} if plan else {}
             categories = budgeting.palette(connection)
@@ -1747,11 +1734,11 @@ def budget_page():
             for row in categories:
                 if row['flow_type'] == 'spending' or row['name'] in saved:
                     editor.append({'category':row['name'],'treatment':row['flow_type'],
-                                   **saved.get(row['name'],{'kind':'none','value':0}), 'archived':False})
+                                   **saved.get(row['name'],{'kind':'percent','value':None}), 'archived':False})
             editor.extend({**row, 'treatment':'spending','archived':True} for name,row in saved.items() if name not in known)
             context.update(budget=report, budget_state=state, budget_plan=plan,
                            budget_version=budgeting.version(connection,state), budget_editor=editor,
-                           budget_effective=effective,
+                           budget_effective=effective, household=not context["account_id"] and not context["connection_id"],
                            budget_month_end=f'{target}-{calendar.monthrange(*map(int,target.split("-")))[1]:02d}',
                            today_month=date.today().strftime('%Y-%m'))
         context['month'] = target
