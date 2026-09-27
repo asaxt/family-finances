@@ -91,7 +91,7 @@ class ProductionMirrorTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn(b'Read-only production snapshot', page.data)
         token = self.csrf_token(page)
-        for url in ('/api/local-ai/category-review/start', '/api/local-ai/category-review/decide', '/api/local-ai/evaluation', '/api/category-rules/bulk', '/api/transaction/sample', '/api/transactions/bulk', '/category-setup', '/statement-import', '/api/account-roles', '/api/savings', '/api/password', '/api/app-name'):
+        for url in ('/api/budget/plan', '/api/local-ai/category-review/start', '/api/local-ai/category-review/decide', '/api/local-ai/evaluation', '/api/category-rules/bulk', '/api/transaction/sample', '/api/transactions/bulk', '/category-setup', '/statement-import', '/api/account-roles', '/api/savings', '/api/password', '/api/app-name'):
             response = self.client.post(url, data={'csrf_token': token})
             self.assertEqual(response.status_code, 403, url)
             self.assertIn('read-only', response.json['error'])
@@ -111,7 +111,7 @@ class ProductionMirrorTests(unittest.TestCase):
     def test_readonly_pages_and_assistant_remain_available(self):
         self.enable_mirror()
         before = self.application.VAULT_PATH.read_bytes()
-        for url in ('/', '/transactions', '/categories', '/category-rules', '/category-setup', '/cash-flow', '/trends', '/savings', '/settings', '/assistant'):
+        for url in ('/', '/transactions', '/categories', '/category-rules', '/category-setup', '/cash-flow', '/trends', '/savings', '/settings', '/assistant', '/budget'):
             response = self.client.get(url)
             self.assertEqual(response.status_code, 200, url)
         transactions = self.client.get('/transactions')

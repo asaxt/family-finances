@@ -2,6 +2,7 @@ import os
 from contextlib import contextmanager
 from werkzeug.datastructures import MultiDict
 import rule_review
+import budgeting
 import io
 import base64
 import hashlib
@@ -1729,6 +1730,62 @@ def savings():
     return render_template("savings.html", **context)
 
 
+@app.get('/budget')
+def budget_page():
+    context = page_context('budget')
+    try:
+        target = budgeting.month(request.args.get('month') or date.today().strftime('%Y-%m'))
+        with db() as connection:
+            state = budgeting.load(connection)
+            first = request.args.get('since') or min(target, state.get('start') or min([target, *state['plans']]))
+            report = budgeting.report(connection, state, first, target)
+            effective, plan = budgeting.plan_for(state, target)
+            saved = {line['category']: line for line in plan['lines']} if plan else {}
+            categories = budgeting.palette(connection)
+            known = {row['name'] for row in categories}
+            editor = []
+            for row in categories:
+                if row['flow_type'] == 'spending' or row['name'] in saved:
+                    editor.append({'category':row['name'],'treatment':row['flow_type'],
+                                   **saved.get(row['name'],{'kind':'none','value':0}), 'archived':False})
+            editor.extend({**row, 'treatment':'spending','archived':True} for name,row in saved.items() if name not in known)
+            context.update(budget=report, budget_state=state, budget_plan=plan,
+                           budget_version=budgeting.version(connection,state), budget_editor=editor,
+                           budget_effective=effective,
+                           budget_month_end=f'{target}-{calendar.monthrange(*map(int,target.split("-")))[1]:02d}',
+                           today_month=date.today().strftime('%Y-%m'))
+        context['month'] = target
+        return render_template('budget.html', **context)
+    except budgeting.BudgetError as error:
+        return str(error), 400
+
+
+@app.post('/api/budget/plan')
+def save_budget_plan():
+    if request.content_length and request.content_length > 200000:
+        return jsonify(error='The budget form is too large.'), 413
+    payload = request.get_json(silent=True)
+    try:
+        if not isinstance(payload,dict):
+            raise budgeting.BudgetError('Send a valid budget form.')
+        target = budgeting.month(payload.get('month'))
+        first = budgeting.month(payload.get('since') or target)
+        budgeting.period(first, target)
+        with db() as connection:
+            state = budgeting.load(connection)
+            if payload.get('version') != budgeting.version(connection,state):
+                return jsonify(error='The budget or category labels changed. Reload before saving.'), 409
+            allowed = {row['name'] for row in budgeting.palette(connection)}
+            allowed.update(line['category'] for plan in state['plans'].values() for line in plan['lines'])
+            plan = budgeting.validate_plan(payload,allowed)
+            state['plans'][target] = plan
+            state['start'] = first
+            budgeting.save(connection,state)
+        return jsonify(saved=True, url=url_for('budget_page',month=target,since=payload.get('since') or target))
+    except budgeting.BudgetError as error:
+        return jsonify(error=str(error)), 400
+
+
 @app.get("/plan")
 def planning_page():
     context = page_context("plan")
@@ -2342,6 +2399,7 @@ def save_category_setup(connection, rows):
         if row["original_name"]
         and row["original_name"].casefold() in existing
     }
+    budgeting.renamed_categories(connection, submitted)
     reviews = load_ai_reviews(connection)
     for transaction_id, review in list(reviews.items()):
         key = review["category"].casefold()
