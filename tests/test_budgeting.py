@@ -280,10 +280,10 @@ class BudgetRouteTests(unittest.TestCase):
         self.assertNotIn(b'id="open-budget-editor"',page.data)
         self.assertIn(b'Earnings trends',self.client.get('/trends?view=earnings').data)
 
-    def test_year_default_and_explicit_quarter_and_monthly_views(self):
+    def test_rolling_default_and_explicit_quarter_and_monthly_views(self):
         self.ready()
         default=self.client.get('/budget')
-        self.assertIn(b'<option value="year" selected>',default.data)
+        self.assertIn(b'<option value="rolling" selected>',default.data)
         quarter=self.client.get('/budget?quarter=2002-Q1')
         self.assertEqual(quarter.status_code,200)
         self.assertIn(b'2002 Q1',quarter.data)
@@ -387,6 +387,24 @@ class BudgetRouteTests(unittest.TestCase):
         review=self.post({**payload,'preview':True}).json['review']
         response=self.post({**payload,'confirmation':review['confirmation']})
         self.assertIn('year=2002',response.json['url'])
+
+    def test_rolling_window_crosses_year_boundary_and_keeps_monthly_cells(self):
+        self.ready()
+        with self.application.db() as connection:
+            state={'plans':{'2001-01':fixed('11.75')}}
+            budgeting.save(connection,state)
+            result=budgeting.dashboard(connection,state,'2001-03','2002-02',today=date(2002,3,1),granularity='rolling',snapshot_first='2001-03')
+            self.assertEqual(result['current']['allowance'],14100)
+            self.assertEqual(result['heat_months'][0],'2001 03')
+            self.assertEqual(result['heat_months'][-1],'2002 02')
+            self.assertEqual(len(result['heat_months']),12)
+            self.assertEqual(result['totals'][0]['allowance'],14100)
+        page=self.client.get('/budget?granularity=rolling&month=2002-02')
+        self.assertEqual(page.status_code,200)
+        self.assertIn(b'2001-03 through 2002-02',page.data)
+        self.assertIn(b'12-month allowance',page.data)
+        self.assertIn(b'Ending month',page.data)
+        self.assertIn(b'Rolling 12-month accumulation',page.data)
 
     def test_mirror_readable_but_saving_is_blocked(self):
         self.ready()
