@@ -120,12 +120,21 @@
   renderTimeline();
   preview();
   const granularity = document.querySelector('#spending-granularity');
+  const yearInput=document.querySelector('#spending-year-field input');
+  const accumulation=document.querySelector('.spending-toolbar [name=since]');
+  let viewedYear=yearInput.value;
+  yearInput.addEventListener('input',()=>{
+    if(yearInput.validity.valid && yearInput.value) {
+      if(accumulation.value===`${viewedYear}-01` || accumulation.value>`${yearInput.value}-12`) accumulation.value=`${yearInput.value}-01`;
+      viewedYear=yearInput.value;
+    }
+  });
   granularity.addEventListener('change',()=>{
-    const quarterly=granularity.value==='quarter';
-    const quarterField=document.querySelector('#spending-quarter-field');
-    const monthField=document.querySelector('#spending-month-field');
-    quarterField.hidden=!quarterly; quarterField.querySelector('select').disabled=!quarterly;
-    monthField.hidden=quarterly; monthField.querySelector('input').disabled=quarterly;
+    for(const period of ['year','quarter','month']) {
+      const container=document.querySelector(`#spending-${period}-field`);
+      container.hidden=granularity.value!==period;
+      container.querySelector('input,select').disabled=container.hidden;
+    }
   });
   const spending = JSON.parse(document.querySelector('#budget-history-data').textContent);
   const history = spending.points;

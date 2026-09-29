@@ -280,10 +280,10 @@ class BudgetRouteTests(unittest.TestCase):
         self.assertNotIn(b'id="open-budget-editor"',page.data)
         self.assertIn(b'Earnings trends',self.client.get('/trends?view=earnings').data)
 
-    def test_quarter_default_and_explicit_monthly_view(self):
+    def test_year_default_and_explicit_quarter_and_monthly_views(self):
         self.ready()
         default=self.client.get('/budget')
-        self.assertIn(b'<option value="quarter" selected>',default.data)
+        self.assertIn(b'<option value="year" selected>',default.data)
         quarter=self.client.get('/budget?quarter=2002-Q1')
         self.assertEqual(quarter.status_code,200)
         self.assertIn(b'2002 Q1',quarter.data)
@@ -361,6 +361,32 @@ class BudgetRouteTests(unittest.TestCase):
             self.assertEqual(set(saved['plans']),{'2002-01'})
             self.assertEqual(budgeting.plan_for(saved,'2002-02')[1],plan)
             self.assertEqual([tuple(row) for row in connection.execute('SELECT * FROM transactions')],before)
+
+    def test_calendar_year_summary_and_twelve_month_heatmap(self):
+        self.ready()
+        with self.application.db() as connection:
+            state={'plans':{'2002-01':fixed('11.75'),'2002-03':fixed('19.31')}}
+            budgeting.save(connection,state)
+            result=budgeting.dashboard(connection,state,'2002-02','2002-12',today=date(2003,1,1),granularity='year',snapshot_first='2002-01')
+            self.assertEqual(result['current']['allowance'],21660)
+            self.assertEqual(len(result['heat_months']),12)
+            self.assertEqual(result['heat_months'][0],'2002 01')
+            self.assertEqual(result['heat_months'][-1],'2002 12')
+            self.assertEqual(result['totals'][0]['heat'][1]['date_to'],'2002-02-28')
+            self.assertEqual(result['spending']['points'][0]['key'],'2002-02')
+            revision=budgeting.version(connection,state)
+        page=self.client.get('/budget?year=2002').data
+        self.assertIn(b'2002-01 through 2002-12',page)
+        self.assertIn(b'Annual allowance',page)
+        self.assertIn(b'Monthly budget use',page)
+        self.assertIn(b'Click a cell for transactions',page)
+        self.assertIn(b'>Jan</span>',page)
+        self.assertIn(b'>Dec</span>',page)
+        self.assertEqual(self.client.get('/budget?year=bad').status_code,400)
+        payload={**self.payload,'version':revision,'granularity':'year'}
+        review=self.post({**payload,'preview':True}).json['review']
+        response=self.post({**payload,'confirmation':review['confirmation']})
+        self.assertIn('year=2002',response.json['url'])
 
     def test_mirror_readable_but_saving_is_blocked(self):
         self.ready()
