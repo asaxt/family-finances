@@ -545,9 +545,9 @@ tr:last-child td { border-bottom: 0; }
 .heat-legend i { width: 10px; height: 10px; border-radius: 3px; }
 .heat-cells, .heat-months { display: flex; gap: 4px; }
 .heat-months { margin-top: 8px; }
-.heat-cell, .heat-months span { flex: 1 0 22px; width: 22px; text-align: center; }
+.heat-cell, .heat-months span { flex: 1 0 34px; width: 34px; text-align: center; }
 .heat-months span { font-size: 9px; color: var(--muted); }
-.heat-cell { height: 25px; border-radius: 4px; line-height: 25px; color: #562821; font-weight: 800; }
+.heat-cell { font-size: 9px; text-decoration: none; height: 25px; border-radius: 4px; line-height: 25px; color: #562821; font-weight: 800; }
 .heat-cell:hover, .heat-cell:focus-visible { outline: 2px solid var(--forest); outline-offset: 1px; }
 .heat-low { background: #bce0c9; }
 .heat-near { background: #efd591; }

@@ -87,8 +87,12 @@ percentages use the same monthly income base. Existing recorded income is the de
 income keeps allowances steady while deposits arrive. There are no additional
 payroll deductions to enter.
 
-Calendar quarters are the default reporting view, with monthly viewing still
-available. Quarterly allowances sum the applicable monthly plans. The plan editor shows a
+Calendar years are the default reporting view, with quarter and month views still
+available. Category patterns show January through December as labeled monthly
+heatmap cells, with budget usage percentages and links to the matching transactions.
+The default accumulation window starts in January; an explicit earlier start can
+still be used for continuous accumulation. Full-history spending charts remain monthly
+in the year view. Quarterly allowances sum the applicable monthly plans. The plan editor shows a
 monthly timeline of saved percentages and dollar amounts. Review a proposed plan
 before applying it from an effective month onward: later saved plans are replaced,
 with affected intervals and old/new settings shown first. Modify or cancel the
