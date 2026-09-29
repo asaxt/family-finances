@@ -130,7 +130,7 @@ class OverviewTests(unittest.TestCase):
 
         trends = self.client.get("/trends").get_data(as_text=True)
         self.assertIn("Spending over time", trends)
-        self.assertIn("Category patterns", trends)
+        self.assertNotIn("Category patterns", trends)
         self.assertIn("Earnings", trends)
         earnings = self.client.get("/trends?view=earnings").get_data(as_text=True)
         self.assertIn("Earnings trends", earnings)

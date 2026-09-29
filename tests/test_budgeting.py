@@ -147,7 +147,7 @@ class BudgetMathTests(unittest.TestCase):
         transaction(self.connection,'sample-bank','2002-02',811,account='sample-bank')
         transaction(self.connection,'sample-foreign','2002-02',913,currency='EUR')
         result=budgeting.dashboard(self.connection,state,'2001-12','2002-02',today=date(2002,3,1))
-        self.assertEqual([cell['level'] for cell in result['totals'][0]['heat']],['low','over','missing'])
+        self.assertEqual([cell['level'] for cell in result['totals'][0]['heat'][-3:]],['low','over','missing'])
         self.assertTrue(result['spending']['omitted'])
         self.assertEqual(len(result['details']['SAMPLE ALPHA']),5)
         self.assertNotIn(913,[row['amount'] for row in result['details']['SAMPLE ALPHA']])
@@ -190,6 +190,18 @@ class BudgetMathTests(unittest.TestCase):
         self.assertEqual(budgeting.end_date('2004-02'),'2004-02-29')
         with self.assertRaises(budgeting.BudgetError):
             budgeting.quarter_bounds('2002-Q5')
+
+    def test_category_moving_averages_use_full_windows_refunds_and_zero_months(self):
+        for index,target in enumerate(budgeting.month_range('2001-01','2002-02')):
+            transaction(self.connection,'sample-income-'+target,target,-18317,'Income','sample-bank')
+            if index!=1:
+                transaction(self.connection,'sample-series-'+target,target,1200 if index!=2 else -300)
+        series=budgeting.spending_history(budgeting.activity(self.connection,'2001-01','2002-02',date(2002,3,1)),'month',date(2002,3,1))['categories'][0]
+        self.assertEqual(series['values'][1],0)
+        self.assertEqual(series['ma_3'][:3],[None,None,300])
+        self.assertEqual(series['ma_12'][11],975)
+        self.assertEqual(series['ma_12'][12],975)
+        self.assertEqual(budgeting.moving_average([900,None,300,600,900],3),[None,None,None,None,600])
 
     def test_rename_keeps_historical_allowances_without_changing_transactions(self):
         state={'plans':{'2001-12':fixed()}}
@@ -265,7 +277,7 @@ class BudgetRouteTests(unittest.TestCase):
 
     def test_consolidated_routes_defaults_and_scoped_views(self):
         self.ready()
-        for route in ('/budget','/categories','/trends'):
+        for route in ('/budget','/categories'):
             page=self.client.get(route+'?month=2002-02&since=2002-01')
             self.assertEqual(page.status_code,200)
             self.assertIn(b'<dialog id="budget-editor"',page.data)
@@ -280,16 +292,16 @@ class BudgetRouteTests(unittest.TestCase):
         self.assertNotIn(b'id="open-budget-editor"',page.data)
         self.assertIn(b'Earnings trends',self.client.get('/trends?view=earnings').data)
 
-    def test_rolling_default_and_explicit_quarter_and_monthly_views(self):
+    def test_monthly_default_and_explicit_quarter_views(self):
         self.ready()
         default=self.client.get('/budget')
-        self.assertIn(b'<option value="rolling" selected>',default.data)
+        self.assertIn(b'<option value="month" selected>',default.data)
         quarter=self.client.get('/budget?quarter=2002-Q1')
         self.assertEqual(quarter.status_code,200)
         self.assertIn(b'2002 Q1',quarter.data)
         self.assertIn(b'date_from=2002-01-01',quarter.data)
         self.assertIn(b'date_to=2002-03-31',quarter.data)
-        self.assertIn(b'id="category-trend-select"',quarter.data)
+        self.assertNotIn(b'id="category-trend-select"',quarter.data)
         self.assertNotIn(b'budget-spark',quarter.data)
         self.assertIn(b'<option value="month" selected>',self.client.get('/budget?month=2002-02').data)
         self.assertEqual(self.client.get('/budget?quarter=2002-Q5').status_code,400)
@@ -405,6 +417,25 @@ class BudgetRouteTests(unittest.TestCase):
         self.assertIn(b'12-month allowance',page.data)
         self.assertIn(b'Ending month',page.data)
         self.assertIn(b'Rolling 12-month accumulation',page.data)
+
+    def test_separate_trends_and_budget_first_monthly_patterns(self):
+        self.ready()
+        page=self.client.get('/budget?month=2002-02&since=2002-02').data
+        self.assertLess(page.index(b'id="category-patterns"'),page.index(b'Selected period summary'))
+        self.assertNotIn(b'id="budget-history-chart"',page)
+        self.assertIn(b'12 months shown',page)
+        self.assertIn(b'2001 03',page)
+        self.assertIn(b'This month',page)
+        trends=self.client.get('/trends?account=sample-card&month=2002-02&since=2002-02').data
+        self.assertIn(b'id="category-trend-select"',trends)
+        self.assertIn(b'data-category-average="3" checked',trends)
+        self.assertIn(b'data-category-average="12" checked',trends)
+        self.assertNotIn(b'id="budget-editor"',trends)
+        self.assertNotIn(b'id="category-patterns"',trends)
+        self.assertNotIn(b'class="filterbar"',trends)
+        self.assertIn(b'chart.umd.min.js',trends)
+        self.assertIn(b'"account": "sample-card"',trends)
+        self.assertEqual(self.client.get('/trends?account=sample-bank').status_code,200)
 
     def test_mirror_readable_but_saving_is_blocked(self):
         self.ready()
