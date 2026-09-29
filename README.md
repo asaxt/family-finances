@@ -93,8 +93,13 @@ Account and person filters apply to every chart and transaction link.
 
 In **Edit monthly plan**, new lines default to **% of income**; fixed dollars remain
 available. Both carry forward until changed. All percentages use the same monthly
-income base. Recorded income is the default; optional planned income keeps
-allowances steady while deposits arrive. The plan editor shows a
+income base. Recorded income is the default. Optional planned income or trailing
+3-month, 12-month, and full-history average income can provide a steadier base.
+Averages use completed months before each budget month, never later income;
+future budgets use history through the last completed month. Available USD
+cash-flow months are averaged, including recorded zero-income months. Missing
+months are excluded and counted in the preview and monthly details. With no prior
+history, percentage allowances are marked unavailable; fixed-dollar lines still apply. The plan editor shows a
 monthly timeline of saved percentages and dollar amounts. Review a proposed plan
 before applying it from an effective month onward: later saved plans are replaced,
 with affected intervals and old/new settings shown first. Modify or cancel the

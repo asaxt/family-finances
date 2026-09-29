@@ -65,6 +65,59 @@ class BudgetMathTests(unittest.TestCase):
         self.assertEqual(result['current']['brokerage_actual'],-2931)
         self.assertEqual(result['totals'][0]['allowance'],4243)
 
+    def test_income_averages_use_prior_completed_months_and_distinct_windows(self):
+        recorded={target:[{'currency':'USD','cash_flow_role':'cash_flow',
+                          'treatment':'earned_income','inflows':(index+1)*1000}]
+                  for index,target in enumerate(budgeting.month_range('2000-01','2001-03'))}
+        for mode,expected,count in [('average_3',12000,3),('average_12',7500,12),('average_all',7000,13)]:
+            with self.subTest(mode=mode):
+                basis=budgeting.income_basis(recorded,'2001-02',mode,date(2001,3,15))
+                self.assertEqual((basis['value'],basis['months'],basis['last']),(expected,count,'2001-01'))
+        current=budgeting.income_basis(recorded,'2001-03','average_3',date(2001,3,15))
+        future=budgeting.income_basis(recorded,'2001-07','average_3',date(2001,3,15))
+        self.assertEqual(current,future)
+        self.assertEqual(current['value'],13000)
+
+    def test_average_distinguishes_zero_income_from_missing_cash_flow_records(self):
+        def row(amount=0,role='cash_flow',currency='USD',treatment='earned_income'):
+            return {'currency':currency,'cash_flow_role':role,'treatment':treatment,'inflows':amount}
+        recorded={'2001-11':[row(9001),row(99000,currency='EUR'),row(87000,role='other')],
+                  '2001-12':[row(treatment='spending')],
+                  '2002-01':[row(73000,role='other')]}
+        basis=budgeting.income_basis(recorded,'2002-02','average_3',date(2002,3,1))
+        self.assertEqual((basis['value'],basis['months'],basis['missing']),(4501,2,1))
+        self.assertEqual(basis['requested'],3)
+
+    def test_average_report_uses_history_before_accumulation_and_updates_each_month(self):
+        plan=budgeting.validate_plan({'income_mode':'average_3','lines':[
+            {'category':'SAMPLE ALPHA','kind':'percent','value':'20'}]}, {'SAMPLE ALPHA'})
+        for target,value in [('2001-11',11000),('2001-12',17000),('2002-01',23000),('2002-02',29000)]:
+            transaction(self.connection,'sample-income-'+target,target,-value,'Income','sample-bank')
+        result=self.report({'plans':{'2002-01':plan}},'2002-01','2002-02')
+        self.assertEqual([row['income_base'] for row in result['history']],[14000,17000])
+        self.assertEqual([row['allowance'] for row in result['history']],[2800,3400])
+        self.assertEqual(result['current']['deposited'],29000)
+        self.assertEqual(result['current']['brokerage_actual'],29000)
+        self.assertEqual(result['totals'][0]['allowance'],6200)
+
+    def test_no_prior_average_history_marks_percentages_unavailable_but_keeps_fixed(self):
+        plan=budgeting.validate_plan({'income_mode':'average_all','lines':[
+            {'category':'SAMPLE ALPHA','kind':'percent','value':'20'},
+            {'category':'SAMPLE BETA','kind':'amount','value':'11.75'}]}, {'SAMPLE ALPHA','SAMPLE BETA'})
+        transaction(self.connection,'sample-income','2002-02',-18317,'Income','sample-bank')
+        transaction(self.connection,'sample-spending','2002-02',311)
+        state={'plans':{'2002-02':plan}}
+        result=budgeting.dashboard(self.connection,state,'2002-02','2002-02',today=date(2002,3,1))
+        alpha=next(row for row in result['totals'] if row['category']=='SAMPLE ALPHA')
+        beta=next(row for row in result['totals'] if row['category']=='SAMPLE BETA')
+        self.assertTrue(alpha['income_unavailable'])
+        self.assertIsNone(alpha['percent'])
+        self.assertEqual(alpha['heat'][-1]['label'],'Income average unavailable')
+        self.assertEqual(beta['current']['allowance'],1175)
+        self.assertFalse(beta['current']['income_unavailable'])
+        self.assertIsNone(result['history'][0]['income_base'])
+        self.assertIsNone(result['current']['brokerage_plan'])
+
     def test_scope_excludes_pending_ignored_transfers_and_combines_card_spending(self):
         transaction(self.connection,'sample-income','2002-02',-9876,'Income','sample-bank')
         transaction(self.connection,'sample-card','2002-02',347)
@@ -444,6 +497,36 @@ class BudgetRouteTests(unittest.TestCase):
             self.assertEqual(self.post().status_code,403)
             # Middleware blocks writes even with otherwise valid data and CSRF.
             self.assertEqual(self.application.VAULT_PATH.read_bytes(),before)
+
+    def test_average_modes_preview_roundtrip_and_replacement_notice(self):
+        self.ready()
+        for mode in ('average_3','average_12','average_all'):
+            with self.subTest(mode=mode):
+                with self.application.db() as connection:
+                    state=budgeting.load(connection)
+                    revision=budgeting.version(connection,state)
+                payload={**self.payload,'income_mode':mode,'version':revision}
+                preview=self.post({**payload,'preview':True}).json['review']
+                self.assertEqual(preview['intervals'][0]['changes'][0]['after'],[mode,None])
+                self.assertEqual(self.post({**payload,'confirmation':preview['confirmation']}).status_code,200)
+                self.assertIn(f'<option value="{mode}" selected>'.encode(),self.client.get('/budget?month=2002-02').data)
+                with self.application.db() as connection:
+                    self.assertEqual(budgeting.plan_for(budgeting.load(connection),'2002-07')[1]['income_mode'],mode)
+
+    def test_income_preview_is_authenticated_read_only_and_matches_report_basis(self):
+        self.ready()
+        with patch.object(self.application,'READ_ONLY_MIRROR',True):
+            before=self.application.VAULT_PATH.read_bytes()
+            result=self.client.get('/api/budget/income-base?month=2002-03&mode=average_12')
+            self.assertEqual(result.status_code,200)
+            self.assertEqual((result.json['value'],result.json['months'],result.json['missing']),(18317,1,11))
+            self.assertIsNone(self.client.get('/api/budget/income-base?month=2002-02&mode=average_all').json['value'])
+            self.assertEqual(self.client.get('/api/budget/income-base?month=2002-02&mode=recorded').json['value'],18317)
+            for query in ('month=bad','month=2002-02&mode=bad','month=2002-02&mode=planned'):
+                self.assertEqual(self.client.get('/api/budget/income-base?'+query).status_code,400)
+            self.assertEqual(self.application.VAULT_PATH.read_bytes(),before)
+        self.application.lock_data()
+        self.assertIn(self.client.get('/api/budget/income-base?month=2002-03&mode=average_12').status_code,(302,401))
 
 
 if __name__=='__main__':

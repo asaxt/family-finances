@@ -6,12 +6,14 @@
   const rows = [...form.querySelectorAll('[data-budget-line]')];
   const field = name => form.elements.namedItem(name);
   const money = cents => new Intl.NumberFormat('en-US', {style:'currency',currency:'USD'}).format(cents / 100);
+  const incomeModes=JSON.parse(document.querySelector('#budget-income-modes').textContent);
+  let incomeEstimate=null;
   function preview() {
     const planned = field('income_mode').value === 'planned';
     document.querySelector('#budget-income-label').hidden = !planned;
     field('income').disabled = !planned;
     field('income').required = planned;
-    const income = planned ? Math.round(Number(field('income').value) * 100) : Number(field('recorded_income').value);
+    const income = planned ? Math.round(Number(field('income').value) * 100) : incomeEstimate?.value ?? 0;
     let total = 0;
     for (const row of rows) {
       const kind = row.querySelector('[name=kind]').value;
@@ -23,28 +25,37 @@
       if (kind === 'percent') total += Math.round(Math.max(0,income) * Math.round(Number(value.value) * 100) / 10000);
     }
     const target = document.querySelector('#budget-preview');
-    if(!planned && field('recorded_income').value===''){target.textContent='Income for this effective month is outside the current report. Percentage allowances will use each month’s recorded income.';target.classList.remove('budget-negative');return;}
-    target.textContent = `Income base: ${money(income)} · Category allowances: ${money(total)} · Brokerage remainder: ${money(income-total)}${planned ? '' : ' (illustration using the selected month’s recorded income)'}`;
+    if(!planned && incomeEstimate?.value==null){target.textContent=incomeEstimate?.message || 'Income base unavailable: no usable prior income history. Percentage allowances cannot yet be calculated; fixed-dollar allowances still apply.';target.classList.remove('budget-negative');return;}
+    target.textContent = `Income base: ${money(income)} · Category allowances: ${money(total)} · Brokerage remainder: ${money(income-total)}${planned ? '' : field('income_mode').value==='recorded' ? ' (selected month’s recorded income)' : ` · ${incomeEstimate.months} of ${incomeEstimate.requested} months used, ${incomeEstimate.first} through ${incomeEstimate.last}${incomeEstimate.missing ? ` · ${incomeEstimate.missing} months without records excluded` : ''}`}`;
     target.classList.toggle('budget-negative', total > income);
   }
   form.addEventListener('input', preview);
   form.addEventListener('change', preview);
   const plans=JSON.parse(document.querySelector('#budget-plan-data').textContent);
-  const incomes=JSON.parse(document.querySelector('#budget-income-data').textContent);
   const timelineStart=document.querySelector('#budget-timeline-start');
   const draft=document.querySelector('#budget-draft');
   const reviewPanel=document.querySelector('#budget-replacement-review');
   let pending=null;
   const monthNumber=value=>Number(value.slice(0,4))*12+Number(value.slice(5))-1;
   const monthAt=number=>`${Math.floor(number/12)}-${String(number%12+1).padStart(2,'0')}`;
-  const setting=value=>!value ? 'No allowance' : value[0]==='recorded' ? 'Recorded income' : value[0]==='percent' ? `${value[1]/100}%` : money(value[1]);
+  const setting=value=>!value ? 'No allowance' : incomeModes[value[0]] ? incomeModes[value[0]] : value[0]==='percent' ? `${value[1]/100}%` : money(value[1]);
   function savedPlan(target) {
     const key=Object.keys(plans).sort().filter(key=>key<=target).at(-1);
     return {key,plan:plans[key]};
   }
-  function setIncome() {
-    field('recorded_income').value=incomes[monthNumber(field('month').value)-monthNumber(field('since').value)] ?? '';
-    preview();
+  let incomeRequest=0;
+  async function setIncome() {
+    const requestId=++incomeRequest;
+    if(field('income_mode').value==='planned'){preview();return;}
+    incomeEstimate={message:'Calculating income base…'};preview();
+    if(!field('month').value)return;
+    try{
+      const params=new URLSearchParams({month:field('month').value,mode:field('income_mode').value});
+      const response=await fetch(`/api/budget/income-base?${params}`);
+      const result=await response.json();
+      if(!response.ok)throw new Error(result.error || 'Income base unavailable.');
+      if(requestId===incomeRequest){incomeEstimate=result;preview();}
+    }catch(error){if(requestId===incomeRequest){incomeEstimate={message:error.message};preview();}}
   }
   function renderTimeline() {
     if(!timelineStart.validity.valid || !timelineStart.value) return;
@@ -69,13 +80,14 @@
       const tr=body.insertRow(),label=document.createElement('th');label.scope='row';label.textContent=name ?? 'Income base';tr.append(label);
       for(const target of months) {
         const {plan}=savedPlan(target),line=plan?.lines.find(item=>item.category===name);
-        tr.insertCell().textContent=name===null ? (!plan?'No plan':setting([plan.income_mode==='recorded'?'recorded':'amount',plan.income])) : line?setting([line.kind,line.value]):'—';
+        tr.insertCell().textContent=name===null ? (!plan?'No plan':setting([plan.income_mode==='planned'?'amount':plan.income_mode,plan.income])) : line?setting([line.kind,line.value]):'—';
       }
     }
     document.querySelector('#budget-plan-timeline').replaceChildren(table);
   }
   timelineStart.addEventListener('change',renderTimeline);
   field('month').addEventListener('change',setIncome);
+  field('income_mode').addEventListener('change',setIncome);
   document.querySelector('#budget-use-start').addEventListener('click',()=>{field('month').value=field('since').value;setIncome();});
   async function send(payload) {
     const response=await fetch(form.getAttribute('action'),{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':field('csrf_token').value},body:JSON.stringify(payload)});
@@ -118,7 +130,7 @@
     finally{event.target.disabled=false;}
   });
   renderTimeline();
-  preview();
+  setIncome();
   const granularity = document.querySelector('#spending-granularity');
   const yearInput=document.querySelector('#spending-year-field input');
   const accumulation=document.querySelector('.spending-toolbar [name=since]');
