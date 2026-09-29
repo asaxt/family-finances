@@ -499,6 +499,8 @@ def cash_flow_summary(
     account_id=None,
     connection_id=None,
     today=None,
+    growth_window=None,
+    growth_comparison=12,
 ):
     today = today or date.today()
     current_start = today - timedelta(days=lookback_days - 1)
@@ -509,7 +511,7 @@ def cash_flow_summary(
         dict(row)
         for row in connection.execute(
             f"""
-            SELECT t.id, t.transacted_at AS date, t.amount, t.description,
+            SELECT t.id, t.transacted_at AS date, t.amount, t.currency, t.description,
                    t.merchant, t.excluded,
                    {EFFECTIVE_CATEGORY_SQL} AS category,
                    r.flow_type AS category_flow_type,
@@ -592,7 +594,54 @@ def cash_flow_summary(
         "prior_date_to": prior_end.isoformat(),
         "months": months,
         "activity": activity,
+        "growth": cash_flow_growth(rows, growth_window, growth_comparison, today) if growth_window is not None else None,
     }
+
+
+def cash_flow_growth(rows, window=12, comparison=12, today=None):
+    """Compare equal rolling totals at monthly endpoints; never annualize the change."""
+    if any(type(value) is not int or not 1 <= value <= 60 for value in (window, comparison)):
+        raise ValueError('Choose between 1 and 60 months for each growth control.')
+    today = today or date.today()
+    last = shift_month(today.strftime('%Y-%m'), -1)
+    first = shift_month(last, -11)
+    needed = shift_month(first, 1-window-comparison)
+    monthly = {}
+    for row in rows:
+        key = row['date'][:7]
+        if not needed <= key <= last or row['flow_type'] == 'excluded':
+            continue
+        bucket = monthly.setdefault(key, {'income':0, 'spending':0, 'unclassified':0, 'foreign':0})
+        if row['currency'] != 'USD':
+            bucket['foreign'] += 1
+        elif row['flow_type'] is None:
+            bucket['unclassified'] += 1
+        elif row['flow_type'] in {'earned_income','other_inflow'} and row['amount'] < 0:
+            bucket['income'] -= row['amount']
+        elif row['flow_type'] == 'spending':
+            bucket['spending'] += row['amount']
+
+    def total(ending):
+        start = shift_month(ending, 1-window)
+        keys = month_range(start, ending)
+        buckets = [monthly[key] for key in keys if key in monthly]
+        missing = window-len(buckets)
+        unclassified = sum(row['unclassified'] for row in buckets)
+        foreign = sum(row['foreign'] for row in buckets)
+        complete = not (missing or unclassified or foreign)
+        return {'first':start, 'last':ending, 'missing':missing, 'unclassified':unclassified, 'foreign':foreign,
+                **{name:sum(row[name] for row in buckets) if complete else None for name in ('income','spending')}}
+
+    points = []
+    for ending in month_range(first, last):
+        current, prior = total(ending), total(shift_month(ending, -comparison))
+        changes = {}
+        for name in ('income','spending'):
+            changes[name] = (round((current[name]-prior[name])/prior[name]*100, 2)
+                             if current[name] is not None and prior[name] is not None and prior[name] > 0 else None)
+        points.append({'month':ending, 'current':current, 'prior':prior, **changes})
+    return {'window':window, 'comparison':comparison, 'first':first, 'last':last, 'points':points,
+            'available':any(point['income'] is not None or point['spending'] is not None for point in points)}
 
 
 def daily_trends(connection, account_id=None, connection_id=None):

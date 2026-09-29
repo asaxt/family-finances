@@ -1261,6 +1261,15 @@ def overview():
 @app.get("/cash-flow")
 def cash_flow():
     context = page_context("cash_flow")
+    growth = {}
+    for name in ('growth_window', 'growth_comparison'):
+        try:
+            growth[name] = int(request.args.get(name, session.get(name, 12)))
+            if not 1 <= growth[name] <= 60:
+                raise ValueError
+        except (ValueError, TypeError):
+            return 'Choose between 1 and 60 months for each growth control.', 400
+    session.update(growth)
     context["flow_types"] = FLOW_TYPES
     context["cash_flow_accounts"] = [
         account
@@ -1276,6 +1285,7 @@ def cash_flow():
             context["lookback_days"],
             context["account_id"],
             context["connection_id"],
+            **growth,
         )
     return render_template("cash_flow.html", **context)
 
