@@ -266,6 +266,14 @@ def group_periods(points, granularity):
     return result
 
 
+def moving_average(values, window):
+    result=[]
+    for index in range(len(values)):
+        sample=values[max(0,index-window+1):index+1]
+        result.append(round(sum(sample)/window) if len(sample)==window and all(value is not None for value in sample) else None)
+    return result
+
+
 def spending_history(recorded, granularity, today):
     """Full recorded spending history; deliberately independent of budget settings."""
     if not recorded:
@@ -303,7 +311,8 @@ def spending_history(recorded, granularity, today):
     categories=[]
     for name,total in sorted(totals.items(),key=lambda pair:pair[1],reverse=True):
         values=[next((row['actual'] for row in point['rows'] if row['category']==name),0) if point['records'] else None for point in points]
-        categories.append({'name':name,'total':total,'values':values})
+        categories.append({'name':name,'total':total,'values':values,
+                           'ma_3':moving_average(values,3),'ma_12':moving_average(values,12)})
     return {'points':points,'categories':categories,'first':min(recorded)+'-01',
             'last':min(end_date(max(recorded)),today.isoformat()),'windows':windows,'omitted':omitted}
 
@@ -333,12 +342,17 @@ def dashboard(connection, state, first, last, account_id=None, connection_id=Non
         previous = group_periods(prior_year['history'],granularity)[-1]
     data['yoy']=((current['actual']-previous['actual'])/abs(previous['actual'])*100
                  if previous and previous['actual'] and observed(previous) and observed(current) and not current['partial'] else None)
-    heat_months = group_periods(selected['history'],'month') if granularity in {'year','rolling'} else group_periods(data['history'],granularity)[-12:]
+    if granularity=='month':
+        heat_history = report(connection,visible_state,max('1900-01',shift_month(last,-11)),last,today,account_id,connection_id,recorded)
+        heat_months = group_periods(heat_history['history'],'month')
+    else:
+        heat_months = group_periods(selected['history'],'month') if granularity in {'year','rolling'} else group_periods(data['history'],granularity)[-12:]
     data['heat_months'] = [row['label'] for row in heat_months]
     data['heat_budget'] = household and any(row['plan'] for row in heat_months)
     current_rows = {row['category']:row for row in current['rows']}
     accumulated = {row['category'] for row in data['totals']}
-    for name in current_rows.keys()-accumulated:
+    heat_categories = {row['category'] for point in heat_months for row in point['rows']}
+    for name in (current_rows.keys() | heat_categories)-accumulated:
         data['totals'].append({'category':name,'actual':0,'allowance':0,'remaining':0,'percent':None})
     for total in data['totals']:
         name = total['category']

@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
-{% block title %}Spending & budget · {{ app_name }}{% endblock %}
-{% block heading %}Spending & budget{% endblock %}
-{% block eyebrow %}The big picture → the details{% endblock %}
+{% block title %}Budget · {{ app_name }}{% endblock %}
+{% block heading %}Budget{% endblock %}
+{% block eyebrow %}Monthly allowances and spending{% endblock %}
 {% macro amount(value) %}{{ value|money if value is not none else '—' }}{% endmacro %}
 {% macro percent(value) %}{{ ('%.1f'|format(value)) ~ '%' if value is not none else '—' }}{% endmacro %}
 {% block content %}
@@ -22,37 +22,8 @@
   </section>
   <div class="spending-context">
     <span>{{ 'Household' if household else 'Filtered spending · household allowances hidden' }} · {{ period_label }} · {{ 'Future period' if current.future else 'Period in progress' if current.partial else 'Partial history' if current.incomplete else 'Recorded totals' }}{% if household and budget_effective %} · Plan from {{ budget_effective }} carries forward automatically{% endif %}</span>
-    <a class="text-link" href="{{ url_for('trends',view='earnings',person=connection_id,account=account_id) }}">Earnings trends →</a>
+    <a class="text-link" href="{{ url_for('trends',person=connection_id,account=account_id) }}">Spending trends →</a>
   </div>
-
-  <section class="metric-grid spending-metrics" aria-label="Selected period summary">
-    <article class="metric-card"><span class="metric-label">Income</span><div class="metric-value">{{ amount(current.deposited if current.records and not current.future else none) }}</div><div class="metric-footer"><span class="metric-note">Recorded money in</span></div></article>
-    <article class="metric-card hero"><span class="metric-label">Spending</span><div class="metric-value">{{ amount(current.actual if current.records and not current.future else none) }}</div><div class="metric-footer"><span class="metric-note">{% if budget.yoy is not none %}{{ '%+.1f'|format(budget.yoy) }}% vs. same period last year{% else %}Refunds included{% endif %}</span></div></article>
-    <article class="metric-card"><span class="metric-label">{{ '12-month' if granularity=='rolling' else 'Annual' if granularity=='year' else 'Quarterly' if granularity=='quarter' else 'Monthly' }} allowance</span><div class="metric-value">{{ amount(current.allowance if household and current.plan else none) }}</div><div class="metric-footer"><span class="metric-note">{% if household and current.plan %}{{ percent(current.actual/current.allowance*100 if current.allowance and current.records else none) }} used{% elif household %}Set once, carries forward{% else %}View household to compare{% endif %}</span></div></article>
-    <article class="metric-card"><span class="metric-label">{{ 'Brokerage remainder' if household else 'Income minus spending' }}</span><div class="metric-value {{ 'budget-negative' if current.brokerage_actual is not none and current.brokerage_actual<0 }}">{{ amount(current.brokerage_actual) }}</div><div class="metric-footer"><span class="metric-note">{% if household and current.plan %}Planned: {{ amount(current.brokerage_plan) }}{% else %}Calculated, not a transfer{% endif %}</span></div></article>
-  </section>
-
-  {% if (household and budget.missing_plans) or budget.empty_months or budget.unknown or budget.foreign %}
-  <details class="budget-coverage"><summary>Coverage &amp; calculation notes{% if budget.unknown or budget.foreign %} · Some transactions are omitted{% elif budget.empty_months %} · {{ budget.empty_months }} month(s) without records{% endif %}</summary>
-    <p>{% if household and budget.missing_plans %}{{ budget.missing_plans }} month(s) have no saved allowance; their spending remains in cumulative actuals. {% endif %}{% if budget.empty_months %}Months without records are not proof of no spending. {% endif %}{% if budget.unknown %}{{ budget.unknown }} uncategorized transaction(s) omitted. {% endif %}{% if budget.foreign %}{{ budget.foreign }} non-USD transaction(s) omitted; currencies are not converted. {% endif %}Charts show recorded actuals, not projections. Incomplete months appear as gaps in comparisons.</p>
-  </details>
-  {% endif %}
-
-  <div class="spending-charts" id="spending-trends">
-    <section class="panel">
-      <div class="panel-header"><div><h2>Spending over time</h2><p>Full history{% if budget.spending.first %} · {{ budget.spending.first }} through {{ budget.spending.last }}{% endif %} · Actual dollars, independent of allowances</p></div></div>
-      <div class="series-controls spending-series" aria-label="Moving averages">{% for window in budget.spending.windows %}<label><input type="checkbox" data-average="{{ window }}" {{ 'checked' if loop.first }}>{{ window }} {{ 'quarter' if granularity=='quarter' else 'month' }} average</label>{% endfor %}</div>
-      <div class="budget-chart"><canvas id="budget-history-chart" role="img" aria-label="Full-history spending in dollars and moving averages"></canvas></div>
-      <p class="transaction-sub">{{ 'Calendar quarters: Jan–Mar, Apr–Jun, Jul–Sep, Oct–Dec.' if granularity=='quarter' else 'Monthly recorded totals.' }} Current and partially covered periods are marked. Click a point to see its transactions.</p>
-    </section>
-    <section class="panel spending-mix"><h2>Spending breakdown</h2><p class="transaction-sub">Full history · Positive net spending by category</p><div class="budget-chart"><canvas id="budget-mix-chart" role="img" aria-label="Full-history spending breakdown independent of budget amounts"></canvas></div><div id="budget-mix-legend"></div><p class="transaction-sub">Refunds reduce category totals. Categories with zero or negative net spending appear in the time series but have no pie slice.</p></section>
-  </div>
-  <section class="panel spending-category-trend">
-    <div class="panel-header"><div><h2>Category spending over time</h2><p>Full history · Absolute dollars spent · Choose a category without changing the budget</p></div><label>Category<select id="category-trend-select"><option value="">All spending categories</option>{% for row in budget.spending.categories %}<option value="{{ row.name }}">{{ row.name }}</option>{% endfor %}</select></label></div>
-    <div class="budget-chart"><canvas id="category-trend-chart" role="img" aria-label="Full-history dollar spending for the selected category"></canvas></div>
-    {% if budget.spending.omitted %}<p class="transaction-sub">{{ budget.spending.omitted }} uncategorized or non-USD transactions are omitted from these history charts.</p>{% endif %}
-    <details class="budget-transactions"><summary>Chart values <span>Full-history dollar amounts</span></summary><div class="table-wrap"><table><thead><tr><th>Period</th><th class="currency">All spending</th><th class="currency" id="category-values-heading">Selected category</th></tr></thead><tbody>{% for point in budget.spending.points %}<tr><td>{{ point.label }}{{ ' · In progress' if point.partial else ' · Partial history' if point.incomplete else '' }}</td><td class="currency">{{ amount(point.actual if point.records else none) }}</td><td class="currency" data-category-value="{{ loop.index0 }}">{{ amount(point.actual if point.records else none) }}</td></tr>{% endfor %}</tbody></table></div><h3>Full-history category totals</h3><table><thead><tr><th>Category</th><th class="currency">Net spending</th></tr></thead><tbody>{% for row in budget.spending.categories %}<tr><td>{{ row.name }}</td><td class="currency">{{ row.total|money }}</td></tr>{% endfor %}</tbody></table></details>
-  </section>
 
   <section class="panel category-patterns" id="category-patterns">
     <div class="panel-header"><div><h2>Category patterns</h2><p>Cumulative category usage · {{ budget.first }} through {{ month }} · {{ 'Rolling 12-month accumulation' if granularity=='rolling' and budget.first==snapshot_first else 'Calendar-year accumulation' if granularity=='year' and budget.first==year ~ '-01' else 'Continuous accumulation' }}</p></div><label>Find a category<input id="budget-category-search" type="search" placeholder="Filter categories"></label></div>
@@ -71,6 +42,19 @@
     <p id="budget-no-match" hidden>No categories match that name.</p>
     <p class="transaction-sub">{% if budget.heat_budget %}Each colored cell shows spending relative to its allowance; the number is the percentage used.{% else %}Each colored cell shows spending relative to that category’s peak.{% endif %} Hover for amounts or click for transactions. A dash means future or unavailable records. Cumulative left is unused allowance, not a cash balance or extra money added to next month's budget. Negative amounts show overspending. Future allowances are not accumulated.</p>
   </section>
+
+  <section class="metric-grid spending-metrics" aria-label="Selected period summary">
+    <article class="metric-card"><span class="metric-label">Income</span><div class="metric-value">{{ amount(current.deposited if current.records and not current.future else none) }}</div><div class="metric-footer"><span class="metric-note">Recorded money in</span></div></article>
+    <article class="metric-card hero"><span class="metric-label">Spending</span><div class="metric-value">{{ amount(current.actual if current.records and not current.future else none) }}</div><div class="metric-footer"><span class="metric-note">{% if budget.yoy is not none %}{{ '%+.1f'|format(budget.yoy) }}% vs. same period last year{% else %}Refunds included{% endif %}</span></div></article>
+    <article class="metric-card"><span class="metric-label">{{ '12-month' if granularity=='rolling' else 'Annual' if granularity=='year' else 'Quarterly' if granularity=='quarter' else 'Monthly' }} allowance</span><div class="metric-value">{{ amount(current.allowance if household and current.plan else none) }}</div><div class="metric-footer"><span class="metric-note">{% if household and current.plan %}{{ percent(current.actual/current.allowance*100 if current.allowance and current.records else none) }} used{% elif household %}Set once, carries forward{% else %}View household to compare{% endif %}</span></div></article>
+    <article class="metric-card"><span class="metric-label">{{ 'Brokerage remainder' if household else 'Income minus spending' }}</span><div class="metric-value {{ 'budget-negative' if current.brokerage_actual is not none and current.brokerage_actual<0 }}">{{ amount(current.brokerage_actual) }}</div><div class="metric-footer"><span class="metric-note">{% if household and current.plan %}Planned: {{ amount(current.brokerage_plan) }}{% else %}Calculated, not a transfer{% endif %}</span></div></article>
+  </section>
+
+  {% if (household and budget.missing_plans) or budget.empty_months or budget.unknown or budget.foreign %}
+  <details class="budget-coverage"><summary>Coverage &amp; calculation notes{% if budget.unknown or budget.foreign %} · Some transactions are omitted{% elif budget.empty_months %} · {{ budget.empty_months }} month(s) without records{% endif %}</summary>
+    <p>{% if household and budget.missing_plans %}{{ budget.missing_plans }} month(s) have no saved allowance; their spending remains in cumulative actuals. {% endif %}{% if budget.empty_months %}Months without records are not proof of no spending. {% endif %}{% if budget.unknown %}{{ budget.unknown }} uncategorized transaction(s) omitted. {% endif %}{% if budget.foreign %}{{ budget.foreign }} non-USD transaction(s) omitted; currencies are not converted. {% endif %}Charts show recorded actuals, not projections. Incomplete months appear as gaps in comparisons.</p>
+  </details>
+  {% endif %}
 
   <section class="panel" id="spending-details"><div class="panel-header"><div><h2>Transaction details</h2><p>{{ period_label }} · Expand a category for its latest five transactions</p></div><a class="text-link" href="{{ url_for('transactions',purpose='spending',date_from=snapshot_first ~ '-01',date_to=budget_month_end,person=connection_id,account=account_id) }}">All transactions →</a></div>
     {% for category, transactions in budget.details.items() %}<details class="budget-transactions" data-category-detail data-category="{{ category }}"><summary>{{ category }} <span>Recent transactions</span></summary><div class="table-wrap"><table><thead><tr><th>Date</th><th>Description</th><th class="currency">Amount</th></tr></thead><tbody>{% for transaction in transactions %}<tr><td>{{ transaction.transacted_at }}</td><td>{{ transaction.name }}</td><td class="currency">{{ transaction.amount|money }}</td></tr>{% endfor %}</tbody></table></div><a class="text-link" href="{{ url_for('transactions',purpose='spending',date_from=snapshot_first ~ '-01',date_to=budget_month_end,category=category,person=connection_id,account=account_id) }}">All {{ category }} transactions →</a></details>{% else %}<p class="transaction-sub">No included spending transactions for this period.</p>{% endfor %}
@@ -106,4 +90,4 @@
   </form>
 </dialog>
 {% endblock %}
-{% block scripts %}<script id="budget-plan-data" type="application/json">{{ budget_state.plans|tojson }}</script><script id="budget-income-data" type="application/json">{{ budget.history|map(attribute='deposited')|list|tojson }}</script><script src="{{ url_for('static',filename='budget.js') }}" defer></script><script id="budget-history-data" type="application/json">{{ budget.spending|tojson }}</script><script id="budget-scope-data" type="application/json">{{ {'granularity':granularity,'account':account_id,'person':connection_id}|tojson }}</script>{% endblock %}
+{% block scripts %}<script id="budget-plan-data" type="application/json">{{ budget_state.plans|tojson }}</script><script id="budget-income-data" type="application/json">{{ budget.history|map(attribute='deposited')|list|tojson }}</script><script src="{{ url_for('static',filename='budget.js') }}" defer></script>{% endblock %}

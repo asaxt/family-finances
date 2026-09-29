@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
-  {% if active in ["trends", "categories", "savings", "cash_flow", "plan", "budget"] %}<script src="/static/vendor/chart.umd.min.js"></script>{% endif %}
+  {% if active in ["trends", "spending_trends", "categories", "savings", "cash_flow", "plan"] %}<script src="/static/vendor/chart.umd.min.js"></script>{% endif %}
 </head>
 <body>
   {% set person_query = '&person=' ~ connection_id if connection_id else '' %}
@@ -19,9 +19,10 @@
       <a class="{{ 'active' if active == 'overview' }}" href="/?month={{ month }}{{ person_query }}{{ account_query }}">
         <span>⌂</span> Overview
       </a>
-      <a class="{{ 'active' if active in ['budget', 'trends'] }}" href="{{ url_for('budget_page',person=connection_id,account=account_id) }}">
-        <span>◫</span> Spending &amp; budget
+      <a class="{{ 'active' if active == 'budget' }}" href="{{ url_for('budget_page',person=connection_id,account=account_id) }}">
+        <span>◫</span> Budget
       </a>
+      <a class="{{ 'active' if active in ['spending_trends','trends'] }}" href="{{ url_for('trends',person=connection_id,account=account_id) }}"><span>⌁</span> Spending trends</a>
       <a class="{{ 'active' if active == 'category_rules' }}" href="/category-rules">
         <span>✓</span> Category Rules
       </a>
@@ -72,7 +73,7 @@
       </div>
     </header>
 
-    {% if active not in ["savings", "settings", "transactions", "category_rules", "assistant", "plan", "budget"] %}
+    {% if active not in ["savings", "settings", "transactions", "category_rules", "assistant", "plan", "budget", "spending_trends"] %}
     <section class="filterbar">
       <form method="{{ 'post' if active in ['overview', 'cash_flow'] else 'get' }}" class="filter-form"{% if active in ["overview", "cash_flow"] %} action="{{ url_for('update_overview_lookback') }}"{% endif %}>
         {% if active in ["overview", "cash_flow"] %}

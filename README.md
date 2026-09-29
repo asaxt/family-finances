@@ -79,21 +79,22 @@ production mirror remains read-only.
 
 ## Spending and budget
 
-Open **Spending & budget** for the combined spending, category, and budget view.
-Choose a month and accumulation start, then open **Edit monthly plan** to set
-allowances. New lines default to **% of income**; fixed dollars remain available.
-Both types carry forward automatically until the next saved change. All
-percentages use the same monthly income base. Existing recorded income is the default; optional planned
-income keeps allowances steady while deposits arrive. There are no additional
-payroll deductions to enter.
+Open **Budget** for a selected month's category spending and allowances. Category
+patterns leads the page, with twelve monthly budget-use cells that open the matching
+transactions. The accumulation start controls cumulative totals independently of
+that twelve-month history. Other reporting windows remain available.
 
-Rolling 12 months is the default reporting view, ending in the selected month
-(including the current month so far by default). Calendar year, quarter, and month
-views remain available. Category patterns show the same twelve months as labeled
-heatmap cells, with budget usage percentages and links to the matching transactions.
-The default accumulation window starts eleven months before the ending month; an explicit earlier start can
-still be used for continuous accumulation. Full-history spending charts remain monthly
-in rolling and calendar-year views. Quarterly allowances sum the applicable monthly plans. The plan editor shows a
+Open **Spending trends** for full-history total spending, the category breakdown,
+and selectable category time series in dollars. Category charts include monthly
+points and trailing 3- and 12-month averages. Averages require a full recorded
+window, count known zero-spending months, include refunds, and leave gaps for
+missing history. The current month's point and averages use month-to-date actuals.
+Account and person filters apply to every chart and transaction link.
+
+In **Edit monthly plan**, new lines default to **% of income**; fixed dollars remain
+available. Both carry forward until changed. All percentages use the same monthly
+income base. Recorded income is the default; optional planned income keeps
+allowances steady while deposits arrive. The plan editor shows a
 monthly timeline of saved percentages and dollar amounts. Review a proposed plan
 before applying it from an effective month onward: later saved plans are replaced,
 with affected intervals and old/new settings shown first. Modify or cancel the
@@ -102,8 +103,7 @@ filter changes reporting only, not the saved plan dates. Full-history
 spending charts and a category selector show actual dollars independently of
 budget amounts and the selected snapshot. The spending-mix pie uses the same full
 history; refunds reduce category totals, and nonpositive totals have no pie slice.
-The overview leads into a category heatmap, cumulative utilization, and expandable
-transaction details. Chart points and heatmap cells link to their transactions. Account and person filters show scoped spending without comparing
+The budget page includes cumulative utilization and expandable transaction details. Chart points and heatmap cells link to their transactions. Account and person filters show scoped spending without comparing
 it to household allowances. Earnings trends remain available from this page.
 
 Compare monthly spending and cumulative utilization, including refunds and

@@ -1283,7 +1283,12 @@ def cash_flow():
 @app.get("/trends")
 def trends():
     if request.args.get('view') != 'earnings':
-        return budget_page()
+        context = page_context('spending_trends')
+        with db() as connection:
+            recorded = budgeting.activity(connection,'1900-01','2200-12',date.today(),context['account_id'],context['connection_id'])
+            context['spending'] = budgeting.spending_history(recorded,'month',date.today())
+            context['spending']['windows'] = [3,12]
+        return render_template('spending_trends.html',**context)
     context = page_context("trends")
     context["trend_view"] = (
         "earnings" if request.args.get("view") == "earnings" else "spending"
@@ -1722,7 +1727,7 @@ def budget_page():
     context = page_context('budget')
     try:
         today_month = date.today().strftime('%Y-%m')
-        granularity = request.args.get('granularity') or ('month' if request.args.get('month') and not request.args.get('quarter') else 'quarter' if request.args.get('quarter') else 'year' if request.args.get('year') else 'rolling')
+        granularity = request.args.get('granularity') or ('month' if request.args.get('month') and not request.args.get('quarter') else 'quarter' if request.args.get('quarter') else 'year' if request.args.get('year') else 'month')
         if not isinstance(granularity, str) or granularity not in {'month','quarter','year','rolling'}:
             raise budgeting.BudgetError('Choose rolling 12 months, monthly, calendar-quarter, or calendar-year reporting.')
         year = request.args.get('year') or today_month[:4]
