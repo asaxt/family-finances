@@ -1767,12 +1767,11 @@ def budget_page():
                     if line['category'] not in editor_names:
                         editor.append({'category':line['category'],'kind':'percent','value':None,'archived':line['category'] not in known})
                         editor_names.add(line['category'])
-            context.update(budget=report, budget_state=state, budget_plan=plan,
+            context.update(budget=report, budget_state=state, budget_plan=plan, income_modes=budgeting.INCOME_MODES,
                            budget_version=budgeting.version(connection,state), budget_editor=editor,
                            granularity=granularity, year=target[:4], quarter=quarter, snapshot_first=snapshot_first, editor_month=editor_month,
                            period_label=f'{snapshot_first} through {target}' if granularity=='rolling' else target[:4] if granularity=='year' else quarter.replace('-', ' ') if granularity=='quarter' else target,
                            quarter_options=sorted({budgeting.quarter_key(key) for key in budgeting.month_range(min(snapshot_first, (report['spending']['first'] or today_month)[:7]), max(target,budgeting.shift_month(today_month,12)))} ,reverse=True),
-                           editor_income=next((row['deposited'] for row in report['history'] if row['month']==editor_month),0),
                            budget_effective=effective, household=not context["account_id"] and not context["connection_id"],
                            budget_month_end=f'{target}-{calendar.monthrange(*map(int,target.split("-")))[1]:02d}',
                            today_month=date.today().strftime('%Y-%m'))
@@ -1780,6 +1779,18 @@ def budget_page():
         return render_template('budget.html', **context)
     except budgeting.BudgetError as error:
         return str(error), 400
+
+
+@app.get('/api/budget/income-base')
+def budget_income_base():
+    try:
+        target=budgeting.month(request.args.get('month'))
+        mode=request.args.get('mode','recorded')
+        with db() as connection:
+            recorded=budgeting.activity(connection,'1900-01',target,date.today())
+        return jsonify(budgeting.income_basis(recorded,target,mode,date.today()))
+    except budgeting.BudgetError as error:
+        return jsonify(error=str(error)),400
 
 
 @app.post('/api/budget/plan')

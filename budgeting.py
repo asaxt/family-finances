@@ -9,6 +9,9 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from analytics import CATEGORY_RULE_JOIN, EFFECTIVE_CATEGORY_SQL, EFFECTIVE_CASH_FLOW_SQL, month_range, shift_month, scope_filter, DISPLAY_NAME_SQL
 
 SETTING = 'monthly_budget_v1'
+INCOME_MODES = {'recorded':'Each month’s recorded income', 'planned':'Planned monthly income',
+                'average_3':'3-month average income', 'average_12':'12-month average income',
+                'average_all':'Full-history average income'}
 
 
 class BudgetError(ValueError):
@@ -63,8 +66,8 @@ def validate_plan(payload, allowed):
     if not isinstance(payload, dict) or not isinstance(payload.get('lines'), list) or len(payload['lines']) > 500:
         raise BudgetError('Send a valid budget with at most 500 category lines.')
     mode = payload.get('income_mode', 'recorded')
-    if not isinstance(mode, str) or mode not in {'recorded', 'planned'}:
-        raise BudgetError('Choose recorded income or a planned monthly income.')
+    if not isinstance(mode, str) or mode not in INCOME_MODES:
+        raise BudgetError('Choose a valid income base.')
     result = {'income_mode': mode, 'income': cents(payload.get('income')) if mode == 'planned' else None}
     seen = set()
     result['lines'] = []
@@ -83,7 +86,7 @@ def validate_plan(payload, allowed):
 
 
 def allocations(plan, recorded_income=0):
-    remaining = max(0, recorded_income if plan['income_mode'] == 'recorded' else plan['income'])
+    remaining = max(0, plan['income'] if plan['income_mode']=='planned' else recorded_income or 0)
     result = {}
     for row in plan['lines']:
         result[row['category']] = (row['value'] if row['kind'] == 'amount' else
@@ -107,7 +110,7 @@ def replacement_review(state, target, plan, revision, first):
                    for name in sorted(previous.keys() | proposed.keys(),key=str.casefold)
                    if previous.get(name)!=proposed.get(name)]
         def income(item):
-            return None if item is None else ('recorded', None) if item['income_mode']=='recorded' else ('amount',item['income'])
+            return None if item is None else ('amount',item['income']) if item['income_mode']=='planned' else (item['income_mode'],None)
         if income(old)!=income(plan):
             changes.insert(0,{'category':'Income base','before':income(old),'after':income(plan)})
         intervals.append({'first':start,'last':shift_month(starts[index+1],-1) if index+1<len(starts) else None,
@@ -154,6 +157,27 @@ def utilization(actual, allowance):
     return round(actual / allowance * 100, 1) if allowance > 0 else None
 
 
+def income_basis(recorded, target, mode, today):
+    """Average observed cash-flow months before the target, without future leakage."""
+    month(target)
+    if mode not in INCOME_MODES or mode=='planned':
+        raise BudgetError('Choose a recorded-income basis.')
+    totals={}
+    for key,rows in recorded.items():
+        eligible=[row for row in rows if row['currency']=='USD' and row['cash_flow_role']=='cash_flow']
+        if eligible:
+            totals[key]=sum(row['inflows'] for row in eligible if row['treatment']=='earned_income')
+    if mode=='recorded':
+        return {'value':totals.get(target,0),'months':int(target in totals),'missing':0,'first':target,'last':target,'requested':1}
+    last=shift_month(min(target,today.strftime('%Y-%m')),-1)
+    window={'average_3':3,'average_12':12}.get(mode)
+    first=shift_month(last,1-window) if window else min(totals,default=last)
+    keys=month_range(first,last) if first<=last else []
+    values=[totals[key] for key in keys if key in totals]
+    return {'value':int((Decimal(sum(values))/len(values)).quantize(Decimal('1'),rounding=ROUND_HALF_UP)) if values else None,
+            'months':len(values),'missing':len(keys)-len(values),'first':first,'last':last,'requested':window or len(keys)}
+
+
 def period(first, last):
     months = month_range(month(first), month(last))
     if not months or len(months) > 120:
@@ -165,7 +189,7 @@ def report(connection, state, first, last, today=None, account_id=None, connecti
     today = today or date.today()
     months = period(first, last)
     if recorded is None:
-        recorded = activity(connection,first,last,today,account_id,connection_id)
+        recorded = activity(connection,'1900-01',last,today,account_id,connection_id)
     history, totals = [], {}
     for target in months:
         effective, plan = plan_for(state,target)
@@ -186,30 +210,33 @@ def report(connection, state, first, last, today=None, account_id=None, connecti
             if row['treatment'] == 'spending':
                 spent[row['category']] = spent.get(row['category'],0) + row['amount']
 
-        allowed = allocations(plan,deposited) if plan else {}
-        income_base = (deposited if plan['income_mode']=='recorded' else plan['income']) if plan else None
+        basis=income_basis(recorded,target,plan['income_mode'],today) if plan and plan['income_mode'].startswith('average_') else None
+        income_base = (basis['value'] if basis else deposited if plan['income_mode']=='recorded' else plan['income']) if plan else None
+        allowed = allocations(plan,income_base) if plan else {}
         future = target > today.strftime('%Y-%m')
         complete = not future and not unknown and not foreign and records > 0
         rows=[]
         for category in sorted(set(allowed)|set(spent),key=str.casefold):
             allowance, amount = allowed.get(category,0), spent.get(category,0)
+            unavailable = bool(basis and basis['value'] is None and any(line['category']==category and line['kind']=='percent' for line in plan['lines']))
             rows.append({'category':category,'allowance':allowance,'actual':amount,'remaining':allowance-amount,
-                         'percent':utilization(amount,allowance),'unbudgeted':category not in allowed})
+                         'percent':utilization(amount,allowance),'unbudgeted':category not in allowed,'income_unavailable':unavailable})
             if not future:
-                total=totals.setdefault(category,{'category':category,'allowance':0,'actual':0})
+                total=totals.setdefault(category,{'category':category,'allowance':0,'actual':0,'income_unavailable':0})
                 total['allowance'] += allowance
                 total['actual'] += amount
+                total['income_unavailable'] += unavailable
         planned_spending, actual_spending = sum(allowed.values()),sum(spent.values())
         history.append({'month':target,'plan':plan,'effective':effective,'rows':rows,
                         'allowance':planned_spending,'actual':actual_spending,'remaining':planned_spending-actual_spending,
-                        'income_base':income_base, 'deposited':deposited,
-                        'brokerage_plan':income_base-planned_spending if plan else None,
+                        'income_base':income_base, 'income_basis':basis, 'income_unavailable':any(row['income_unavailable'] for row in rows), 'deposited':deposited,
+                        'brokerage_plan':income_base-planned_spending if income_base is not None else None,
                         'brokerage_actual':deposited-actual_spending if complete else None,
                         'unknown':unknown,'foreign':foreign,'records':records,'future':future,
                         'partial':target==today.strftime('%Y-%m')})
     for row in totals.values():
         row['remaining']=row['allowance']-row['actual']
-        row['percent']=utilization(row['actual'],row['allowance'])
+        row['percent']=None if row['income_unavailable'] else utilization(row['actual'],row['allowance'])
     current=history[-1]
     return {'current':current,'history':history,'totals':sorted(totals.values(),key=lambda row:row['category'].casefold()),
             'first':first,'last':last,'missing_plans':sum(row['plan'] is None for row in history),
@@ -242,7 +269,7 @@ def group_periods(points, granularity):
     result = []
     for key, sample in groups.items():
         row = {name:sum(point.get(name,0) for point in sample) for name in
-               ('actual','allowance','deposited','records','unknown','foreign')}
+               ('actual','allowance','deposited','records','unknown','foreign','income_unavailable')}
         row.update(key=key,month=sample[-1]['month'],label=key.replace('-',' '),
                    date_from=sample[0]['month']+'-01', date_to=end_date(sample[-1]['month']),
                    future=all(point['future'] for point in sample),
@@ -252,14 +279,15 @@ def group_periods(points, granularity):
         categories = {}
         for point in sample:
             for item in point['rows']:
-                total=categories.setdefault(item['category'],{'category':item['category'],'actual':0,'allowance':0})
+                total=categories.setdefault(item['category'],{'category':item['category'],'actual':0,'allowance':0,'income_unavailable':0})
                 total['actual']+=item['actual']
                 total['allowance']+=item['allowance']
+                total['income_unavailable']+=item.get('income_unavailable',0)
         for item in categories.values():
-            item.update(remaining=item['allowance']-item['actual'],percent=utilization(item['actual'],item['allowance']))
+            item.update(remaining=item['allowance']-item['actual'],percent=None if item['income_unavailable'] else utilization(item['actual'],item['allowance']))
         row['rows']=list(categories.values())
         row['remaining']=row['allowance']-row['actual']
-        row['brokerage_plan']=sum(point['brokerage_plan'] or 0 for point in sample) if row['plan'] else None
+        row['brokerage_plan']=sum(point['brokerage_plan'] or 0 for point in sample) if row['plan'] and all(point['brokerage_plan'] is not None for point in sample if point.get('plan')) else None
         covered=[point for point in sample if not point['future']]
         row['brokerage_actual']=(row['deposited']-row['actual'] if covered and all(point['brokerage_actual'] is not None for point in covered) else None)
         result.append(row)
@@ -363,7 +391,9 @@ def dashboard(connection, state, first, last, account_id=None, connection_id=Non
         for point, row in zip(heat_months,cells):
             actual, allowance = (row['actual'],row['allowance']) if row else (0,0)
             ratio = utilization(actual,allowance)
-            if not observed(point):
+            if row and row.get('income_unavailable'):
+                level, label = 'missing', 'Income average unavailable'
+            elif not observed(point):
                 level, label = 'missing', 'Future month' if point['future'] else 'Incomplete or unavailable records'
             elif not data['heat_budget']:
                 level = f'intensity-{min(4, max(1, (abs(actual)*4+peak-1)//peak))}' if actual and peak else 'empty'
@@ -376,7 +406,7 @@ def dashboard(connection, state, first, last, account_id=None, connection_id=Non
                 level, label = 'near', f'{ratio:g}% used'
             else:
                 level, label = 'low', f'{ratio:g}% used'
-            total['heat'].append({'month':point['label'],'date_from':point['date_from'],'date_to':point['date_to'],'actual':actual,'allowance':allowance,
+            total['heat'].append({'month':point['label'],'date_from':point['date_from'],'date_to':point['date_to'],'actual':actual,'allowance':None if row and row.get('income_unavailable') else allowance,
                                   'level':level,'label':label,'percent':ratio})
     data['totals'].sort(key=lambda row:row['actual'],reverse=True)
     # Five recent transactions per category, using precisely the report's scope.
