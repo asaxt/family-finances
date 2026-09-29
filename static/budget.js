@@ -132,8 +132,16 @@
   granularity.addEventListener('change',()=>{
     for(const period of ['year','quarter','month']) {
       const container=document.querySelector(`#spending-${period}-field`);
-      container.hidden=granularity.value!==period;
+      container.hidden=(granularity.value==='rolling'?'month':granularity.value)!==period;
       container.querySelector('input,select').disabled=container.hidden;
+    }
+  });
+  const endingMonth=document.querySelector('#spending-month-field input');
+  let previousEnding=endingMonth.value;
+  endingMonth.addEventListener('input',()=>{
+    if(granularity.value==='rolling' && endingMonth.validity.valid && endingMonth.value) {
+      if(accumulation.value===monthAt(monthNumber(previousEnding)-11) || accumulation.value>endingMonth.value) accumulation.value=monthAt(monthNumber(endingMonth.value)-11);
+      previousEnding=endingMonth.value;
     }
   });
   const spending = JSON.parse(document.querySelector('#budget-history-data').textContent);

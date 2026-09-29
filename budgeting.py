@@ -237,7 +237,7 @@ def group_periods(points, granularity):
     """Sum monthly values, applying each month's saved allowance before grouping."""
     groups = {}
     for point in points:
-        key = point['month'][:4] if granularity=='year' else quarter_key(point['month']) if granularity=='quarter' else point['month']
+        key = 'rolling' if granularity=='rolling' else point['month'][:4] if granularity=='year' else quarter_key(point['month']) if granularity=='quarter' else point['month']
         groups.setdefault(key,[]).append(point)
     result = []
     for key, sample in groups.items():
@@ -247,7 +247,7 @@ def group_periods(points, granularity):
                    date_from=sample[0]['month']+'-01', date_to=end_date(sample[-1]['month']),
                    future=all(point['future'] for point in sample),
                    partial=any(point['partial'] or point['future'] for point in sample),
-                   incomplete=len(sample)<(12 if granularity=='year' else 3 if granularity=='quarter' else 1) or any(not point['records'] and not point['future'] for point in sample),
+                   incomplete=len(sample)<(12 if granularity in {'year','rolling'} else 3 if granularity=='quarter' else 1) or any(not point['records'] and not point['future'] for point in sample),
                    plan=any(point.get('plan') for point in sample), rows=[])
         categories = {}
         for point in sample:
@@ -313,7 +313,7 @@ def dashboard(connection, state, first, last, account_id=None, connection_id=Non
     household = not account_id and not connection_id
     # A scoped spending view must never compare a subset with a household allowance.
     visible_state = state if household else {'plans': {}}
-    if granularity not in {'month','quarter','year'}:
+    if granularity not in {'month','quarter','year','rolling'}:
         raise BudgetError('Choose monthly, calendar-quarter, or calendar-year reporting.')
     period(first,last)
     snapshot_first = snapshot_first or last
@@ -322,18 +322,18 @@ def dashboard(connection, state, first, last, account_id=None, connection_id=Non
     selected = report(connection, visible_state, snapshot_first, last, today, account_id, connection_id, recorded)
     current = group_periods(selected['history'],granularity)[-1]
     data['current'] = current
-    data['spending'] = spending_history(recorded,'month' if granularity=='year' else granularity,today)
+    data['spending'] = spending_history(recorded,'month' if granularity in {'year','rolling'} else granularity,today)
     def observed(row):
         return bool(row['records']) and not row['future'] and not row['unknown'] and not row['foreign'] and not row.get('incomplete')
     points=data['spending']['points']
     previous_key=quarter_key(shift_month(last,-12)) if granularity=='quarter' else shift_month(last,-12)
     previous=next((row for row in points if row['key']==previous_key),None)
-    if granularity=='year' and snapshot_first>'1900-12':
+    if granularity in {'year','rolling'} and snapshot_first>'1900-12':
         prior_year = report(connection,visible_state,shift_month(snapshot_first,-12),shift_month(last,-12),today,account_id,connection_id,recorded)
-        previous = group_periods(prior_year['history'],'year')[-1]
+        previous = group_periods(prior_year['history'],granularity)[-1]
     data['yoy']=((current['actual']-previous['actual'])/abs(previous['actual'])*100
                  if previous and previous['actual'] and observed(previous) and observed(current) and not current['partial'] else None)
-    heat_months = group_periods(selected['history'],'month') if granularity=='year' else group_periods(data['history'],granularity)[-12:]
+    heat_months = group_periods(selected['history'],'month') if granularity in {'year','rolling'} else group_periods(data['history'],granularity)[-12:]
     data['heat_months'] = [row['label'] for row in heat_months]
     data['heat_budget'] = household and any(row['plan'] for row in heat_months)
     current_rows = {row['category']:row for row in current['rows']}

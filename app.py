@@ -1722,11 +1722,15 @@ def budget_page():
     context = page_context('budget')
     try:
         today_month = date.today().strftime('%Y-%m')
-        granularity = request.args.get('granularity') or ('month' if request.args.get('month') and not request.args.get('quarter') else 'quarter' if request.args.get('quarter') else 'year')
-        if not isinstance(granularity, str) or granularity not in {'month','quarter','year'}:
-            raise budgeting.BudgetError('Choose monthly, calendar-quarter, or calendar-year reporting.')
+        granularity = request.args.get('granularity') or ('month' if request.args.get('month') and not request.args.get('quarter') else 'quarter' if request.args.get('quarter') else 'year' if request.args.get('year') else 'rolling')
+        if not isinstance(granularity, str) or granularity not in {'month','quarter','year','rolling'}:
+            raise budgeting.BudgetError('Choose rolling 12 months, monthly, calendar-quarter, or calendar-year reporting.')
         year = request.args.get('year') or today_month[:4]
-        if granularity == 'year':
+        if granularity == 'rolling':
+            target = budgeting.month(request.args.get('month') or today_month)
+            snapshot_first = budgeting.month(budgeting.shift_month(target,-11))
+            quarter = budgeting.quarter_key(target)
+        elif granularity == 'year':
             snapshot_first = budgeting.month(year+'-01')
             target, quarter = year+'-12', budgeting.quarter_key(snapshot_first)
         elif granularity == 'quarter':
@@ -1735,11 +1739,11 @@ def budget_page():
         else:
             target = budgeting.month(request.args.get('month') or today_month)
             snapshot_first, quarter = target, budgeting.quarter_key(target)
-        editor_month = today_month if snapshot_first<=today_month<=target else snapshot_first
+        editor_month = today_month if snapshot_first<=today_month<=target else target if granularity=='rolling' else snapshot_first
         with db() as connection:
             state = budgeting.load(connection)
             saved_start = state.get('start') or min(state['plans'], default=snapshot_first)
-            first = request.args.get('since') or (snapshot_first if granularity=='year' else saved_start if saved_start<=target else snapshot_first)
+            first = request.args.get('since') or (snapshot_first if granularity in {'year','rolling'} else saved_start if saved_start<=target else snapshot_first)
             editor_month = max(editor_month, first)
             report = budgeting.dashboard(connection, state, first, target, context["account_id"], context["connection_id"], granularity=granularity, snapshot_first=snapshot_first)
             effective, plan = budgeting.plan_for(state, editor_month)
@@ -1761,7 +1765,7 @@ def budget_page():
             context.update(budget=report, budget_state=state, budget_plan=plan,
                            budget_version=budgeting.version(connection,state), budget_editor=editor,
                            granularity=granularity, year=target[:4], quarter=quarter, snapshot_first=snapshot_first, editor_month=editor_month,
-                           period_label=target[:4] if granularity=='year' else quarter.replace('-', ' ') if granularity=='quarter' else target,
+                           period_label=f'{snapshot_first} through {target}' if granularity=='rolling' else target[:4] if granularity=='year' else quarter.replace('-', ' ') if granularity=='quarter' else target,
                            quarter_options=sorted({budgeting.quarter_key(key) for key in budgeting.month_range(min(snapshot_first, (report['spending']['first'] or today_month)[:7]), max(target,budgeting.shift_month(today_month,12)))} ,reverse=True),
                            editor_income=next((row['deposited'] for row in report['history'] if row['month']==editor_month),0),
                            budget_effective=effective, household=not context["account_id"] and not context["connection_id"],
@@ -1785,8 +1789,8 @@ def save_budget_plan():
         first = budgeting.month(payload.get('since') or target)
         budgeting.period(first, target)
         granularity = payload.get('granularity','month')
-        if not isinstance(granularity, str) or granularity not in {'month','quarter','year'}:
-            raise budgeting.BudgetError('Choose monthly, calendar-quarter, or calendar-year reporting.')
+        if not isinstance(granularity, str) or granularity not in {'month','quarter','year','rolling'}:
+            raise budgeting.BudgetError('Choose rolling 12 months, monthly, calendar-quarter, or calendar-year reporting.')
         with db() as connection:
             state = budgeting.load(connection)
             if payload.get('version') != budgeting.version(connection,state):
