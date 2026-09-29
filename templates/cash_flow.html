@@ -28,6 +28,31 @@
   </article>
 </section>
 
+{% set growth = cash_flow.growth %}
+<section class="panel recent-panel" id="cash-flow-growth">
+  <div class="panel-header"><div><h2>Income and expense growth</h2><p>{{ growth.first }} through {{ growth.last }} · Latest 12 completed months</p></div></div>
+  <form method="get" class="filter-form cash-flow-growth-controls">
+    {% if connection_id %}<input type="hidden" name="person" value="{{ connection_id }}">{% endif %}
+    {% if account_id %}<input type="hidden" name="account" value="{{ account_id }}">{% endif %}
+    <label>Total over (months)<input type="number" name="growth_window" min="1" max="60" step="1" value="{{ growth.window }}" required></label>
+    <label>Compare with (months earlier)<input type="number" name="growth_comparison" min="1" max="60" step="1" value="{{ growth.comparison }}" required></label>
+    <button class="button secondary" type="submit">Update chart</button>
+  </form>
+  <p class="transaction-sub">Each point compares a {{ growth.window }}-month total with the same-length total ending {{ growth.comparison }} months earlier. Change = (current total ÷ earlier total − 1) × 100. This is total percentage change, not an annualized rate.</p>
+  {% if growth.available %}<div class="chart-large"><canvas id="cash-flow-growth-chart" role="img" aria-label="Monthly percentage change in income and total expenses. Exact values and comparison periods are in Calculation details below."></canvas></div>
+  {% else %}<div class="empty">Not enough comparable history for these settings. Try a shorter total or comparison period, or add earlier history. Calculation details below explain the gaps.</div>{% endif %}
+  <p class="transaction-sub">USD · Included cash-flow accounts · Income follows the saved income treatments; expenses include refunds. Transfers, pending and excluded transactions do not contribute. Missing months, unclassified transactions, other currencies, or a zero or negative earlier total leave gaps. Recorded months with no income or expenses count as zero. Account coverage can change as accounts are added or removed.</p>
+  <details class="budget-transactions"><summary>Calculation details <span>Monthly totals, comparisons, and gaps</span></summary>
+    <div class="table-wrap"><table><thead><tr><th>Month ending</th><th>Periods compared</th><th class="currency">Income<br>Current / Earlier</th><th class="currency">Income change</th><th class="currency">Expenses<br>Current / Earlier</th><th class="currency">Expense change</th><th>History</th></tr></thead><tbody>
+    {% for point in growth.points %}<tr>
+      <td>{{ point.month }}</td><td>{{ point.current.first }}–{{ point.current.last }}<br>vs. {{ point.prior.first }}–{{ point.prior.last }}</td>
+      {% for name in ['income','spending'] %}<td class="currency">{{ point.current[name]|money if point.current[name] is not none else '—' }} / {{ point.prior[name]|money if point.prior[name] is not none else '—' }}</td><td class="currency">{{ '%+.1f%%'|format(point[name]) if point[name] is not none else '—' }}</td>{% endfor %}
+      <td>{% if point.current.missing or point.prior.missing %}Missing months: {{ point.current.missing }} current / {{ point.prior.missing }} earlier. {% endif %}{% if point.current.unclassified or point.prior.unclassified %}Unclassified transactions in a compared period. {% endif %}{% if point.current.foreign or point.prior.foreign %}Other currencies in a compared period. {% endif %}{% if point.prior.income is not none and point.prior.income<=0 %}Earlier income is zero. {% endif %}{% if point.prior.spending is not none and point.prior.spending<=0 %}Earlier expenses are zero or negative. {% endif %}{% if point.income is not none and point.spending is not none %}Comparable recorded months{% endif %}</td>
+    </tr>{% endfor %}
+    </tbody></table></div>
+  </details>
+</section>
+
 <section class="content-grid cash-flow-secondary">
   <article class="panel">
     <div class="panel-header"><div><h2>Monthly cash flow</h2><p>Up to 24 months of available transaction history</p></div></div>
@@ -65,6 +90,8 @@
 {% endblock %}
 
 {% block scripts %}
+<script id="cash-flow-growth-data" type="application/json">{{ cash_flow.growth|tojson }}</script>
+<script src="{{ url_for('static',filename='cash-flow-growth.js') }}" defer></script>
 {% if cash_flow.months %}
 <script>
   const cashFlowMonths = {{ cash_flow.months|tojson }};

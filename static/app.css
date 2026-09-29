@@ -242,6 +242,9 @@ input:focus, select:focus { border-color: var(--forest-2); box-shadow: 0 0 0 3px
 .product-check-form { margin-top: 15px; }
 .cash-flow-secondary { grid-template-columns: minmax(0, 1.4fr) minmax(280px, .6fr); }
 .cash-flow-metrics { grid-template-columns: repeat(3, 1fr); }
+.cash-flow-growth-controls { flex-wrap: wrap; margin-bottom: 12px; }
+.cash-flow-growth-controls input { width: 110px; }
+#cash-flow-growth { margin-bottom: 24px; }
 .cash-flow-review-note { margin: 14px 0 0; }
 .cash-flow-scope-note { margin: 0 0 16px; color: var(--muted); font-size: 12px; }
 .cash-flow-scope-note a { color: var(--forest-2); font-weight: 700; }

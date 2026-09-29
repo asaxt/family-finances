@@ -91,6 +91,18 @@ window, count known zero-spending months, include refunds, and leave gaps for
 missing history. The current month's point and averages use month-to-date actuals.
 Account and person filters apply to every chart and transaction link.
 
+**Cash flow** includes income and expense percentage-change lines for the latest
+12 completed months. The default compares trailing 12-month totals with totals
+ending 12 months earlier. Set the total window and comparison distance separately
+(1–60 months each); the controls are remembered for the browser session. Changes
+are total percentage changes, not annualized rates. The chart uses included
+cash-flow accounts and saved category treatments, excludes transfers and pending
+or excluded transactions, and nets refunds against expenses. Missing months,
+unclassified transactions, other currencies, and nonpositive earlier totals leave
+gaps instead of invented percentages. Tooltips and calculation details show the
+compared windows and dollar totals. These controls are independent of the page's
+lookback in days, which still applies to its summary cards and recent activity.
+
 In **Edit monthly plan**, new lines default to **% of income**; fixed dollars remain
 available. Both carry forward until changed. All percentages use the same monthly
 income base. Recorded income is the default. Optional planned income or trailing
