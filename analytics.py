@@ -982,10 +982,11 @@ def transaction_list(
         params.extend(excluded_categories)
     if query:
         conditions.append(
-            "(LOWER(t.description) LIKE ? OR LOWER(COALESCE(t.merchant, '')) LIKE ?)"
+            "(LOWER(t.description) LIKE ? OR LOWER(COALESCE(t.merchant, '')) LIKE ? "
+            "OR LOWER(COALESCE(t.custom_description, '')) LIKE ?)"
         )
         term = f"%{query.lower()}%"
-        params.extend([term, term])
+        params.extend([term, term, term])
     if excluded_only:
         conditions.append("t.excluded = 1")
     elif not include_excluded:
@@ -1001,11 +1002,11 @@ def transaction_list(
         "amount_desc": "ABS(t.amount) DESC, t.transacted_at DESC",
         "amount_asc": "ABS(t.amount) ASC, t.transacted_at DESC",
         "merchant_asc": (
-            "LOWER(COALESCE(NULLIF(t.merchant, ''), t.description)) ASC, "
+            "LOWER(COALESCE(NULLIF(t.custom_description, ''), NULLIF(t.merchant, ''), t.description)) ASC, "
             "t.transacted_at DESC"
         ),
         "merchant_desc": (
-            "LOWER(COALESCE(NULLIF(t.merchant, ''), t.description)) DESC, "
+            "LOWER(COALESCE(NULLIF(t.custom_description, ''), NULLIF(t.merchant, ''), t.description)) DESC, "
             "t.transacted_at DESC"
         ),
         "category_asc": (
