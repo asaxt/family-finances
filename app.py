@@ -927,14 +927,23 @@ def save_transaction(connection, transaction):
                 reviews[transaction.transaction_id] = reviews.pop(imported_id)
                 save_ai_reviews(connection, reviews)
     previous = connection.execute("SELECT * FROM transactions WHERE id = ?", (transaction.transaction_id,)).fetchone()
+    pending_description = None
+    if not previous and getattr(transaction, 'pending_transaction_id', None):
+        pending_row = connection.execute(
+            "SELECT custom_description FROM transactions WHERE id = ? AND account_id = ? AND pending = 1",
+            (transaction.pending_transaction_id, transaction.account_id),
+        ).fetchone()
+        if pending_row:
+            pending_description = pending_row['custom_description']
     text = complete_text(transaction.merchant_name, transaction.name, previous)
     category = "Uncategorized"
     connection.execute(
         """
         INSERT INTO transactions (
             id, account_id, amount, currency, description, merchant,
-            pending, transacted_at, category, excluded, merchant_source, description_source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            pending, transacted_at, category, excluded, merchant_source, description_source,
+            custom_description
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             amount = excluded.amount,
             description = excluded.description,
@@ -956,6 +965,7 @@ def save_transaction(connection, transaction):
             category,
             0,
             text['merchant_source'], text['description_source'],
+            pending_description,
         ),
     )
 
@@ -2717,6 +2727,23 @@ def update_transaction_rule(connection, transaction, category, form, *, replace_
             "DELETE FROM merchant_rules WHERE id = ?",
             (existing_rule["id"],),
         )
+
+
+@app.post("/api/transaction/<transaction_id>/description")
+def update_transaction_description(transaction_id):
+    if 'custom_description' not in request.form:
+        return jsonify(error="Enter a description, or leave it blank to use the original."), 400
+    description = request.form['custom_description'].strip()
+    if len(description) > 255 or any(ord(char) < 32 or ord(char) == 127 for char in description):
+        return jsonify(error="Use a single-line description of up to 255 characters."), 400
+    with db() as connection:
+        result = connection.execute(
+            "UPDATE transactions SET custom_description = ? WHERE id = ?",
+            (description or None, transaction_id),
+        )
+        if not result.rowcount:
+            return jsonify(error="This transaction is no longer available."), 404
+    return transaction_cleanup_redirect()
 
 
 @app.post("/api/transaction/<transaction_id>")

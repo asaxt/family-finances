@@ -22,7 +22,7 @@ class SchemaTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         try:
             schema.create_schema(connection)
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
             self.assertNotIn("budgets", schema.user_tables(connection))
             schema.validate_schema(connection)
             goal = connection.execute(
@@ -58,6 +58,28 @@ class SchemaTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_description_migration_preserves_existing_records_and_rules(self):
+        connection = sqlite3.connect(':memory:')
+        try:
+            schema.create_schema(connection)
+            connection.execute('ALTER TABLE transactions DROP COLUMN custom_description')
+            connection.execute('PRAGMA user_version = 16')
+            connection.execute("INSERT INTO connections (id, owner_name, institution, access_token) VALUES (1, 'EXAMPLE PERSON', 'EXAMPLE BANK', 'fictional')")
+            connection.execute("INSERT INTO accounts (id, connection_id, institution, name, type) VALUES ('sample-account', 1, 'EXAMPLE BANK', 'EXAMPLE ACCOUNT', 'depository')")
+            connection.execute("INSERT INTO transactions (id, account_id, amount, currency, description, merchant, pending, transacted_at, category, category_override, category_override_source) VALUES ('sample', 'sample-account', 123, 'USD', 'SAMPLE ORIGINAL', 'SAMPLE MERCHANT', 0, '2001-01-02', 'Uncategorized', 'EXAMPLE CATEGORY', 'user')")
+            connection.execute("INSERT INTO merchant_rules (account_id, match_type, match_value, category) VALUES ('sample-account', 'description', 'SAMPLE ORIGINAL', 'EXAMPLE CATEGORY')")
+            columns = ','.join(sorted(schema.VERSION_SIXTEEN_COLUMNS['transactions']))
+            before = connection.execute(f'SELECT {columns} FROM transactions').fetchall()
+            rules = connection.execute('SELECT * FROM merchant_rules').fetchall()
+            connection.commit()
+            self.assertTrue(schema.migrate_schema(connection))
+            self.assertEqual(connection.execute(f'SELECT {columns} FROM transactions').fetchall(), before)
+            self.assertEqual(connection.execute('SELECT * FROM merchant_rules').fetchall(), rules)
+            self.assertIsNone(connection.execute('SELECT custom_description FROM transactions').fetchone()[0])
+            self.assertFalse(schema.migrate_schema(connection))
+        finally:
+            connection.close()
+
     def test_unrecognized_version_zero_is_rejected(self):
         connection = sqlite3.connect(":memory:")
         try:
@@ -70,10 +92,10 @@ class SchemaTests(unittest.TestCase):
     def test_newer_schema_is_rejected_without_a_backup(self):
         database, key, auth_path = self.encrypted_schema_zero()
         with database.connection() as connection:
-            connection.execute("PRAGMA user_version = 17")
+            connection.execute("PRAGMA user_version = 18")
         database.persist()
 
-        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 16"):
+        with self.assertRaisesRegex(schema.SchemaError, "supports up to version 17"):
             schema.prepare_encrypted_database(database, key, auth_path)
         self.assertEqual(list(self.root.glob(".migration-backup-*")), [])
 
@@ -155,7 +177,7 @@ class SchemaTests(unittest.TestCase):
                 "SELECT flow_type FROM merchant_rules WHERE match_value = 'Example'"
             ).fetchone()[0]
             self.assertIsNone(category_only_flow)
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
             schema.validate_schema(connection)
         finally:
             connection.close()
@@ -378,7 +400,7 @@ class SchemaTests(unittest.TestCase):
                 ).fetchone()[0],
                 "spending",
             )
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
             schema.validate_schema(connection)
         finally:
             connection.close()
@@ -388,7 +410,7 @@ class SchemaTests(unittest.TestCase):
         changed = schema.prepare_encrypted_database(database, key, auth_path)
         self.assertTrue(changed)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
             account_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(accounts)")
             }
@@ -502,7 +524,7 @@ class SchemaTests(unittest.TestCase):
             venmo_rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
         self.assertEqual(rows["venmo-in"], (None, None))
         self.assertEqual(rows["venmo-out"], (None, None))
         self.assertEqual(rows["bank-transfer"], (None, None))
@@ -557,7 +579,7 @@ class SchemaTests(unittest.TestCase):
             rule = connection.execute(
                 "SELECT flow_type FROM category_rules WHERE name = 'Venmo' COLLATE NOCASE"
             ).fetchone()
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
         self.assertEqual(tuple(transaction), (None, None))
         self.assertIsNone(rule)
         self.assertEqual(len(list(self.root.glob(".migration-backup-*"))), 2)
@@ -581,7 +603,7 @@ class SchemaTests(unittest.TestCase):
                 row[1]
                 for row in connection.execute("PRAGMA table_info(merchant_rules)")
             }
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
         self.assertEqual(columns, schema.EXPECTED_COLUMNS["merchant_rules"])
         self.assertEqual(len(list(self.root.glob(".migration-backup-*"))), 2)
 
@@ -599,7 +621,7 @@ class SchemaTests(unittest.TestCase):
 
         schema.prepare_encrypted_database(database, key, auth_path)
         with database.connection() as connection:
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
             self.assertNotIn("budgets", schema.user_tables(connection))
         self.assertEqual(len(list(self.root.glob(".migration-backup-*"))), 2)
 
@@ -638,7 +660,7 @@ class SchemaTests(unittest.TestCase):
                     "SELECT id, cash_flow_role FROM accounts ORDER BY id"
                 ).fetchall()
             )
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
         self.assertEqual(
             roles,
             {
@@ -684,7 +706,7 @@ class SchemaTests(unittest.TestCase):
                     "SELECT id, cash_flow_role, spending_enabled FROM accounts"
                 )
             }
-            self.assertEqual(schema.schema_version(connection), 16)
+            self.assertEqual(schema.schema_version(connection), 17)
         self.assertEqual(settings["checking"], ("cash_flow", 1))
         self.assertEqual(settings["card"], ("cash_flow", 1))
         self.assertEqual(len(list(self.root.glob(".migration-backup-*"))), 2)
@@ -780,6 +802,7 @@ class SchemaTests(unittest.TestCase):
 
     @staticmethod
     def remove_version_sixteen(connection):
+        connection.execute("ALTER TABLE transactions DROP COLUMN custom_description")
         connection.execute('DROP TRIGGER complete_transaction_text_insert')
         connection.execute('DROP TRIGGER complete_transaction_text_update')
         connection.execute('DROP TABLE rule_fallbacks')

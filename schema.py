@@ -6,7 +6,7 @@ from vault import (
 )
 
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 DEFAULT_SAVINGS_GOAL = 1_000_000
 
 
@@ -120,11 +120,16 @@ VERSION_FIFTEEN_COLUMNS = {
 }
 
 
-EXPECTED_COLUMNS = {
+VERSION_SIXTEEN_COLUMNS = {
     **VERSION_FIFTEEN_COLUMNS,
     "transactions": VERSION_FIFTEEN_COLUMNS["transactions"] | {"merchant_source", "description_source"},
     "merchant_rules": VERSION_FIFTEEN_COLUMNS["merchant_rules"] | {"source"},
     "rule_fallbacks": {"preferred_id", "fallback_id"},
+}
+
+EXPECTED_COLUMNS = {
+    **VERSION_SIXTEEN_COLUMNS,
+    "transactions": VERSION_SIXTEEN_COLUMNS["transactions"] | {"custom_description"},
 }
 
 
@@ -590,7 +595,15 @@ def _migrate_fourteen_to_fifteen(connection):
 
 
 def _validate_version_sixteen(connection):
-    _validate_columns(connection, EXPECTED_COLUMNS, 16)
+    _validate_columns(connection, VERSION_SIXTEEN_COLUMNS, 16)
+
+
+def _validate_version_seventeen(connection):
+    _validate_columns(connection, EXPECTED_COLUMNS, 17)
+
+
+def _migrate_sixteen_to_seventeen(connection):
+    connection.execute("ALTER TABLE transactions ADD COLUMN custom_description TEXT")
 
 
 def _migrate_fifteen_to_sixteen(connection):
@@ -660,6 +673,7 @@ VALIDATORS = {
     14: _validate_version_twelve,
     15: _validate_version_fifteen,
     16: _validate_version_sixteen,
+    17: _validate_version_seventeen,
 }
 MIGRATIONS = {
     0: _migrate_zero_to_one,
@@ -678,6 +692,7 @@ MIGRATIONS = {
     13: _migrate_thirteen_to_fourteen,
     14: _migrate_fourteen_to_fifteen,
     15: _migrate_fifteen_to_sixteen,
+    16: _migrate_sixteen_to_seventeen,
 }
 
 

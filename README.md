@@ -49,6 +49,12 @@ Plaid or any financial institution.
 
 ## Categorization and rule review
 
+Use **Edit description** on a transaction to add your own label. It appears in the
+Transactions list and can be searched alongside the original bank text. Clear it
+to restore the original label. The original merchant and description remain
+available, and bank refreshes preserve your label. This edits only that transaction;
+it does not change categories, remembered rules, or merchant-based reports.
+
 Transactions show their category source and the matching **Category rule text**.
 Missing merchant or description text is copied from the other field and marked
 as copied. A later bank sync can replace copied text with supplied detail.
