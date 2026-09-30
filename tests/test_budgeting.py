@@ -212,6 +212,23 @@ class BudgetMathTests(unittest.TestCase):
         self.assertFalse(scoped['heat_budget'])
         self.assertEqual(scoped['totals'][0]['heat'][-1]['level'],'intensity-4')
 
+    def test_uncategorized_entries_keep_recorded_budget_spending_visible(self):
+        state={'plans':{'2001-02':fixed()}}
+        transaction(self.connection,'sample-prior','2001-02',200)
+        transaction(self.connection,'sample-spending','2002-02',400)
+        transaction(self.connection,'sample-unknown','2002-02',731,'Uncategorized')
+        result=budgeting.dashboard(self.connection,state,'2002-02','2002-02',today=date(2002,3,1))
+        total=result['totals'][0]
+        self.assertEqual(result['unknown'],1)
+        self.assertEqual(total['actual'],400)
+        self.assertEqual(total['heat'][-1]['level'],'low')
+        self.assertEqual(total['heat'][-1]['percent'],34.0)
+        self.assertEqual(total['heat'][-2]['level'],'missing')
+        self.assertEqual(result['yoy'],100.0)
+        self.assertIsNone(result['current']['brokerage_actual'])
+        scoped=budgeting.dashboard(self.connection,state,'2002-02','2002-02',account_id='sample-card',today=date(2002,3,1))
+        self.assertEqual(scoped['totals'][0]['heat'][-1]['level'],'intensity-4')
+
     def test_full_history_charts_ignore_budget_dates_amounts_and_keep_refunds(self):
         transaction(self.connection,'sample-old','1985-04',733)
         transaction(self.connection,'sample-recent','2002-02',617)

@@ -53,7 +53,7 @@
 
   {% if (household and budget.missing_plans) or budget.empty_months or budget.unknown or budget.foreign %}
   <details class="budget-coverage"><summary>Coverage &amp; calculation notes{% if budget.unknown or budget.foreign %} · Some transactions are omitted{% elif budget.empty_months %} · {{ budget.empty_months }} month(s) without records{% endif %}</summary>
-    <p>{% if household and budget.missing_plans %}{{ budget.missing_plans }} month(s) have no saved allowance; their spending remains in cumulative actuals. {% endif %}{% if budget.empty_months %}Months without records are not proof of no spending. {% endif %}{% if budget.unknown %}{{ budget.unknown }} uncategorized transaction(s) omitted. {% endif %}{% if budget.foreign %}{{ budget.foreign }} non-USD transaction(s) omitted; currencies are not converted. {% endif %}Charts show recorded actuals, not projections. Incomplete months appear as gaps in comparisons.</p>
+    <p>{% if household and budget.missing_plans %}{{ budget.missing_plans }} month(s) have no saved allowance; their spending remains in cumulative actuals. {% endif %}{% if budget.empty_months %}Months without records are not proof of no spending. {% endif %}{% if budget.unknown %}{{ budget.unknown }} uncategorized transaction(s) omitted; recorded category spending remains visible. {% endif %}{% if budget.foreign %}{{ budget.foreign }} non-USD transaction(s) omitted; currencies are not converted. {% endif %}Charts show recorded actuals, not projections. Incomplete months appear as gaps in comparisons.</p>
   </details>
   {% endif %}
 

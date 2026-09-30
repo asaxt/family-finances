@@ -361,7 +361,8 @@ def dashboard(connection, state, first, last, account_id=None, connection_id=Non
     data['current'] = current
     data['spending'] = spending_history(recorded,'month' if granularity in {'year','rolling'} else granularity,today)
     def observed(row):
-        return bool(row['records']) and not row['future'] and not row['unknown'] and not row['foreign'] and not row.get('incomplete')
+        # Uncategorized entries are omitted, but do not invalidate recorded spending.
+        return bool(row['records']) and not row['future'] and not row['foreign'] and not row.get('incomplete')
     points=data['spending']['points']
     previous_key=quarter_key(shift_month(last,-12)) if granularity=='quarter' else shift_month(last,-12)
     previous=next((row for row in points if row['key']==previous_key),None)
