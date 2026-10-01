@@ -76,6 +76,16 @@ class RuleMatchingTests(unittest.TestCase):
         with self.assertRaises(rule_review.RuleConflict):
             rule_review.resolve(self.connection,[(b,a)],'fallback')
 
+    def test_manual_release_requires_a_winning_proposed_rule(self):
+        chosen = self.rule('description', 'SAMPLE CAFE', 'EXAMPLE SPECIFIC')
+        other = self.rule('merchant', 'SAMPLE CAFE', 'EXAMPLE BROAD')
+        self.connection.execute("UPDATE transactions SET category_override='EXAMPLE BROAD', category_override_source='user'")
+        proposed = [rule_review.rules(self.connection)[chosen]]
+        self.assertEqual(rule_review.release_manual_categories(self.connection, proposed), 0)
+        rule_review.resolve(self.connection, [(other, chosen)], 'fallback')
+        self.assertEqual(rule_review.release_manual_categories(self.connection, proposed), 0)
+        self.assertEqual(self.row()['category_override_source'], 'user')
+
     def test_text_completion_and_genuine_sync_replacements(self):
         first=complete_text('SAMPLE MERCHANT',' \t')
         self.assertEqual(first['description'],'SAMPLE MERCHANT')
@@ -111,6 +121,47 @@ class RulePreviewTests(unittest.TestCase):
     setUp=test_app_setup.AppSetupTests.setUp
     tearDown=test_app_setup.AppSetupTests.tearDown
     csrf_token=staticmethod(test_app_setup.AppSetupTests.csrf_token)
+
+    def test_replacing_manual_choices_requires_explicit_preview_opt_in(self):
+        self.ready()
+        with self.application.db() as connection:
+            connection.execute("UPDATE transactions SET category_override='EXAMPLE SPECIFIC', category_override_source='user', custom_description='EXAMPLE LABEL' WHERE id='sample-1'")
+            connection.execute("UPDATE transactions SET category_override='EXAMPLE SPECIFIC', category_override_source=NULL WHERE id='sample-2'")
+            connection.execute("UPDATE transactions SET description='SAMPLE UNRELATED', merchant='SAMPLE UNRELATED', category_override='EXAMPLE SPECIFIC', category_override_source='user' WHERE id='sample-3'")
+            rule_id = connection.execute('SELECT id FROM merchant_rules').fetchone()[0]
+        def propose():
+            response = self.client.post(f'/api/category-rule/{rule_id}/resolve', data={'csrf_token': self.token})
+            self.assertEqual(response.status_code, 303)
+            page = self.client.get(response.location)
+            self.assertIn(b'Warning:', page.data)
+            self.assertIn(b'2 individual choices removed', page.data)
+            self.assertIn(b'type="checkbox" name="replace_manual">', page.data)
+            return response.location
+        location = propose()
+        self.assertEqual(self.client.post(location, data={'csrf_token': self.token, 'choice': 'replace'}).status_code, 302)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT category_override FROM transactions WHERE id='sample-1'").fetchone()[0], 'EXAMPLE SPECIFIC')
+        location = propose()
+        self.assertEqual(self.client.post(location, data={'csrf_token': self.token, 'choice': 'replace', 'replace_manual': 'on'}).status_code, 302)
+        with self.application.db() as connection:
+            rows = {row['id']: row for row in transaction_list(connection)}
+            for identifier in ('sample-1', 'sample-2'):
+                self.assertIsNone(rows[identifier]['category_override'])
+                self.assertEqual(rows[identifier]['effective_category'], 'EXAMPLE BROAD')
+            self.assertEqual(rows['sample-1']['custom_description'], 'EXAMPLE LABEL')
+            self.assertEqual(rows['sample-3']['category_override_source'], 'user')
+
+    def test_manual_replacement_preview_rejects_changed_transactions(self):
+        self.ready()
+        with self.application.db() as connection:
+            connection.execute("UPDATE transactions SET category_override='EXAMPLE SPECIFIC', category_override_source='user' WHERE id='sample-1'")
+            rule_id = connection.execute('SELECT id FROM merchant_rules').fetchone()[0]
+        response = self.client.post(f'/api/category-rule/{rule_id}/resolve', data={'csrf_token': self.token})
+        with self.application.db() as connection:
+            connection.execute("UPDATE transactions SET custom_description='EXAMPLE CHANGED' WHERE id='sample-1'")
+        self.assertEqual(self.client.post(response.location, data={'csrf_token': self.token, 'choice': 'replace', 'replace_manual': 'on'}).status_code, 409)
+        with self.application.db() as connection:
+            self.assertEqual(connection.execute("SELECT category_override FROM transactions WHERE id='sample-1'").fetchone()[0], 'EXAMPLE SPECIFIC')
 
     def ready(self):
         page=self.client.get('/setup')

@@ -49,6 +49,20 @@ Plaid or any financial institution.
 
 ## Categorization and rule review
 
+Local AI categorization and statement imports save reusable, exact-description
+rules for the same account as each completed group is processed. AI-created rules
+remain lower priority than user rules and individual choices. Conflicting guesses,
+unresolved groups, and transaction-specific transfer evidence are not generalized
+into new rules. An interrupted run keeps rules from its completed groups.
+
+Existing-category review remains suggestion-only until you accept a proposal.
+Acceptance defaults to a reusable rule with a before/after preview; an individual
+category option remains available. Rule previews preserve manual choices by
+default. The optional **Replace matching individual category choices** checkbox
+shows a warning and affected counts before releasing those choices to follow the
+rule. Use **Prefer this rule…** to do this for a rule already saved. Older choices
+with unknown origin are protected in the same way; their origin is not guessed.
+
 Use **Edit description** on a transaction to add your own label. It appears in the
 Transactions list and can be searched alongside the original bank text. Clear it
 to restore the original label. The original merchant and description remain
@@ -170,8 +184,9 @@ transactions with the current labels, including manual choices and excluded reco
 It saves proposals in the encrypted vault without changing transaction categories.
 
 Compare the current and proposed categories and the model's reason. Choose **Accept**
-or **Keep current**, individually or using the selection checkboxes. Accepting only
-changes selected transaction categories; labels and remembered rules are unchanged.
+or **Keep current**, individually or using the selection checkboxes. Reusable rules
+are the default and show their effect on matching history before you confirm.
+Choose **Individual categories only** to limit an acceptance to the selected records.
 Suggestions are skipped if the transaction, matching rule, or label definitions have
 changed since the scan. Resolve pending suggestions before starting another review.
 The read-only development mirror does not permit scans or approval writes.

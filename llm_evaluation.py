@@ -599,7 +599,7 @@ def apply_categorized_suggestions(connection, result):
                     flow_override = NULL,
                     spending_override = NULL
                 WHERE id IN ({placeholders})
-                  AND COALESCE(category_override_source, '') != 'user'
+                  AND (category_override IS NULL OR category_override_source = 'model')
                 {category_guard}
                 RETURNING id
                 """,
@@ -618,10 +618,14 @@ def apply_categorized_suggestions(connection, result):
 def create_recurring_category_rules(connection, result):
     grouped = defaultdict(list)
     for item in result["details"]:
-        grouped[(item["account_id"], item["description"].strip())].append(item)
+        grouped[(item["account_id"], item["description"].strip().translate(
+            str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')))].append(item)
 
     created = 0
     for (account_id, description), items in grouped.items():
+        description = items[0]['description'].strip()
+        if not description:
+            continue
         categorized_items = [
             item for item in items if item["status"] == "categorized"
         ]
@@ -667,7 +671,7 @@ def create_recurring_category_rules(connection, result):
         review_ids = [row[0] for row in connection.execute(
             "SELECT id FROM transactions WHERE account_id = ? "
             "AND TRIM(description) = ? COLLATE NOCASE "
-            "AND COALESCE(category_override_source, '') != 'user'",
+            "AND (category_override IS NULL OR category_override_source = 'model')",
             (account_id, description),
         )]
         review_ids_set = set(review_ids)
@@ -682,3 +686,25 @@ def create_recurring_category_rules(connection, result):
         for item in categorized_items:
             item["rule_match_count"] = match_count
     return created
+
+
+def save_categorization_batch(connection, prepared, previous_details, batch_details):
+    """Persist completed AI groups as rules even if a later batch is interrupted."""
+    applied = apply_categorized_suggestions(connection, {'details': batch_details})
+    details = [*previous_details, *batch_details]
+    def key(item):
+        return item['account_id'], normalized_description(item['description'])
+    remaining = {key(group) for group in prepared['groups'][len(details):]}
+    completed = {key(item) for item in batch_details} - remaining
+    applied_keys = {key(item) for item in details if item.get('applied_transaction_ids')}
+    rule_details = [item for item in details if key(item) in completed & applied_keys]
+    # Ambiguous groups (including unresolved predictions) remain individual AI
+    # assignments; do not turn a one-off transfer match into a permanent rule.
+    transfers = {row[0].casefold() for row in connection.execute(
+        "SELECT name FROM category_rules WHERE flow_type = 'transfer'")}
+    transfers.add('transfer')
+    blocked = {key(item) for item in rule_details
+               if item['status'] != 'categorized' or item.get('category', '').casefold() in transfers}
+    rule_details = [item for item in rule_details if key(item) not in blocked]
+    create_recurring_category_rules(connection, {'details': rule_details})
+    return applied + sum(item.get('rule_applied_transaction_count', 0) for item in rule_details)

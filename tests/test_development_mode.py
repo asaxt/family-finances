@@ -494,16 +494,19 @@ class DevelopmentModeTests(unittest.TestCase):
         def classify(prepared, rows):
             self.assertFalse(prepared['targeted'])
             return [{'status': 'categorized', 'category': 'Dining', 'confidence': 1,
-                     'reason': 'Fictional category example', 'transaction_ids': row['transaction_ids']}
+                     'reason': 'Fictional category example', 'transaction_ids': row['transaction_ids'],
+                     'account_id': row['account_id'], 'description': row['description']}
                     for row in rows]
         with patch.object(self.application, 'classify_evaluation_rows', side_effect=classify) as model:
             response = self.client.post('/statement-import/history/' + history[0]['id'] + '/classify', data={'csrf_token': csrf})
             model.assert_called_once()
         with self.application.db() as connection:
             imported = connection.execute("SELECT id, category_override FROM transactions WHERE id LIKE 'statement:%'").fetchone()
-            self.assertEqual(imported['category_override'], 'Dining')
+            self.assertIsNone(imported['category_override'])
+            rule = connection.execute("SELECT source, category FROM merchant_rules WHERE source='model'").fetchone()
+            self.assertEqual(tuple(rule), ('model', 'Dining'))
             self.assertIn(imported['id'], self.application.load_ai_reviews(connection))
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE category_override IS NULL").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE category_override IS NULL").fetchone()[0], 3)
             connection.execute("UPDATE transactions SET category_override = 'Groceries', category_override_source = 'user' WHERE id = ?", (imported['id'],))
         with patch.object(self.application, 'classify_evaluation_rows') as model:
             self.application.classify_statement_import(history[0]['id'])
@@ -1302,9 +1305,9 @@ class DevelopmentModeTests(unittest.TestCase):
                 for row in self.application.transaction_list(connection)
             }
             result = self.application.load_ollama_result(connection)
-        self.assertIsNone(categories["selected"])
+        self.assertEqual(categories["selected"], "Income")
         self.assertIsNone(categories["not-selected"])
-        self.assertEqual(effective["selected"], "Food And Drink")
+        self.assertEqual(effective["selected"], "Income")
         self.assertEqual(effective["not-selected"], "Uncategorized")
         self.assertTrue(result["targeted"])
         self.assertEqual(result["source_transaction_count"], 1)
@@ -1468,8 +1471,9 @@ class DevelopmentModeTests(unittest.TestCase):
                 ).fetchall()
             )
             saved_result = self.application.load_ollama_result(connection)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM merchant_rules WHERE source='model'").fetchone()[0], 5)
         self.assertEqual(
-            sum(value == "Food And Drink" for value in overrides.values()), 5
+            sum(value is not None for value in overrides.values()), 0
         )
         self.assertEqual(overrides["transaction-5"], None)
         self.assertEqual(saved_result["status"], "interrupted")
@@ -1487,7 +1491,7 @@ class DevelopmentModeTests(unittest.TestCase):
             persisted_result = self.application.load_ollama_result(connection)
             effective = self.application.transaction_list(connection)
         self.assertEqual(
-            sum(value == "Food And Drink" for value in persisted.values()), 5
+            sum(value is not None for value in persisted.values()), 0
         )
         self.assertEqual(persisted_result["status"], "interrupted")
         self.assertEqual(
