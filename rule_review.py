@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from category_matching import match_sql
+from category_matching import match_sql, winning_rule_sql
 
 
 class RuleConflict(Exception):
@@ -91,3 +91,17 @@ def impact(before, after):
                     before=row['category'], after=after[key]['category'])
                for key, row in before.items() if key in after and row['category'] != after[key]['category']]
     return {'count': len(changed), 'examples': changed[:40]}
+
+
+def release_manual_categories(connection, proposed):
+    """Release only individual choices now covered by a winning proposed rule."""
+    ids = [rule['id'] for rule in proposed]
+    if not ids:
+        return 0
+    placeholders = ','.join('?' for _ in ids)
+    return connection.execute(f'''
+        UPDATE transactions AS t SET category_override = NULL, category_override_source = NULL
+        WHERE t.category_override IS NOT NULL
+          AND COALESCE(t.category_override_source, 'user') = 'user'
+          AND {winning_rule_sql()} IN ({placeholders})
+    ''', ids).rowcount

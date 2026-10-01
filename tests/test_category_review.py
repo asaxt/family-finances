@@ -188,12 +188,22 @@ class CategoryReviewRouteTests(unittest.TestCase):
             'csrf_token': token, 'review_id': 'old-review', 'action': 'accept',
             'transaction_ids': ['sample-1'],
         }).status_code, 409)
-        self.assertEqual(self.client.post('/api/local-ai/category-review/decide', data={
+        response = self.client.post('/api/local-ai/category-review/decide', data={
             'csrf_token': token, 'review_id': result['id'], 'action': 'accept',
             'transaction_ids': ['sample-1'],
+        })
+        self.assertEqual(response.status_code, 303)
+        with self.application.db() as connection:
+            self.assertEqual(finances(connection), before)
+            self.assertEqual(review.load(connection)['suggestions'][0]['decision'], 'pending')
+        page = self.client.get(response.location)
+        self.assertIn(b'Replace matching individual category choices', page.data)
+        self.assertEqual(self.client.post(response.location, data={
+            'csrf_token': token, 'choice': 'replace', 'replace_manual': 'on',
         }).status_code, 302)
         with self.application.db() as connection:
-            self.assertEqual(connection.execute("SELECT category_override FROM transactions WHERE id = 'sample-1'").fetchone()[0], 'EXAMPLE SPECIFIC')
+            self.assertIsNone(connection.execute("SELECT category_override FROM transactions WHERE id = 'sample-1'").fetchone()[0])
+            self.assertEqual(connection.execute("SELECT source, category FROM merchant_rules").fetchone()[:], ('model', 'EXAMPLE SPECIFIC'))
         self.assertEqual(self.client.post('/api/local-ai/category-review/decide', data={
             'csrf_token': token, 'review_id': result['id'], 'action': 'keep',
             'transaction_ids': ['sample-2'],

@@ -79,7 +79,7 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(overview.data.count(b'<article class="metric-card'), 7)
 
     def test_dashboard_layout_cleanup_and_recent_category_transactions(self):
-        month = date.today().strftime("%Y-%m")
+        month = "2001-02"
         with self.application.db() as connection:
             connection.execute(
                 """

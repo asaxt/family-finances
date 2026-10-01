@@ -68,9 +68,8 @@ import category_review
 
 from llm_evaluation import (
     AI_REVIEW_SETTING,
-    apply_categorized_suggestions,
     classify_evaluation_rows,
-    create_recurring_category_rules,
+    save_categorization_batch,
     evaluation_batches,
     evaluation_result,
     load_ai_reviews,
@@ -476,21 +475,30 @@ def rule_edit_db():
         old_categories = rule_review.categories(connection)
         yield connection
         after = rule_review.rules(connection)
-        forced = getattr(g, 'resolve_rule_id', None)
+        forced = getattr(g, 'resolve_rule_ids', [])
+        if getattr(g, 'resolve_rule_id', None):
+            forced = [*forced, g.resolve_rule_id]
         if before == after and not forced:
             return
         if forced:
-            before = {key: value for key, value in before.items() if key != forced}
+            before = {key: value for key, value in before.items() if key not in forced}
         changed, pairs = rule_review.review_changes(connection, before, after)
         if approval:
             rule_review.resolve(connection, pairs, approval['choice'])
+            if approval.get('replace_manual'):
+                rule_review.release_manual_categories(connection, changed)
             return
         # Every saved-rule change is reviewable before it affects history.
-        impacts = {}
+        impacts, manual_impacts = {}, {}
         for choice in ('replace', 'fallback'):
             connection.execute('SAVEPOINT preview_choice')
             rule_review.resolve(connection, pairs, choice)
             impacts[choice] = rule_review.impact(old_categories, rule_review.categories(connection))
+            released = rule_review.release_manual_categories(connection, changed)
+            manual_impacts[choice] = {
+                **rule_review.impact(old_categories, rule_review.categories(connection)),
+                'released': released,
+            }
             connection.execute('ROLLBACK TO preview_choice')
             connection.execute('RELEASE preview_choice')
         raise rule_review.PreviewRequired({
@@ -498,6 +506,7 @@ def rule_edit_db():
             'form': request.form.to_dict(flat=False), 'proposed': changed,
             'old': [before[key] for key in before if key not in after or before[key] != after[key]],
             'overlaps': [after[key] for key in sorted({old for _, old in pairs})], 'impacts': impacts,
+            'manual_impacts': manual_impacts,
         })
 
 
@@ -542,10 +551,14 @@ def rule_preview(token):
         if choice not in {'replace', 'fallback'}:
             abort(400)
         allowed = {'update_transaction', 'bulk_update_transactions', 'update_category_rule',
-                   'bulk_update_category_rules', 'delete_category_rule', 'resolve_existing_rule'}
+                   'bulk_update_category_rules', 'delete_category_rule', 'resolve_existing_rule',
+                   'decide_category_review'}
         if preview['endpoint'] not in allowed:
             abort(400)
-        g.rule_approval = {'snapshot': preview['snapshot'], 'choice': choice}
+        replace_manual = request.form.get('replace_manual') == 'on'
+        if replace_manual and not preview.get('manual_impacts', {}).get(choice, {}).get('released'):
+            abort(400, 'This preview has no matching individual category choices to replace.')
+        g.rule_approval = {'snapshot': preview['snapshot'], 'choice': choice, 'replace_manual': replace_manual}
         request.__dict__['form'] = MultiDict((key, value) for key, values in preview['form'].items() for value in values)
         response = app.view_functions[preview['endpoint']](**preview['args'])
         with db() as connection:
@@ -3044,14 +3057,18 @@ def decide_category_review():
     action = request.form.get("action")
     if action not in {"accept", "keep"}:
         abort(400)
-    with db() as connection:
+    mode = request.form.get('apply_mode', 'rule')
+    if mode not in {'rule', 'individual'}:
+        abort(400)
+    with rule_edit_db() as connection:
         result = category_review.load(connection)
         if not result or request.form.get("review_id") != result["id"]:
             return "This review has been replaced. Reload the category review page.", 409
         if result["status"] == "running" and OLLAMA_EVALUATION_LOCK.locked():
             return "Wait for the review to finish before making decisions.", 409
         transaction_ids = request.form.getlist("transaction_ids")
-        category_review.decide(connection, result, transaction_ids, action)
+        category_review.decide(connection, result, transaction_ids, action, as_rules=mode == 'rule')
+        g.resolve_rule_ids = result.get('proposed_rule_ids', [])
     return redirect(url_for("category_review_report"))
 
 
@@ -3123,8 +3140,7 @@ def evaluate_with_ollama():
                 batch_details = classify_evaluation_rows(prepared, rows)
                 next_details = [*details, *batch_details]
                 with db() as connection:
-                    batch_result = {"details": batch_details}
-                    batch_applied = apply_categorized_suggestions(connection, batch_result)
+                    batch_applied = save_categorization_batch(connection, prepared, details, batch_details)
                     progress = evaluation_result(
                         prepared, next_details, time.monotonic() - started,
                         status="running", applied_transaction_count=applied + batch_applied,
@@ -3141,8 +3157,6 @@ def evaluate_with_ollama():
                 applied_transaction_count=applied,
             )
             with db() as connection:
-                create_recurring_category_rules(connection, result)
-                applied += sum(item.get("rule_applied_transaction_count", 0) for item in details)
                 result = evaluation_result(
                     prepared, details, time.monotonic() - started,
                     status="completed", applied_transaction_count=applied,
@@ -3407,6 +3421,7 @@ def classify_statement_import(import_key):
                 for group in prepared['groups']:
                     # Verified pairs were handled above. Unmatched amounts are not enough to infer a transfer.
                     group['all_have_transfer_match'] = False
+                completed_details = []
                 for rows in evaluation_batches(prepared):
                     details = classify_evaluation_rows(prepared, rows)
                     with db() as connection:
@@ -3414,7 +3429,8 @@ def classify_statement_import(import_key):
                         for item in details:
                             item['allow_recategorization'] = False
                             item['transaction_ids'] = [value for value in item['transaction_ids'] if value in still_eligible]
-                        apply_categorized_suggestions(connection, {'details': details})
+                        save_categorization_batch(connection, prepared, completed_details, details)
+                    completed_details.extend(details)
         except Exception:
             status = 'interrupted'
         finally:

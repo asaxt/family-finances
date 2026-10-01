@@ -330,7 +330,7 @@ class LocalModelEvaluationTests(unittest.TestCase):
         self.assertEqual(rows["older-user"], ("Groceries", "user"))
         self.assertEqual(result["details"][0]["rule_match_count"], 3)
 
-    def test_selected_transaction_can_be_recategorized_outside_default_window(self):
+    def test_selected_legacy_individual_choice_is_preserved(self):
         self.connection.execute(
             """
             INSERT INTO transactions (
@@ -364,12 +364,12 @@ class LocalModelEvaluationTests(unittest.TestCase):
         self.assertTrue(result["targeted"])
         self.assertEqual(result["source_transaction_count"], 1)
         self.assertEqual(result["date_from"], "2026-08-20")
-        self.assertEqual(applied, 1)
+        self.assertEqual(applied, 0)
         self.assertEqual(
             self.connection.execute(
                 "SELECT category_override FROM transactions WHERE id = 'selected'"
             ).fetchone()[0],
-            "Travel",
+            "Dining",
         )
         self.assertEqual(
             self.connection.execute(

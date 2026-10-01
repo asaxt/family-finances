@@ -9,8 +9,9 @@ from analytics import CATEGORY_RULE_JOIN, EFFECTIVE_CATEGORY_SQL
 from category_matching import conflict_sql
 from llm_evaluation import (
     classify_batch, dismiss_ai_reviews, existing_category_examples,
-    normalized_description, transfer_matches, validate_prediction,
+    normalized_description, transfer_matches, validate_prediction, create_recurring_category_rules,
 )
+from rule_review import RuleConflict
 
 SETTING = 'local_category_review_v1'
 MODEL = 'qwen3.8:27b'
@@ -133,11 +134,13 @@ def review_batch(result, groups, examples):
     result['uncertain'] += uncertain
 
 
-def decide(connection, result, transaction_ids, action):
+def decide(connection, result, transaction_ids, action, as_rules=False):
     current = {row['id']: row for row in source_rows(connection)}
     palette_unchanged = fingerprint(categories(connection)) == result['palette_fingerprint']
     counts = {'accepted': 0, 'kept': 0, 'stale': 0, 'needs_rule_change': 0}
     requested = set(transaction_ids)
+    proposed = []
+    result['proposed_rule_ids'] = []
     for item in result['suggestions']:
         if item['transaction_id'] not in requested or item['decision'] != 'pending':
             continue
@@ -149,6 +152,18 @@ def decide(connection, result, transaction_ids, action):
         elif (current[item['transaction_id']]['rule_conflict'] or
               (current[item['transaction_id']]['rule_source'] == 'user' and current[item['transaction_id']]['rule_category'] != item['proposed_category'])):
             item['decision'] = 'needs_rule_change'
+        elif as_rules:
+            row = current[item['transaction_id']]
+            if not row['description'].strip():
+                item['decision'] = 'needs_rule_change'
+            else:
+                proposed.append({
+                    'account_id': row['account_id'], 'description': row['description'],
+                    'status': 'categorized', 'category': item['proposed_category'],
+                    'confidence': item['confidence'], 'transaction_ids': [row['id']],
+                })
+                item['decision'] = 'accepted'
+                item['applied_as'] = 'rule'
         else:
             connection.execute(
                 "UPDATE transactions SET category_override = ?, category_override_source = 'model' WHERE id = ?",
@@ -157,6 +172,17 @@ def decide(connection, result, transaction_ids, action):
             dismiss_ai_reviews(connection, [item['transaction_id']])
             item['decision'] = 'accepted'
         counts[item['decision']] += 1
+    choices = defaultdict(set)
+    for item in proposed:
+        choices[(item['account_id'], normalized_description(item['description']))].add(item['category'])
+    if any(len(labels) > 1 for labels in choices.values()):
+        raise RuleConflict('Selected suggestions disagree for the same description. Review them separately or apply individual categories.')
+    if proposed:
+        create_recurring_category_rules(connection, {'details': proposed})
+        result['proposed_rule_ids'] = sorted({connection.execute(
+            "SELECT id FROM merchant_rules WHERE account_id = ? AND match_type = 'description' AND match_value = ? COLLATE NOCASE",
+            (item['account_id'], item['description'].strip()),
+        ).fetchone()[0] for item in proposed})
     result['last_decision'] = counts
     save(connection, result)
     return counts

@@ -16,7 +16,17 @@
     <table><thead><tr><th>Date</th><th>Transaction</th><th>Before</th><th>After</th></tr></thead><tbody>{% for row in impact.examples %}<tr><td>{{ row.date }}</td><td>{{ row.description }}</td><td>{{ row.before }}</td><td>{{ row.after }}</td></tr>{% endfor %}</tbody></table>
     {% if impact.count > impact.examples|length %}<p>Showing the first {{ impact.examples|length }} changes. The total includes all affected transactions.</p>{% endif %}
   </details>{% endif %}{% endfor %}
+  {% if preview.manual_impacts and preview.manual_impacts.values()|selectattr('released')|list %}
+  <h3>Individual category choices</h3>
+  <p><strong>Warning:</strong> replacing individual choices removes their priority so these transactions follow the proposed rules. This can change past reports and affects matching transactions outside your current filters. It also includes older individual choices whose origin is unknown.</p>
+  {% for choice, impact in preview.manual_impacts.items() %}
+  {% if choice == 'replace' or preview.overlaps %}<details><summary>{{ ('Replace' if choice == 'replace' else 'Keep as fallback') if preview.overlaps else 'With individual choices replaced' }}: {{ impact.released }} individual {{ 'choice' if impact.released == 1 else 'choices' }} removed; {{ impact.count }} {{ 'category' if impact.count == 1 else 'categories' }} would change</summary>
+    <table><thead><tr><th>Date</th><th>Transaction</th><th>Before</th><th>After</th></tr></thead><tbody>{% for row in impact.examples %}<tr><td>{{ row.date }}</td><td>{{ row.description }}</td><td>{{ row.before }}</td><td>{{ row.after }}</td></tr>{% endfor %}</tbody></table>
+    {% if impact.count > impact.examples|length %}<p>Showing the first {{ impact.examples|length }} changes.</p>{% endif %}
+  </details>{% endif %}{% endfor %}
+  {% endif %}
   <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% if preview.manual_impacts and preview.manual_impacts.values()|selectattr('released')|list %}<label class="check-label"><input type="checkbox" name="replace_manual"> Replace matching individual category choices with these rules. I understand this can change past reports.</label>{% endif %}
     <button class="button primary" name="choice" value="replace">{{ 'Replace old rules' if preview.overlaps else 'Apply reviewed changes' }}</button>
     {% if preview.overlaps %}<button class="button secondary" name="choice" value="fallback">Keep old rules as fallback</button>{% endif %}
     <button class="button secondary" name="choice" value="cancel">Cancel</button>
