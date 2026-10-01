@@ -55,16 +55,15 @@ remain lower priority than user rules and individual choices. Conflicting guesse
 unresolved groups, and transaction-specific transfer evidence are not generalized
 into new rules. An interrupted run keeps rules from its completed groups.
 
-Existing-category review remains suggestion-only until you accept a proposal.
-Acceptance defaults to a reusable rule with a before/after preview; an individual
-category option remains available. Rule previews preserve manual choices by
-default. The optional **Replace matching individual category choices** checkbox
-shows a warning and affected counts before releasing those choices to follow the
-rule. Use **Prefer this rule…** to do this for a rule already saved. Older choices
-with unknown origin are protected in the same way; their origin is not guessed.
+Existing-category review saves supported AI rules automatically as each description
+finishes processing; there is no acceptance step. Its results show saved rules and
+skipped groups. User rules and individual choices retain their priority. Rule previews
+still offer an optional **Replace matching individual category choices** checkbox
+with a warning and affected counts. Use **Prefer this rule…** to do this for a saved
+rule. Older choices with unknown origin remain protected.
 
-Use **Edit description** on a transaction to add your own label. It appears in the
-Transactions list and can be searched alongside the original bank text. Clear it
+Use the pencil icon on a transaction to edit it, including adding your own description.
+It appears in the Transactions list and can be searched alongside the original bank text. Clear it
 to restore the original label. The original merchant and description remain
 available, and bank refreshes preserve your label. This edits only that transaction;
 it does not change categories, remembered rules, or merchant-based reports.
@@ -179,17 +178,15 @@ clears the conversation. The existing local AI switch also disables chat.
 ### Review existing categories with local AI
 
 After adding more specific category labels, open **Transactions → AI category review**
-and choose **Review existing categories**. The scan compares all posted, categorized
+and choose **Update categories with AI**. The scan compares all posted, categorized
 transactions with the current labels, including manual choices and excluded records.
-It saves proposals in the encrypted vault without changing transaction categories.
-
-Compare the current and proposed categories and the model's reason. Choose **Accept**
-or **Keep current**, individually or using the selection checkboxes. Reusable rules
-are the default and show their effect on matching history before you confirm.
-Choose **Individual categories only** to limit an acceptance to the selected records.
-Suggestions are skipped if the transaction, matching rule, or label definitions have
-changed since the scan. Resolve pending suggestions before starting another review.
-The read-only development mirror does not permit scans or approval writes.
+It automatically saves reusable exact-description rules for the same account and
+shows the results as it runs. You can edit saved rules in Category Rules or use the
+pencil icon on a transaction. Manual category choices and user rules retain their
+priority. Uncertain, conflicting, transfer-specific, or stale results are skipped.
+An interrupted run keeps rules from completed descriptions; it does not require
+accepting or dismissing suggestions before another run.
+The read-only development mirror does not permit scans or data edits.
 
 
 ## Lifetime planning (development preview)

@@ -232,7 +232,7 @@ category. Return only the structured result and exactly one result for every id.
             "Otherwise return current_category if it is still allowed, or an empty category. "
             "Do not change a category merely because another label is more specific. "
             "A correct existing category is a valid outcome. Explain why a proposed label fits better. "
-            "These are suggestions for human approval; no category will be applied automatically.",
+            "Supported categories become reusable rules automatically. Do not infer a category without sufficient evidence.",
         )
         system_prompt = system_prompt.replace(
             "Use confidence 1 for uncertainty instead of abstaining. Reserve confidence 0",

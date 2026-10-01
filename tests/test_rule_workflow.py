@@ -261,12 +261,12 @@ class ReplaceableAIReviewTests(unittest.TestCase):
     setUp = test_category_review.CategoryReviewTests.setUp
     tearDown = test_category_review.CategoryReviewTests.tearDown
     scan = test_category_review.CategoryReviewTests.scan
-    def test_user_rule_blocks_acceptance_and_later_rule_supersedes_accepted_ai(self):
-        result=self.scan()
-        import category_review
-        self.assertEqual(category_review.decide(self.connection,result,['sample-2'],'accept')['accepted'],1)
-        self.connection.execute("INSERT INTO merchant_rules(account_id,match_type,match_value,category) VALUES ('sample-account','description','SAMPLE CAFE','EXAMPLE BROAD')")
-        rows={row['id']:row for row in transaction_list(self.connection,include_excluded=True)}
-        self.assertEqual(rows['sample-2']['effective_category'],'EXAMPLE BROAD')
-        result=self.scan()
-        self.assertEqual(category_review.decide(self.connection,result,['sample-2'],'accept')['needs_rule_change'],1)
+    def test_user_rule_supersedes_automatic_ai_and_is_preserved_on_rerun(self):
+        result = self.scan()
+        self.assertEqual(result['rules_saved'], 1)
+        self.connection.execute("UPDATE merchant_rules SET category='EXAMPLE BROAD', source='user'")
+        rows = {row['id']: row for row in transaction_list(self.connection, include_excluded=True)}
+        self.assertEqual(rows['sample-2']['effective_category'], 'EXAMPLE BROAD')
+        result = self.scan()
+        self.assertEqual(result['rules_saved'], 0)
+        self.assertEqual({item['decision'] for item in result['suggestions']}, {'user_rule'})

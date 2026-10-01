@@ -56,41 +56,35 @@ class CategoryReviewTests(unittest.TestCase):
         result, groups, examples = review.prepare(self.connection)
         with patch('category_review.classify_batch', side_effect=prediction):
             review.review_batch(result, groups, examples)
+        review.apply_rules(self.connection, result, [])
         result['status'] = 'completed'
         review.save(self.connection, result)
         return result
 
-    def test_scan_only_saves_suggestions_and_includes_manual_categories(self):
+    def test_scan_saves_rules_automatically_and_preserves_individual_choices(self):
         before = finances(self.connection)
         result = self.scan()
-        self.assertEqual(finances(self.connection), before)
         self.assertEqual((result['considered'], result['eligible'], result['processed']), (4, 2, 2))
         self.assertEqual((result['pending_skipped'], result['uncategorized_skipped']), (1, 1))
-        self.assertEqual({item['transaction_id'] for item in result['suggestions']}, {'sample-1', 'sample-2'})
+        self.assertEqual(result['rules_saved'], 1)
+        self.assertEqual({item['decision'] for item in result['suggestions']}, {'rule_saved'})
         self.assertEqual(review.load(self.connection), result)
+        self.assertEqual(finances(self.connection)['transactions'], before['transactions'])
+        self.assertEqual(self.connection.execute('SELECT source, category FROM merchant_rules').fetchone()[:], ('model', 'EXAMPLE SPECIFIC'))
+        review.apply_rules(self.connection, result, [])
+        self.assertEqual(result['rules_saved'], 1)
 
-    def test_accept_changes_only_selected_transaction_and_is_idempotent(self):
-        result = self.scan()
-        before = finances(self.connection)
-        self.assertEqual(review.decide(self.connection, result, ['sample-1'], 'accept')['accepted'], 1)
-        rows = {row['id']: row for row in self.connection.execute('SELECT * FROM transactions')}
-        self.assertEqual(rows['sample-1']['category_override'], 'EXAMPLE SPECIFIC')
-        self.assertEqual(rows['sample-1']['category_override_source'], 'model')
-        self.assertEqual(rows['sample-1']['excluded'], 1)
-        self.assertIsNone(rows['sample-2']['category_override'])
-        for table in ('category_rules', 'merchant_rules', 'accounts'):
-            self.assertEqual(finances(self.connection)[table], before[table])
-        self.assertEqual(review.decide(self.connection, result, ['sample-1'], 'accept')['accepted'], 0)
-        self.assertEqual(review.decide(self.connection, result, ['sample-2'], 'keep')['kept'], 1)
-        self.assertIsNone(self.connection.execute("SELECT category_override FROM transactions WHERE id = 'sample-2'").fetchone()[0])
-
-    def test_manual_edit_and_label_changes_invalidate_suggestions(self):
-        result = self.scan()
-        self.connection.execute("UPDATE transactions SET excluded = 0 WHERE id = 'sample-1'")
-        self.assertEqual(review.decide(self.connection, result, ['sample-1'], 'accept')['stale'], 1)
-        self.connection.execute("DELETE FROM category_rules WHERE name = 'EXAMPLE SPECIFIC'")
-        self.assertEqual(review.decide(self.connection, result, ['sample-2'], 'accept')['stale'], 1)
-        self.assertEqual(self.connection.execute("SELECT category_override FROM transactions WHERE id = 'sample-1'").fetchone()[0], 'EXAMPLE BROAD')
+    def test_manual_edit_or_label_change_during_scan_prevents_rule(self):
+        for mutation in ("UPDATE transactions SET excluded = 0 WHERE id = 'sample-1'",
+                         "DELETE FROM category_rules WHERE name = 'EXAMPLE SPECIFIC'"):
+            with self.subTest(mutation=mutation):
+                result, groups, examples = review.prepare(self.connection)
+                with patch('category_review.classify_batch', side_effect=prediction):
+                    review.review_batch(result, groups, examples)
+                self.connection.execute(mutation)
+                review.apply_rules(self.connection, result, [])
+                self.assertEqual({item['decision'] for item in result['suggestions']}, {'stale'})
+                self.assertEqual(result['rules_saved'], 0)
 
     def test_effective_rule_categories_and_distinct_current_labels(self):
         self.connection.execute("INSERT INTO merchant_rules (account_id, match_type, match_value, category) "
@@ -100,21 +94,38 @@ class CategoryReviewTests(unittest.TestCase):
         self.assertEqual(result['eligible'], 3)
         self.assertIn('EXAMPLE SPECIFIC', examples)
 
-    def test_matching_rule_change_invalidates_suggestion(self):
+    def test_user_rules_are_retained(self):
+        self.connection.execute("INSERT INTO merchant_rules (account_id, match_type, match_value, category) VALUES ('sample-account', 'description', 'SAMPLE CAFE', 'EXAMPLE BROAD')")
         result = self.scan()
-        self.connection.execute("INSERT INTO merchant_rules (account_id, match_type, match_value, category) "
-                                "VALUES ('sample-account', 'description', 'SAMPLE CAFE', 'EXAMPLE SPECIFIC')")
-        self.assertEqual(review.decide(self.connection, result, ['sample-2'], 'accept')['stale'], 1)
+        self.assertEqual({item['decision'] for item in result['suggestions']}, {'user_rule'})
+        self.assertEqual(result['rules_saved'], 0)
 
-    def test_unchanged_and_uncertain_are_not_proposed(self):
+    def test_matching_groups_wait_and_disagreeing_categories_do_not_create_rule(self):
+        self.connection.execute("UPDATE transactions SET category='EXAMPLE SPECIFIC' WHERE id='sample-2'")
         result, groups, examples = review.prepare(self.connection)
-        for category, confidence, field in [('EXAMPLE BROAD', 2, 'unchanged'), ('', 0, 'uncertain')]:
+        with patch('category_review.classify_batch', side_effect=prediction):
+            review.review_batch(result, groups[:1], examples)
+        review.apply_rules(self.connection, result, groups[1:])
+        self.assertEqual(result['rules_saved'], 0)
+        with patch('category_review.classify_batch', return_value=[{
+            'id': groups[1]['evaluation_id'], 'category': 'EXAMPLE BROAD', 'confidence': 2,
+        }]):
+            review.review_batch(result, groups[1:], examples)
+        review.apply_rules(self.connection, result, [])
+        self.assertEqual(result['rules_saved'], 0)
+        self.assertEqual({item['decision'] for item in result['suggestions']}, {'unsupported'})
+
+    def test_unchanged_category_becomes_rule_and_uncertain_has_no_rule(self):
+        for category, confidence, field, rule_count in [('EXAMPLE BROAD', 2, 'unchanged', 1), ('', 0, 'uncertain', 0)]:
+            self.connection.execute('DELETE FROM merchant_rules')
+            result, groups, examples = review.prepare(self.connection)
             with patch('category_review.classify_batch', return_value=[{
                 'id': groups[0]['evaluation_id'], 'category': category, 'confidence': confidence, 'reason': ''
             }]):
                 review.review_batch(result, groups, examples)
+            review.apply_rules(self.connection, result, [])
             self.assertEqual(result[field], 2)
-            self.assertEqual(result['suggestions'], [])
+            self.assertEqual(result['rules_saved'], rule_count)
 
     def test_unknown_model_category_cannot_be_saved(self):
         result, groups, examples = review.prepare(self.connection)
@@ -138,7 +149,7 @@ class CategoryReviewTests(unittest.TestCase):
         request = factory.return_value.open.call_args.args[0]
         self.assertEqual(request.full_url, 'http://127.0.0.1:11434/api/chat')
         payload = json.loads(request.data)
-        self.assertIn('no category will be applied automatically', payload['messages'][0]['content'])
+        self.assertIn('reusable rules automatically', payload['messages'][0]['content'])
         self.assertNotIn('broad coverage is more useful', payload['messages'][0]['content'])
         self.assertEqual(json.loads(payload['messages'][1]['content'])['transactions'][0]['current_category'], 'EXAMPLE BROAD')
         self.assertEqual(factory.call_args.args[0].proxies, {})
@@ -171,43 +182,34 @@ class CategoryReviewRouteTests(unittest.TestCase):
              patch('category_review.classify_batch', side_effect=model):
             return self.client.post('/api/local-ai/category-review/start', headers={'X-CSRF-Token': token})
 
-    def test_start_report_and_explicit_decisions(self):
+    def test_start_saves_rules_without_acceptance_and_can_run_again(self):
         token = self.ready()
-        with self.application.db() as connection:
-            before = finances(connection)
+        self.assertIn(b'id="start-category-review"', self.client.get('/local-ai/category-review').data)
         self.assertEqual(self.start(token).status_code, 200)
         page = self.client.get('/local-ai/category-review')
         self.assertIn(b'EXAMPLE SPECIFIC', page.data)
-        self.assertIn(b'Current category', page.data)
-        self.assertIn(b'Keep current', page.data)
+        self.assertIn(b'Rule saved', page.data)
+        self.assertNotIn(b'>Accept', page.data)
+        self.assertNotIn(b'apply_mode', page.data)
         with self.application.db() as connection:
-            self.assertEqual(finances(connection), before)
-            result = review.load(connection)
-        self.assertEqual(self.start(token).status_code, 409)
-        self.assertEqual(self.client.post('/api/local-ai/category-review/decide', data={
-            'csrf_token': token, 'review_id': 'old-review', 'action': 'accept',
-            'transaction_ids': ['sample-1'],
-        }).status_code, 409)
-        response = self.client.post('/api/local-ai/category-review/decide', data={
-            'csrf_token': token, 'review_id': result['id'], 'action': 'accept',
-            'transaction_ids': ['sample-1'],
-        })
-        self.assertEqual(response.status_code, 303)
+            self.assertEqual(review.load(connection)['rules_saved'], 1)
+            self.assertEqual(connection.execute('SELECT source FROM merchant_rules').fetchone()[0], 'model')
+        self.assertEqual(self.start(token).status_code, 200)
+
+    def test_old_pending_report_does_not_block_new_run_or_apply_on_read(self):
+        token = self.ready()
         with self.application.db() as connection:
-            self.assertEqual(finances(connection), before)
-            self.assertEqual(review.load(connection)['suggestions'][0]['decision'], 'pending')
-        page = self.client.get(response.location)
-        self.assertIn(b'Replace matching individual category choices', page.data)
-        self.assertEqual(self.client.post(response.location, data={
-            'csrf_token': token, 'choice': 'replace', 'replace_manual': 'on',
-        }).status_code, 302)
+            result, groups, examples = review.prepare(connection)
+            with patch('category_review.classify_batch', side_effect=prediction):
+                review.review_batch(result, groups, examples)
+            result.pop('automatic_rules')
+            result['status'] = 'completed'
+            review.save(connection, result)
+        page = self.client.get('/local-ai/category-review')
+        self.assertIn(b'previous suggestion-only workflow', page.data)
         with self.application.db() as connection:
-            self.assertIsNone(connection.execute("SELECT category_override FROM transactions WHERE id = 'sample-1'").fetchone()[0])
-            self.assertEqual(connection.execute("SELECT source, category FROM merchant_rules").fetchone()[:], ('model', 'EXAMPLE SPECIFIC'))
-        self.assertEqual(self.client.post('/api/local-ai/category-review/decide', data={
-            'csrf_token': token, 'review_id': result['id'], 'action': 'keep',
-            'transaction_ids': ['sample-2'],
-        }).status_code, 302)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM merchant_rules').fetchone()[0], 0)
+        self.assertEqual(self.start(token).status_code, 200)
 
     def test_interruption_keeps_categories_unchanged_and_releases_lock(self):
         token = self.ready()
@@ -219,7 +221,7 @@ class CategoryReviewRouteTests(unittest.TestCase):
             self.assertEqual(review.load(connection)['status'], 'interrupted')
         self.assertFalse(self.application.OLLAMA_EVALUATION_LOCK.locked())
 
-    def test_partial_scan_saves_completed_suggestions_without_mutation(self):
+    def test_partial_scan_keeps_completed_rules(self):
         token = self.ready()
         with self.application.db() as connection:
             for index in range(6):
@@ -242,7 +244,9 @@ class CategoryReviewRouteTests(unittest.TestCase):
             self.assertGreater(result['processed'], 0)
             self.assertLess(result['processed'], result['eligible'])
             self.assertEqual(len(result['suggestions']), result['processed'])
-            self.assertEqual(finances(connection), before)
+            self.assertEqual(finances(connection)['transactions'], before['transactions'])
+            self.assertEqual(result['rules_saved'], 5)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM merchant_rules').fetchone()[0], 5)
 
     def test_concurrent_scan_is_rejected_without_replacing_results(self):
         token = self.ready()
@@ -253,6 +257,21 @@ class CategoryReviewRouteTests(unittest.TestCase):
                 self.assertIsNone(review.load(connection))
         finally:
             self.application.OLLAMA_EVALUATION_LOCK.release()
+
+    def test_failed_batch_rolls_back_rules_and_report_together(self):
+        token = self.ready()
+        apply = review.apply_rules
+        def fail_after_rule(*args):
+            apply(*args)
+            raise RuntimeError('Fictional save failure')
+        with patch('category_review.apply_rules', side_effect=fail_after_rule):
+            self.start(token)
+        with self.application.db() as connection:
+            result = review.load(connection)
+            self.assertEqual(result['status'], 'interrupted')
+            self.assertEqual(result['rules_saved'], 0)
+            self.assertEqual(result['processed'], 0)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM merchant_rules').fetchone()[0], 0)
 
     def test_local_ai_disabled_and_csrf_required(self):
         token = self.ready()
