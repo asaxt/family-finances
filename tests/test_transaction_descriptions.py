@@ -41,10 +41,62 @@ class TransactionDescriptionTests(unittest.TestCase):
         page = self.client.get(response.location)
         self.assertIn(b'<div class="transaction-name">EXAMPLE PERSONAL LABEL</div>', page.data)
         self.assertIn(b'Original description: SAMPLE CAFE ALPHA', page.data)
-        self.assertIn(b'Edit description', page.data)
+        self.assertIn(b'aria-label="Edit transaction"', page.data)
+        self.assertNotIn(b'transaction-description-dialog', page.data)
         self.assertEqual(self.save('   ').status_code, 302)
         with self.application.db() as connection:
             self.assertEqual(dict(connection.execute("SELECT * FROM transactions WHERE id = 'sample-1'").fetchone()), before)
+
+    def test_unified_editor_description_only_preserves_categories_and_rules(self):
+        self.ready()
+        with self.application.db() as connection:
+            before = dict(connection.execute("SELECT * FROM transactions WHERE id='sample-1'").fetchone())
+            rules = [tuple(row) for row in connection.execute('SELECT * FROM merchant_rules')]
+        response = self.client.post('/api/transaction/sample-1', data={
+            'csrf_token': self.token, 'category_edited': '', 'custom_description': 'EXAMPLE EDITOR LABEL',
+            'category_choice': 'EXAMPLE CATEGORY',
+        })
+        self.assertEqual(response.status_code, 302)
+        with self.application.db() as connection:
+            self.assertEqual(dict(connection.execute("SELECT * FROM transactions WHERE id='sample-1'").fetchone()),
+                             {**before, 'custom_description': 'EXAMPLE EDITOR LABEL', 'excluded': 0})
+            self.assertEqual([tuple(row) for row in connection.execute('SELECT * FROM merchant_rules')], rules)
+        for value in ('X' * 256, 'EXAMPLE\nLABEL'):
+            response = self.client.post('/api/transaction/sample-1', data={
+                'csrf_token': self.token, 'category_edited': 'on', 'custom_description': value,
+                'category_choice': 'Income', 'individual_only': 'on',
+            })
+            self.assertEqual(response.status_code, 400)
+
+    def test_unified_editor_saves_description_with_category_and_can_clear_it(self):
+        self.ready()
+        for description in ('EXAMPLE COMBINED LABEL', ''):
+            response = self.client.post('/api/transaction/sample-1', data={
+                'csrf_token': self.token, 'category_edited': 'on', 'custom_description': description,
+                'category_choice': 'Income', 'individual_only': 'on',
+            })
+            self.assertEqual(response.status_code, 302)
+            with self.application.db() as connection:
+                row = connection.execute("SELECT custom_description, category_override, category_override_source FROM transactions WHERE id='sample-1'").fetchone()
+                self.assertEqual(tuple(row), (description or None, 'Income', 'user'))
+
+    def test_rule_preview_defers_combined_description_edit_until_confirmation(self):
+        self.ready()
+        response = self.client.post('/api/transaction/sample-1', data={
+            'csrf_token': self.token, 'category_edited': 'on', 'custom_description': 'EXAMPLE REVIEWED LABEL',
+            'category_choice': 'Income', 'remember_match': 'on',
+            'rule_match_type': 'description', 'match_value': 'SAMPLE CAFE ALPHA',
+        })
+        self.assertEqual(response.status_code, 303)
+        with self.application.db() as connection:
+            self.assertIsNone(connection.execute("SELECT custom_description FROM transactions WHERE id='sample-1'").fetchone()[0])
+        self.assertEqual(self.client.post(response.location, data={
+            'csrf_token': self.token, 'choice': 'replace',
+        }).status_code, 302)
+        with self.application.db() as connection:
+            row = next(row for row in transaction_list(connection, include_excluded=True) if row['id'] == 'sample-1')
+            self.assertEqual(row['custom_description'], 'EXAMPLE REVIEWED LABEL')
+            self.assertEqual(row['effective_category'], 'Income')
 
     def test_search_original_and_custom_text_and_sort_displayed_names(self):
         self.ready()

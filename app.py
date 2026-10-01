@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 from contextlib import contextmanager
 from werkzeug.datastructures import MultiDict
 import rule_review
@@ -551,8 +552,7 @@ def rule_preview(token):
         if choice not in {'replace', 'fallback'}:
             abort(400)
         allowed = {'update_transaction', 'bulk_update_transactions', 'update_category_rule',
-                   'bulk_update_category_rules', 'delete_category_rule', 'resolve_existing_rule',
-                   'decide_category_review'}
+                   'bulk_update_category_rules', 'delete_category_rule', 'resolve_existing_rule'}
         if preview['endpoint'] not in allowed:
             abort(400)
         replace_manual = request.form.get('replace_manual') == 'on'
@@ -2761,6 +2761,18 @@ def update_transaction_description(transaction_id):
 
 @app.post("/api/transaction/<transaction_id>")
 def update_transaction(transaction_id):
+    description = request.form.get('custom_description')
+    if description is not None:
+        description = description.strip()
+        if len(description) > 255 or any(ord(char) < 32 or ord(char) == 127 for char in description):
+            return jsonify(error="Use a single-line description of up to 255 characters."), 400
+    if 'category_edited' in request.form and request.form['category_edited'] != 'on':
+        with db() as connection:
+            if description is not None:
+                connection.execute("UPDATE transactions SET custom_description = ? WHERE id = ?", (description or None, transaction_id))
+            connection.execute("UPDATE transactions SET excluded = ? WHERE id = ?",
+                               (int(request.form.get('excluded') == 'on'), transaction_id))
+        return transaction_cleanup_redirect()
     category_flow_type = request.form.get("category_flow_type", "")
     edit_treatment = request.form.get("edit_category_treatment") == "on"
     new_category = request.form.get("category_choice") == "__new__"
@@ -2827,6 +2839,8 @@ def update_transaction(transaction_id):
                 transaction_id,
             ),
         )
+        if description is not None:
+            connection.execute("UPDATE transactions SET custom_description = ? WHERE id = ?", (description or None, transaction_id))
         dismiss_ai_reviews(connection, [transaction_id])
     return transaction_cleanup_redirect()
 
@@ -2996,13 +3010,16 @@ def transaction_cleanup_redirect():
 def run_category_review(result, groups, examples):
     try:
         for start in range(0, len(groups), category_review.BATCH_SIZE):
-            category_review.review_batch(result, groups[start:start + category_review.BATCH_SIZE], examples)
+            batch_result = deepcopy(result)
+            category_review.review_batch(batch_result, groups[start:start + category_review.BATCH_SIZE], examples)
             with db() as connection:
-                category_review.save(connection, result)
+                category_review.apply_rules(connection, batch_result, groups[start + category_review.BATCH_SIZE:])
+                category_review.save(connection, batch_result)
+            result = batch_result
         result["status"] = "completed"
     except Exception:
         result["status"] = "interrupted"
-        result["error"] = "The local review stopped early. Completed suggestions are saved; no categories were changed."
+        result["error"] = "The local review stopped early. Rules from completed groups are saved. Unfinished groups were not applied."
         app.logger.warning("Local category review interrupted.")
     finally:
         try:
@@ -3021,10 +3038,6 @@ def start_category_review():
         return jsonify(error="Another local categorization or review is running. Wait for it to finish."), 409
     try:
         with db() as connection:
-            previous = category_review.load(connection)
-            if previous and any(item["decision"] == "pending" for item in previous["suggestions"]):
-                OLLAMA_EVALUATION_LOCK.release()
-                return jsonify(error="Accept or keep the pending suggestions before starting another review."), 409
             result, groups, examples = category_review.prepare(connection)
             category_review.save(connection, result)
         threading.Thread(target=run_category_review, args=(result, groups, examples), daemon=True).start()
@@ -3043,33 +3056,12 @@ def category_review_report():
         result = category_review.load(connection)
         if result and result["status"] == "running" and not OLLAMA_EVALUATION_LOCK.locked():
             result["status"] = "interrupted"
-            result["error"] = "The review was interrupted. Completed suggestions are saved; no categories were changed."
+            result["error"] = "The review was interrupted. Rules from completed groups are saved. Unfinished groups were not applied."
             if not READ_ONLY_MIRROR:
                 category_review.save(connection, result)
     context = page_context("transactions")
-    pending = [item for item in result["suggestions"] if item["decision"] == "pending"] if result else []
-    context.update(result=result, pending=pending)
+    context.update(result=result, local_ai_enabled=local_ai_enabled())
     return render_template("category_review.html", **context)
-
-
-@app.post("/api/local-ai/category-review/decide")
-def decide_category_review():
-    action = request.form.get("action")
-    if action not in {"accept", "keep"}:
-        abort(400)
-    mode = request.form.get('apply_mode', 'rule')
-    if mode not in {'rule', 'individual'}:
-        abort(400)
-    with rule_edit_db() as connection:
-        result = category_review.load(connection)
-        if not result or request.form.get("review_id") != result["id"]:
-            return "This review has been replaced. Reload the category review page.", 409
-        if result["status"] == "running" and OLLAMA_EVALUATION_LOCK.locked():
-            return "Wait for the review to finish before making decisions.", 409
-        transaction_ids = request.form.getlist("transaction_ids")
-        category_review.decide(connection, result, transaction_ids, action, as_rules=mode == 'rule')
-        g.resolve_rule_ids = result.get('proposed_rule_ids', [])
-    return redirect(url_for("category_review_report"))
 
 
 @app.post("/api/local-ai/evaluation")

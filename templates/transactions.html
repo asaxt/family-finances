@@ -221,6 +221,8 @@
                 type="button"
                 data-id="{{ transaction.id }}"
                 data-name="{{ transaction.custom_description or transaction.merchant or transaction.description }}"
+                data-custom-description="{{ transaction.custom_description or '' }}"
+                aria-label="Edit transaction" title="Edit transaction"
                 data-category="{{ '' if transaction.effective_category == 'Uncategorized' else transaction.effective_category }}"
                 data-flow-type="{{ transaction.flow_type or '' }}"
                 data-recurring-rule="{{ 1 if transaction.merchant_rule_id and transaction.merchant_rule_source == "user" else 0 }}"
@@ -231,10 +233,7 @@
                 data-rule-all-accounts="{{ transaction.merchant_rule_applies_all_accounts or 0 }}"
                 data-description="{{ transaction.description }}"
                 data-excluded="{{ transaction.excluded }}"
-              >{{ "Change category" if transaction.ai_review else "Review" }}</button>
-              <button class="text-button description-button" type="button" {{ 'disabled' if read_only_mirror }}
-                data-id="{{ transaction.id }}" data-custom-description="{{ transaction.custom_description or '' }}"
-                data-original-description="{{ transaction.description }}">Edit description</button>
+              ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 3 5 5-12 12-6 1 1-6Z"/><path d="m14 5 5 5"/></svg></button>
               {% if transaction.ai_review %}<button class="text-button" type="submit" form="confirm-ai-form" formaction="{{ url_for('confirm_ai_review', transaction_id=transaction.id) }}">Keep category</button>{% endif %}
             </td>
           </tr>
@@ -265,7 +264,7 @@
 
 <dialog id="transaction-review-dialog" class="connection-dialog transaction-review-dialog">
   <div class="dialog-header">
-    <div><p class="eyebrow">Review transaction</p><h2 id="review-transaction-name">Transaction</h2></div>
+    <div><p class="eyebrow">Edit transaction</p><h2 id="review-transaction-name">Transaction</h2></div>
     <button class="dialog-close review-dialog-close" type="button" aria-label="Close">×</button>
   </div>
   <form id="transaction-review-form" class="review-form" method="post">
@@ -281,6 +280,10 @@
     <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
     <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
     <input type="hidden" name="return_ai_review" value="{{ '1' if ai_review else '' }}">
+    <input id="review-category-edited" type="hidden" name="category_edited" value="">
+    <p class="transaction-sub">Original description: <span id="description-original"></span></p>
+    <label>Your description<input id="custom-description" name="custom_description" maxlength="255" autocomplete="off" aria-describedby="description-help"></label>
+    <p id="description-help" class="transaction-sub">An optional label for this transaction. Leave blank to use the original. Rules continue to match the original description.</p>
     <label>Category
       <select id="review-category" name="category_choice">
         <option value="">Uncategorized</option>
@@ -310,71 +313,10 @@
     <button class="button primary" type="submit">Save changes</button>
   </form>
 </dialog>
-<dialog id="transaction-description-dialog" class="connection-dialog transaction-review-dialog">
-  <div class="dialog-header">
-    <div><p class="eyebrow">This transaction only</p><h2>Edit description</h2></div>
-    <button id="description-close" class="dialog-close" type="button" aria-label="Close description editor">×</button>
-  </div>
-  <form id="transaction-description-form" class="review-form" method="post">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <input type="hidden" name="account" value="{{ account_id or '' }}">
-    <input type="hidden" name="person" value="{{ connection_id or '' }}">
-    <input type="hidden" name="date_from" value="{{ date_from }}">
-    <input type="hidden" name="date_to" value="{{ date_to }}">
-    <input type="hidden" name="return_q" value="{{ search_query }}">
-    <input type="hidden" name="return_category" value="{{ selected_category or '' }}">
-    {% for category in excluded_categories %}<input type="hidden" name="return_excluded_category" value="{{ category }}">{% endfor %}
-    <input type="hidden" name="return_view" value="{{ transaction_view }}">
-    <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
-    <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
-    <input type="hidden" name="return_ai_review" value="{{ '1' if ai_review else '' }}">
-    <p class="transaction-sub">Original description: <span id="description-original"></span></p>
-    <label>Your description<input id="custom-description" name="custom_description" maxlength="255" autocomplete="off" aria-describedby="description-help"></label>
-    <p id="description-help" class="transaction-sub">Only changes this transaction’s label. Categories and rules stay the same. Leave blank to use the original.</p>
-    <p id="description-error" role="alert" hidden></p>
-    <button class="button primary" type="submit">Save description</button>
-  </form>
-</dialog>
 {% endblock %}
 
 {% block scripts %}
 <script>
-  const descriptionDialog = document.querySelector("#transaction-description-dialog");
-  const descriptionForm = document.querySelector("#transaction-description-form");
-  const descriptionInput = document.querySelector("#custom-description");
-  const descriptionError = document.querySelector("#description-error");
-  document.querySelectorAll(".description-button").forEach(button => {
-    button.addEventListener("click", () => {
-      descriptionForm.action = `/api/transaction/${encodeURIComponent(button.dataset.id)}/description`;
-      document.querySelector("#description-original").textContent = button.dataset.originalDescription;
-      descriptionInput.value = button.dataset.customDescription;
-      descriptionError.hidden = true;
-      descriptionDialog.showModal();
-      descriptionInput.focus();
-    });
-  });
-  document.querySelector("#description-close").addEventListener("click", () => descriptionDialog.close());
-  descriptionDialog.addEventListener("click", event => {
-    if (event.target === descriptionDialog) descriptionDialog.close();
-  });
-  descriptionForm.addEventListener("submit", async event => {
-    event.preventDefault();
-    const saveButton = descriptionForm.querySelector("button[type=submit]");
-    saveButton.disabled = true;
-    descriptionError.hidden = true;
-    try {
-      const response = await fetch(descriptionForm.action, {method: "POST", body: new FormData(descriptionForm)});
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || "Could not save the description. Reload the page and try again.");
-      }
-      window.location.assign(response.url);
-    } catch (error) {
-      descriptionError.textContent = error.message;
-      descriptionError.hidden = false;
-      saveButton.disabled = false;
-    }
-  });
   const reviewDialog = document.querySelector("#transaction-review-dialog");
   const reviewForm = document.querySelector("#transaction-review-form");
   const reviewCategory = document.querySelector("#review-category");
@@ -551,10 +493,22 @@
     bulkNewCategory.required = show;
   });
 
+  let originalCategoryFields = "";
+  function categoryFields() {
+    return JSON.stringify([...new FormData(reviewForm)].filter(([name]) =>
+      ["category_choice", "new_category", "edit_category_treatment", "category_flow_type",
+       "merchant_rule_id", "remember_match", "apply_all_accounts", "rule_match_type",
+       "match_value", "individual_only"].includes(name)));
+  }
+  reviewForm.addEventListener("submit", () => {
+    document.querySelector("#review-category-edited").value = categoryFields() === originalCategoryFields ? "" : "on";
+  });
   document.querySelectorAll(".review-button").forEach(button => {
     button.addEventListener("click", () => {
       document.querySelector("#review-transaction-name").textContent = button.dataset.name;
       reviewForm.action = `/api/transaction/${encodeURIComponent(button.dataset.id)}`;
+      document.querySelector("#description-original").textContent = button.dataset.description;
+      document.querySelector("#custom-description").value = button.dataset.customDescription;
       reviewCategory.value = button.dataset.category;
       reviewNewCategory.value = "";
       reviewRememberMatch.checked = button.dataset.recurringRule === "1";
@@ -567,6 +521,7 @@
       showIndividualChoice();
       reviewExcluded.checked = button.dataset.excluded === "1";
       showReviewNewCategory();
+      originalCategoryFields = categoryFields();
       reviewDialog.showModal();
     });
   });

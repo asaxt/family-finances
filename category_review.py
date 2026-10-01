@@ -1,4 +1,4 @@
-"""Local, suggestion-only review of existing transaction categories."""
+"""Local reassessment that automatically saves reusable AI category rules."""
 import hashlib
 import json
 import uuid
@@ -8,10 +8,9 @@ from datetime import datetime, timezone
 from analytics import CATEGORY_RULE_JOIN, EFFECTIVE_CATEGORY_SQL
 from category_matching import conflict_sql
 from llm_evaluation import (
-    classify_batch, dismiss_ai_reviews, existing_category_examples,
+    classify_batch, existing_category_examples,
     normalized_description, transfer_matches, validate_prediction, create_recurring_category_rules,
 )
-from rule_review import RuleConflict
 
 SETTING = 'local_category_review_v1'
 MODEL = 'qwen3.8:27b'
@@ -94,6 +93,7 @@ def prepare(connection):
         'categories': [row['name'] for row in palette],
         'considered': len(rows), 'eligible': sum(len(group['members']) for group in groups),
         'processed': 0, 'unchanged': 0, 'uncertain': 0, 'suggestions': [],
+        'automatic_rules': True, 'rules_saved': 0,
         'pending_skipped': len(rows) - len(posted),
         'uncategorized_skipped': sum(not row['current_category'] or row['current_category'].casefold() == 'uncategorized' for row in posted),
     }
@@ -116,17 +116,16 @@ def review_batch(result, groups, examples):
             uncertain += count
         elif prediction['category'].casefold() == group['current_category'].casefold():
             unchanged += count
-        else:
-            for row in group['members']:
-                suggestions.append({
-                    'transaction_id': row['id'], 'fingerprint': fingerprint(row),
-                    'date': row['transacted_at'], 'description': row['description'],
-                    'merchant': row['merchant'], 'account_name': row['account_name'],
-                    'excluded': bool(row['excluded']), 'current_category': row['current_category'],
-                    'proposed_category': prediction['category'],
-                    'confidence': prediction['confidence'],
-                    'reason': str(prediction.get('reason', ''))[:400], 'decision': 'pending',
-                })
+        for row in group['members']:
+            suggestions.append({
+                'transaction_id': row['id'], 'account_id': row['account_id'], 'fingerprint': fingerprint(row),
+                'date': row['transacted_at'], 'description': row['description'],
+                'merchant': row['merchant'], 'account_name': row['account_name'],
+                'excluded': bool(row['excluded']), 'current_category': row['current_category'],
+                'proposed_category': prediction['category'],
+                'confidence': prediction['confidence'],
+                'reason': str(prediction.get('reason', ''))[:400], 'decision': 'pending',
+            })
     # Add only fully validated batches, so interrupted runs retain accurate counts.
     result['suggestions'].extend(suggestions)
     result['processed'] += processed
@@ -134,55 +133,41 @@ def review_batch(result, groups, examples):
     result['uncertain'] += uncertain
 
 
-def decide(connection, result, transaction_ids, action, as_rules=False):
+def rule_key(item):
+    return item['account_id'], normalized_description(item['description'])
+
+
+def apply_rules(connection, result, remaining_groups):
+    """Save completed descriptions once, preserving manual choices and user rules."""
     current = {row['id']: row for row in source_rows(connection)}
-    palette_unchanged = fingerprint(categories(connection)) == result['palette_fingerprint']
-    counts = {'accepted': 0, 'kept': 0, 'stale': 0, 'needs_rule_change': 0}
-    requested = set(transaction_ids)
-    proposed = []
-    result['proposed_rule_ids'] = []
+    palette = categories(connection)
+    palette_unchanged = fingerprint(palette) == result['palette_fingerprint']
+    transfers = {row['name'].casefold() for row in palette if row['flow_type'] == 'transfer'} | {'transfer'}
+    remaining = {rule_key(group) for group in remaining_groups}
+    completed = defaultdict(list)
     for item in result['suggestions']:
-        if item['transaction_id'] not in requested or item['decision'] != 'pending':
-            continue
-        if action == 'keep':
-            item['decision'] = 'kept'
-        elif (not palette_unchanged or item['transaction_id'] not in current
-              or fingerprint(current[item['transaction_id']]) != item['fingerprint']):
-            item['decision'] = 'stale'
-        elif (current[item['transaction_id']]['rule_conflict'] or
-              (current[item['transaction_id']]['rule_source'] == 'user' and current[item['transaction_id']]['rule_category'] != item['proposed_category'])):
-            item['decision'] = 'needs_rule_change'
-        elif as_rules:
-            row = current[item['transaction_id']]
-            if not row['description'].strip():
-                item['decision'] = 'needs_rule_change'
-            else:
-                proposed.append({
-                    'account_id': row['account_id'], 'description': row['description'],
-                    'status': 'categorized', 'category': item['proposed_category'],
-                    'confidence': item['confidence'], 'transaction_ids': [row['id']],
-                })
-                item['decision'] = 'accepted'
-                item['applied_as'] = 'rule'
+        if item['decision'] == 'pending' and rule_key(item) not in remaining:
+            completed[rule_key(item)].append(item)
+    for items in completed.values():
+        labels = {item['proposed_category'] for item in items}
+        rows = [current.get(item['transaction_id']) for item in items]
+        if not palette_unchanged or any(
+            row is None or fingerprint(row) != item['fingerprint']
+            for item, row in zip(items, rows)
+        ):
+            decision = 'stale'
+        elif any(row['rule_conflict'] or row['rule_source'] == 'user' for row in rows):
+            decision = 'user_rule'
+        elif (len(labels) != 1 or not next(iter(labels))
+              or next(iter(labels)).casefold() in transfers or not items[0]['description'].strip()):
+            decision = 'unsupported'
         else:
-            connection.execute(
-                "UPDATE transactions SET category_override = ?, category_override_source = 'model' WHERE id = ?",
-                (item['proposed_category'], item['transaction_id']),
-            )
-            dismiss_ai_reviews(connection, [item['transaction_id']])
-            item['decision'] = 'accepted'
-        counts[item['decision']] += 1
-    choices = defaultdict(set)
-    for item in proposed:
-        choices[(item['account_id'], normalized_description(item['description']))].add(item['category'])
-    if any(len(labels) > 1 for labels in choices.values()):
-        raise RuleConflict('Selected suggestions disagree for the same description. Review them separately or apply individual categories.')
-    if proposed:
-        create_recurring_category_rules(connection, {'details': proposed})
-        result['proposed_rule_ids'] = sorted({connection.execute(
-            "SELECT id FROM merchant_rules WHERE account_id = ? AND match_type = 'description' AND match_value = ? COLLATE NOCASE",
-            (item['account_id'], item['description'].strip()),
-        ).fetchone()[0] for item in proposed})
-    result['last_decision'] = counts
-    save(connection, result)
-    return counts
+            details = [{
+                **item, 'status': 'categorized', 'category': item['proposed_category'],
+                'transaction_ids': [item['transaction_id']],
+            } for item in items]
+            result['rules_saved'] += create_recurring_category_rules(connection, {'details': details})
+            decision = 'rule_saved'
+        for item, row in zip(items, rows):
+            item['decision'] = decision
+            item['individual_preserved'] = bool(row and row['category_override'] and row['category_override_source'] != 'model')
