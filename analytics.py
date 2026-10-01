@@ -944,6 +944,8 @@ def transaction_list(
     spending_only=False,
     excluded_categories=None,
     sort="date_desc",
+    cash_flow_metric=None,
+    currency=None,
 ):
     conditions = []
     params = []
@@ -968,6 +970,22 @@ def transaction_list(
         conditions.append("a.spending_enabled = 1")
     if spending_only:
         conditions.append(f"({SPEND_SQL}) != 0")
+    if cash_flow_metric:
+        inflows = f"(({EFFECTIVE_CASH_FLOW_SQL}) = 'earned_income' AND t.amount < 0)"
+        spending = f"({EFFECTIVE_CASH_FLOW_SQL}) = 'spending'"
+        metrics = {
+            'income': inflows,
+            'spending': spending,
+            'net': f"({inflows} OR {spending})",
+            'transfers_in': f"(({EFFECTIVE_CASH_FLOW_SQL}) = 'transfer' AND t.amount < 0)",
+            'transfers_out': f"(({EFFECTIVE_CASH_FLOW_SQL}) = 'transfer' AND t.amount >= 0)",
+        }
+        if cash_flow_metric not in metrics:
+            raise ValueError('Unknown cash-flow metric.')
+        conditions.extend(["t.pending = 0", "t.excluded = 0", "a.cash_flow_role = 'cash_flow'", metrics[cash_flow_metric]])
+    if currency:
+        conditions.append('t.currency = ?')
+        params.append(currency)
     if category:
         conditions.append(f"{EFFECTIVE_CATEGORY_SQL} = ?")
         params.append(category)

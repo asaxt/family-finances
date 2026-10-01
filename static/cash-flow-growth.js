@@ -11,6 +11,13 @@
       {label:'Expense change',data:growth.points.map(point=>point.spending),borderColor:'#c25760',backgroundColor:'#c25760',borderDash:[6,3],metric:'spending'}
     ]},
     options:{responsive:true,maintainAspectRatio:false,spanGaps:false,
+      onClick:(event,elements,chart)=>{
+        const hit=chart.getElementsAtEventForMode(event,'nearest',{intersect:true},false)[0];
+        if(hit)window.location.assign(growth.points[hit.index].current.links[chart.data.datasets[hit.datasetIndex].metric]);
+      },
+      onHover:(event,elements,chart)=>{
+        chart.canvas.style.cursor=chart.getElementsAtEventForMode(event,'nearest',{intersect:true},false).length?'pointer':'default';
+      },
       interaction:{mode:'index',intersect:false},
       elements:{line:{borderWidth:2,tension:0},point:{radius:3,hitRadius:8}},
       scales:{x:{grid:{display:false},ticks:{maxTicksLimit:12}},y:{beginAtZero:true,title:{display:true,text:'Change (%)'},ticks:{callback:value=>`${value}%`},grid:{color:context=>context.tick.value===0?'#82978c':'#edf0ed'}}},
