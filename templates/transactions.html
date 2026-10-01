@@ -27,6 +27,7 @@
       <span class="pill">{{ profiles|length }} household member{{ "" if profiles|length == 1 else "s" }}</span>
     </div>
   </div>
+  {% if cash_flow_metric %}<p class="transaction-sub">Cash Flow: {{ cash_flow_metrics[cash_flow_metric] }} · Posted transactions in included accounts · Excluded transactions are omitted{% if currency %} · {{ currency }} only{% endif %}</p>{% elif currency %}<p class="transaction-sub">{{ currency }} transactions only</p>{% endif %}
   {% if table_filters_active %}<div class="table-filter-status"><span class="pill">Filters or custom sorting active</span><a class="text-link" href="{{ url_for('transactions') }}">Clear table filters</a></div>{% endif %}
 
   <form id="bulk-transaction-form" class="bulk-action-bar" method="post" action="/api/transactions/bulk">
@@ -40,6 +41,8 @@
     {% for category in excluded_categories %}<input type="hidden" name="return_excluded_category" value="{{ category }}">{% endfor %}
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
     <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
+    <input type="hidden" name="return_cash_flow_metric" value="{{ cash_flow_metric or '' }}">
+    <input type="hidden" name="return_currency" value="{{ currency or '' }}">
     <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
     <input type="hidden" name="return_ai_review" value="{{ '1' if ai_review else '' }}">
     <span><strong id="selected-count">0</strong> selected</span>
@@ -147,6 +150,8 @@
                   <option value="all" {{ "selected" if reporting_scope == "all" }}>All transactions</option>
                 </select>
               </label>
+              <label>Cash Flow metric<select name="cash_flow_metric"><option value="">All treatments</option>{% for value, label in cash_flow_metrics.items() %}<option value="{{ value }}" {{ 'selected' if cash_flow_metric == value }}>{{ label }}</option>{% endfor %}</select></label>
+              <label>Currency<select name="currency"><option value="">All currencies</option><option value="USD" {{ 'selected' if currency == 'USD' }}>USD</option></select></label>
               <button class="button compact" type="submit">Apply</button>
             </div>
           </details>
@@ -259,6 +264,8 @@
   {% for category in excluded_categories %}<input type="hidden" name="return_excluded_category" value="{{ category }}">{% endfor %}
   <input type="hidden" name="return_view" value="{{ transaction_view }}">
   <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
+  <input type="hidden" name="return_cash_flow_metric" value="{{ cash_flow_metric or '' }}">
+  <input type="hidden" name="return_currency" value="{{ currency or '' }}">
   <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
 </form>
 
@@ -278,6 +285,8 @@
     {% for category in excluded_categories %}<input type="hidden" name="return_excluded_category" value="{{ category }}">{% endfor %}
     <input type="hidden" name="return_view" value="{{ transaction_view }}">
     <input type="hidden" name="return_purpose" value="{{ reporting_scope }}">
+    <input type="hidden" name="return_cash_flow_metric" value="{{ cash_flow_metric or '' }}">
+    <input type="hidden" name="return_currency" value="{{ currency or '' }}">
     <input type="hidden" name="return_sort" value="{{ transaction_sort }}">
     <input type="hidden" name="return_ai_review" value="{{ '1' if ai_review else '' }}">
     <input id="review-category-edited" type="hidden" name="category_edited" value="">

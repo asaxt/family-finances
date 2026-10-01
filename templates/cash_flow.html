@@ -13,17 +13,17 @@
 <section class="metric-grid cash-flow-metrics">
   <article class="metric-card hero">
     <span class="metric-label">Total money in · {{ lookback_days }} days</span>
-    <div class="metric-value">{{ cash_flow.total_inflows|money }}</div>
+    <div class="metric-value"><a class="cash-flow-value-link" href="{{ cash_flow.links.income }}" aria-label="View money in transactions">{{ cash_flow.total_inflows|money }}</a></div>
     <span class="metric-note">Income, reimbursements, and other receipts</span>
   </article>
   <article class="metric-card">
     <span class="metric-label">Money out</span>
-    <div class="metric-value">{{ cash_flow.spending|money }}</div>
+    <div class="metric-value"><a class="cash-flow-value-link" href="{{ cash_flow.links.spending }}" aria-label="View money out transactions">{{ cash_flow.spending|money }}</a></div>
     <span class="metric-note">Included outgoing transactions for the same dates</span>
   </article>
   <article class="metric-card">
     <span class="metric-label">Net cash flow</span>
-    <div class="metric-value {{ 'down' if cash_flow.net >= 0 else 'up' }}">{{ cash_flow.net|money }}</div>
+    <div class="metric-value {{ 'down' if cash_flow.net >= 0 else 'up' }}"><a class="cash-flow-value-link" href="{{ cash_flow.links.net }}" aria-label="View net cash flow transactions">{{ cash_flow.net|money }}</a></div>
     <span class="metric-note">Income and other inflows minus spending</span>
   </article>
 </section>
@@ -39,14 +39,15 @@
     <button class="button secondary" type="submit">Update chart</button>
   </form>
   <p class="transaction-sub">Each point compares a {{ growth.window }}-month total with the same-length total ending {{ growth.comparison }} months earlier. Change = (current total ÷ earlier total − 1) × 100. This is total percentage change, not an annualized rate.</p>
-  {% if growth.available %}<div class="chart-large"><canvas id="cash-flow-growth-chart" role="img" aria-label="Monthly percentage change in income and total expenses. Exact values and comparison periods are in Calculation details below."></canvas></div>
+  <p class="transaction-sub">Click a point to see transactions for its current total. Calculation details links open either the current or earlier period.</p>
+  {% if growth.available %}<div class="chart-large"><canvas id="cash-flow-growth-chart" role="img" aria-label="Monthly percentage change in income and total expenses. Click a point for its current period transactions. The same links and earlier periods are in Calculation details below."></canvas></div>
   {% else %}<div class="empty">Not enough comparable history for these settings. Try a shorter total or comparison period, or add earlier history. Calculation details below explain the gaps.</div>{% endif %}
   <p class="transaction-sub">USD · Included cash-flow accounts · Income follows the saved income treatments; expenses include refunds. Transfers, pending and excluded transactions do not contribute. Missing months, unclassified transactions, other currencies, or a zero or negative earlier total leave gaps. Recorded months with no income or expenses count as zero. Account coverage can change as accounts are added or removed.</p>
   <details class="budget-transactions"><summary>Calculation details <span>Monthly totals, comparisons, and gaps</span></summary>
     <div class="table-wrap"><table><thead><tr><th>Month ending</th><th>Periods compared</th><th class="currency">Income<br>Current / Earlier</th><th class="currency">Income change</th><th class="currency">Expenses<br>Current / Earlier</th><th class="currency">Expense change</th><th>History</th></tr></thead><tbody>
     {% for point in growth.points %}<tr>
       <td>{{ point.month }}</td><td>{{ point.current.first }}–{{ point.current.last }}<br>vs. {{ point.prior.first }}–{{ point.prior.last }}</td>
-      {% for name in ['income','spending'] %}<td class="currency">{{ point.current[name]|money if point.current[name] is not none else '—' }} / {{ point.prior[name]|money if point.prior[name] is not none else '—' }}</td><td class="currency">{{ '%+.1f%%'|format(point[name]) if point[name] is not none else '—' }}</td>{% endfor %}
+      {% for name in ['income','spending'] %}<td class="currency">{% for period in [point.current, point.prior] %}{% if period[name] is not none %}<a class="text-link" href="{{ period.links[name] }}" aria-label="{{ 'Income' if name == 'income' else 'Expenses' }} transactions, {{ period.first }} through {{ period.last }}">{{ period[name]|money }}</a>{% else %}—{% endif %}{{ ' / ' if not loop.last }}{% endfor %}</td><td class="currency">{% if point[name] is not none %}<a class="text-link" href="{{ point.current.links[name] }}">{{ '%+.1f%%'|format(point[name]) }}</a>{% else %}—{% endif %}</td>{% endfor %}
       <td>{% if point.current.missing or point.prior.missing %}Missing months: {{ point.current.missing }} current / {{ point.prior.missing }} earlier. {% endif %}{% if point.current.unclassified or point.prior.unclassified %}Unclassified transactions in a compared period. {% endif %}{% if point.current.foreign or point.prior.foreign %}Other currencies in a compared period. {% endif %}{% if point.prior.income is not none and point.prior.income<=0 %}Earlier income is zero. {% endif %}{% if point.prior.spending is not none and point.prior.spending<=0 %}Earlier expenses are zero or negative. {% endif %}{% if point.income is not none and point.spending is not none %}Comparable recorded months{% endif %}</td>
     </tr>{% endfor %}
     </tbody></table></div>
@@ -55,15 +56,16 @@
 
 <section class="content-grid cash-flow-secondary">
   <article class="panel">
-    <div class="panel-header"><div><h2>Monthly cash flow</h2><p>Up to 24 months of available transaction history</p></div></div>
-    {% if cash_flow.months %}<div class="chart-large"><canvas id="cash-flow-chart"></canvas></div>{% else %}<div class="empty">Connect checking or savings accounts to build cash-flow history.</div>{% endif %}
+    <div class="panel-header"><div><h2>Monthly cash flow</h2><p>Up to 24 months of available transaction history · Click a bar or point for transactions</p></div></div>
+    {% if cash_flow.months %}<div class="chart-large"><canvas id="cash-flow-chart" role="img" aria-label="Monthly money in, money out, and net cash flow. Click a bar or point for transactions, or use Monthly details below."></canvas></div>{% else %}<div class="empty">Connect checking or savings accounts to build cash-flow history.</div>{% endif %}
+    {% if cash_flow.months %}<details class="budget-transactions"><summary>Monthly details <span>Open transactions for each total</span></summary><div class="table-wrap"><table><thead><tr><th>Month</th><th>Money in</th><th>Money out</th><th>Net</th></tr></thead><tbody>{% for point in cash_flow.months %}<tr><td>{{ point.month }}</td>{% for metric, value in [('income', point.total_inflows), ('spending', point.spending), ('net', point.net)] %}<td><a class="text-link" href="{{ point.links[metric] }}">{{ value|money }}</a></td>{% endfor %}</tr>{% endfor %}</tbody></table></div></details>{% endif %}
   </article>
   <article class="panel">
     <div class="panel-header"><div><h2>Movement summary</h2><p>Transfers remain visible but do not count as income or spending</p></div></div>
     <div class="insight-list">
       <div class="insight"><span class="insight-icon">%</span><span><strong>Savings rate</strong><br>{% if cash_flow.savings_rate is not none %}{{ "%.0f"|format(cash_flow.savings_rate) }}%{% else %}—{% endif %}</span></div>
-      <div class="insight"><span class="insight-icon">↓</span><span><strong>Transfers in</strong><br>{{ cash_flow.transfers_in|money }}</span></div>
-      <div class="insight"><span class="insight-icon">↑</span><span><strong>Transfers out</strong><br>{{ cash_flow.transfers_out|money }}</span></div>
+      <div class="insight"><span class="insight-icon">↓</span><span><strong>Transfers in</strong><br><a class="text-link" href="{{ cash_flow.links.transfers_in }}">{{ cash_flow.transfers_in|money }}</a></span></div>
+      <div class="insight"><span class="insight-icon">↑</span><span><strong>Transfers out</strong><br><a class="text-link" href="{{ cash_flow.links.transfers_out }}">{{ cash_flow.transfers_out|money }}</a></span></div>
     </div>
   </article>
 </section>
@@ -101,12 +103,20 @@
     data: {
       labels: cashFlowMonths.map(point => new Date(`${point.month}-02T12:00:00`).toLocaleDateString(undefined, {month: "short", year: "2-digit"})),
       datasets: [
-        {label: "Earned and other money in", data: cashFlowMonths.map(point => point.total_inflows / 100), backgroundColor: "#65a783"},
-        {label: "Money out", data: cashFlowMonths.map(point => point.spending / 100), backgroundColor: "#d86d73"},
-        {type: "line", label: "Net", data: cashFlowMonths.map(point => point.net / 100), borderColor: "#163f32", backgroundColor: "#163f32", tension: .25}
+        {metric: "income", label: "Earned and other money in", data: cashFlowMonths.map(point => point.total_inflows / 100), backgroundColor: "#65a783"},
+        {metric: "spending", label: "Money out", data: cashFlowMonths.map(point => point.spending / 100), backgroundColor: "#d86d73"},
+        {metric: "net", type: "line", label: "Net", pointHitRadius: 8, data: cashFlowMonths.map(point => point.net / 100), borderColor: "#163f32", backgroundColor: "#163f32", tension: .25}
       ]
     },
-    options: {responsive: true, maintainAspectRatio: false, interaction: {mode: "index", intersect: false}, scales: {x: {grid: {display: false}}, y: {border: {display: false}, grid: {color: "#edf0ed"}, ticks: {callback: cashFlowMoney}}}, plugins: {tooltip: {callbacks: {label: item => `${item.dataset.label}: ${cashFlowMoney(item.raw)}`}}}}
+    options: {responsive: true, maintainAspectRatio: false,
+      onClick: (event, elements, chart) => {
+        const hit = chart.getElementsAtEventForMode(event, 'nearest', {intersect: true}, false)[0];
+        if (hit) window.location.assign(cashFlowMonths[hit.index].links[chart.data.datasets[hit.datasetIndex].metric]);
+      },
+      onHover: (event, elements, chart) => {
+        chart.canvas.style.cursor = chart.getElementsAtEventForMode(event, 'nearest', {intersect: true}, false).length ? 'pointer' : 'default';
+      },
+      interaction: {mode: "index", intersect: false}, scales: {x: {grid: {display: false}}, y: {border: {display: false}, grid: {color: "#edf0ed"}, ticks: {callback: cashFlowMoney}}}, plugins: {tooltip: {callbacks: {label: item => `${item.dataset.label}: ${cashFlowMoney(item.raw)}`}}}}
   });
 </script>
 {% endif %}

@@ -1310,6 +1310,24 @@ def cash_flow():
             context["connection_id"],
             **growth,
         )
+    def links(first, last, currency=None):
+        return {metric: url_for('transactions', date_from=first, date_to=last,
+                                person=context['connection_id'], account=context['account_id'],
+                                purpose='cash_flow', cash_flow_metric=metric, currency=currency)
+                for metric in ('income', 'spending', 'net', 'transfers_in', 'transfers_out')}
+
+    def month_end(month):
+        year, number = map(int, month.split('-'))
+        return f'{month}-{calendar.monthrange(year, number)[1]:02d}'
+
+    summary = context['cash_flow']
+    summary['links'] = links(summary['date_from'], summary['date_to'])
+    for point in summary['months']:
+        point['links'] = links(point['month'] + '-01', min(month_end(point['month']), summary['date_to']))
+    for point in summary['growth']['points']:
+        for period in ('current', 'prior'):
+            values = point[period]
+            values['links'] = links(values['first'] + '-01', month_end(values['last']), 'USD')
     return render_template("cash_flow.html", **context)
 
 
@@ -1598,6 +1616,12 @@ def delete_category_rule(rule_id):
 @app.get("/transactions")
 def transactions():
     context = page_context("transactions")
+    cash_flow_metric = request.args.get('cash_flow_metric') or None
+    cash_flow_metrics = {'income': 'Money in', 'spending': 'Money out (including refunds)',
+                         'net': 'Net cash flow', 'transfers_in': 'Transfers in', 'transfers_out': 'Transfers out'}
+    currency = request.args.get('currency') or None
+    if (cash_flow_metric and cash_flow_metric not in cash_flow_metrics) or currency not in (None, 'USD'):
+        abort(400, 'Unknown cash-flow filter.')
     category = request.args.get("category") or None
     ai_review = request.args.get("ai_review") == "1"
     excluded_categories = list(
@@ -1670,6 +1694,8 @@ def transactions():
             reporting_scope=reporting_scope,
             excluded_categories=excluded_categories,
             sort=sort,
+            cash_flow_metric=cash_flow_metric,
+            currency=currency,
         )
         overlaps = statements.possible_overlaps(connection)
         reviews = load_ai_reviews(connection)
@@ -1720,6 +1746,9 @@ def transactions():
     context["flow_types"] = FLOW_TYPES
     context.update(
         ai_review=ai_review,
+        cash_flow_metric=cash_flow_metric,
+        cash_flow_metrics=cash_flow_metrics,
+        currency=currency,
         selected_category=category,
         search_query=query or "",
         transaction_view=transaction_view,
@@ -1730,6 +1759,8 @@ def transactions():
         transaction_sort=sort,
         table_filters_active=bool(
             ai_review
+            or cash_flow_metric
+            or currency
             or date_from
             or date_to
             or query
@@ -3003,6 +3034,8 @@ def transaction_cleanup_redirect():
             view=transaction_view if transaction_view != "active" else None,
             sort=request.form.get("return_sort") or None,
             ai_review="1" if request.form.get("return_ai_review") == "1" else None,
+            cash_flow_metric=request.form.get('return_cash_flow_metric') or None,
+            currency=request.form.get('return_currency') or None,
         )
     )
 
