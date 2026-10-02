@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}People · {{ app_name }}{% endblock %}
+{% block heading %}People profiles{% endblock %}
+{% block eyebrow %}Reusable planning details{% endblock %}
+{% block content %}
+<section class="panel"><h2>Details you can reuse in Plan</h2><p>Save a profile for each person. A birth date keeps their age current. Link the exact Savings owner to find their retirement balances, even if their profile has a different name. These details stay in your encrypted vault.</p><p>Plan currently supports Washington and Oregon. Leave other states blank. Editing a profile updates connected fields the next time you open Plan; manual planning assumptions stay unchanged.</p><a class="button secondary" href="/plan">Back to Plan</a></section>
+{% if read_only_mirror %}<p class="form-message development">Profiles mirror production and cannot be edited here.</p>{% endif %}
+{% if saved %}<p class="form-message" role="status">Profile saved.</p>{% endif %}
+<datalist id="savings-owners">{% for owner in savings_owners %}<option value="{{ owner }}">{% endfor %}</datalist>
+{% for person in people + ([{}] if not read_only_mirror else []) %}
+<section class="panel plan-section"><h2>{{ person.name or 'Add a person' }}</h2>
+<form class="person-form" action="/api/people" method="post" autocomplete="off">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="id" value="{{ person.id or '' }}"><input type="hidden" name="version" value="{{ person.version or '' }}">
+<fieldset class="plan-person" {{ 'disabled' if read_only_mirror }}><div class="plan-fields">
+<label class="plan-field"><span>Name</span><input name="name" value="{{ person.name or '' }}" maxlength="60" required></label>
+<label class="plan-field"><span>Birth date (optional)</span><input type="date" name="birth_date" value="{{ person.birth_date or '' }}" max="{{ today }}"><small>Used to calculate current age.</small></label>
+<label class="plan-field"><span>Savings owner (optional)</span><input name="savings_owner" list="savings-owners" value="{{ person.savings_owner or '' }}" maxlength="80"><small>Use the owner name shown in Savings. Shared accounts are not divided automatically.</small></label>
+<label class="plan-field"><span>Retirement age (optional)</span><input type="number" name="retirement_age" value="{{ person.get('retirement_age', '') }}" min="18" max="94" step="1"><small>Plan uses current age if already past this age.</small></label>
+{% for key, label in [('residence_state','State of residence'), ('employment_state','State of employment / physical work')] %}
+<label class="plan-field"><span>{{ label }} (optional)</span><select name="{{ key }}"><option value="">Not specified</option>{% for code, state in [('WA','Washington'),('OR','Oregon')] %}<option value="{{ code }}" {{ 'selected' if person.get(key) == code }}>{{ state }}</option>{% endfor %}</select></label>
+{% endfor %}
+<label class="plan-field"><span>Work physically performed in work state (%)</span><input type="number" name="work_state_percent" value="{{ person.get('work_state_percent', '') }}" min="0" max="100" step="1"><small>Optional; the remainder is performed in the residence state.</small></label>
+</div></fieldset>
+{% if not read_only_mirror %}<button class="button primary" type="submit">{{ 'Save changes' if person.id else 'Save person' }}</button>{% endif %}
+<p class="plan-note" role="status" data-save-status></p></form></section>
+{% endfor %}
+<script src="{{ url_for('static', filename='people.js') }}" defer></script>
+{% endblock %}
