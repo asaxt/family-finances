@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from werkzeug.datastructures import MultiDict
 import rule_review
 import budgeting
+import planning_profiles
 import io
 import base64
 import hashlib
@@ -1904,6 +1905,9 @@ def planning_page():
     )
     with db() as connection:
         context["planning_trend"] = planning_spending_trend(connection)
+        context['person_choices'] = planning_profiles.choices(connection, context['savings_accounts'])
+        references = planning_profiles.load(connection, planning_profiles.REFERENCES, None)
+    taxable = planning_profiles.balance([account for account in context['savings_accounts'] if account['classification'] == 'taxable'])
     context["plan_end_age"] = projections.END_AGE
     context["plan_withdrawal_updated"] = False
     saved = setting("household_plan")
@@ -1911,17 +1915,48 @@ def planning_page():
         context["household_plan"], context["plan_withdrawal_updated"] = projections.restore_saved_plan(json.loads(saved)) if saved else (None, False)
     except (ValueError, TypeError):
         context["household_plan"] = None
-    if context["household_plan"] is None:
+    fresh = context['household_plan'] is None
+    if fresh:
         context["household_plan"] = dict(
             people=[dict(name=f"Person {i + 1}", annual_income="", tax_advantaged_rate=0,
                 contribution_type="pre_tax", current_age="", retirement_age=67,
                 starting_pretax="", starting_roth="", residence_state="", employment_state="",
                 work_state_percent=100) for i in range(2)],
-            starting_taxable=context["classification_totals"]["taxable"] / 100 if context["plan_starting_assets"] is not None else "",
+            starting_taxable=taxable['value'],
             inflation_rate=2.5, growth_rate=5, tax_payments_in_spending=0,
             withdrawal_rate=4, withdrawal_start="first_retirement",
             filing_status="joint", mfs_allocation="")
+    try:
+        if references is not None:
+            planning_profiles.validate_references(references, context['person_choices'])
+    except projections.ProjectionError:
+        references = None
+    context['plan_references'] = planning_profiles.apply_defaults(context['household_plan'], context['person_choices'], taxable,
+                                                                 references if not fresh else None, fresh)
+    context['taxable_default'] = taxable
     return render_template("plan.html", **context)
+
+
+@app.get('/people')
+def people_page():
+    context = page_context('settings')
+    savings = savings_data()
+    with db() as connection:
+        context['people'] = planning_profiles.load(connection, planning_profiles.SETTING, [])
+    context['savings_owners'] = sorted({account['owner_name'] for account in savings['savings_accounts']
+                                      if planning_profiles.named_owner(account['owner_name'])})
+    context.update(today=date.today().isoformat(), saved=request.args.get('saved'))
+    return render_template('people.html', **context)
+
+
+@app.post('/api/people')
+def save_person_profile():
+    try:
+        with db() as connection:
+            planning_profiles.save_person(connection, request.form)
+        return jsonify(saved=True)
+    except projections.ProjectionError as error:
+        return jsonify(error=str(error)), 400
 
 
 @app.post("/api/projections")
@@ -1954,10 +1989,16 @@ def save_household_plan():
     if request.content_length and request.content_length > 10000:
         return jsonify(error="The planning request is too large."), 413
     try:
-        plan = projections.validate(request.get_json(silent=True))
+        payload = request.get_json(silent=True)
+        linked = isinstance(payload, dict) and set(payload) == {'plan', 'references'}
+        plan = projections.validate(payload['plan'] if linked else payload)
+        accounts = savings_data()['savings_accounts']
+        with db() as connection:
+            references = planning_profiles.validate_references(payload['references'], planning_profiles.choices(connection, accounts)) if linked else None
+            planning_profiles.store(connection, 'household_plan', plan)
+            planning_profiles.store(connection, planning_profiles.REFERENCES, references)
     except projections.ProjectionError as error:
         return jsonify(error=str(error)), 400
-    save_setting("household_plan", json.dumps(plan, separators=(",", ":")))
     return jsonify(saved=True)
 
 

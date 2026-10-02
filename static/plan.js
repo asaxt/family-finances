@@ -9,6 +9,52 @@
   const status = document.getElementById('plan-result-status');
   const monthlyYear = document.getElementById('plan-monthly-year');
   const source = JSON.parse(document.getElementById('plan-data').textContent);
+  const defaults = JSON.parse(document.getElementById('plan-defaults').textContent);
+  let references = structuredClone(defaults.references);
+  const profileFields = ['name', 'current_age', 'retirement_age', 'residence_state', 'employment_state', 'work_state_percent'];
+  const balanceFields = ['starting_pretax', 'starting_roth'];
+  const sourceLabels = {name: 'name', current_age: 'age', retirement_age: 'retirement age', residence_state: 'residence', employment_state: 'work state', work_state_percent: 'work percentage', starting_pretax: 'pre-tax balance', starting_roth: 'Roth balance'};
+  const selected = index => defaults.choices.find(item => item.id === references.people[index].choice);
+  function showSources() {
+    document.getElementById('taxable-source').textContent = `${references.taxable_from_savings ? 'Connected' : 'Manual assumption'}. ${defaults.taxable.note}`;
+    document.getElementById('use-taxable').disabled = defaults.taxable.value === '';
+    references.people.forEach((reference, index) => {
+      const choice = selected(index);
+      form.querySelector(`[data-use-profile="${index}"]`).disabled = !choice?.saved;
+      form.querySelector(`[data-use-savings="${index}"]`).disabled = !choice;
+      form.querySelector(`[data-person-source="${index}"]`).textContent = choice
+        ? `${choice.saved ? 'Profile' : 'Account owner'}: ${choice.name}. Connected fields: ${reference.fields.map(field => sourceLabels[field]).join(', ') || 'none (manual assumptions)'}. Pre-tax: ${choice.balances.starting_pretax.note}. Roth: ${choice.balances.starting_roth.note}. Post-tax Savings is assumed to be qualified Roth; adjust if needed.`
+        : 'Enter details manually or choose a person. Missing amounts need your input; enter 0 if none.';
+    });
+  }
+  function useDefaults(index, keys) {
+    const choice = selected(index);
+    if (!choice) return;
+    const values = {...choice.values, ...Object.fromEntries(balanceFields.map(key => [key, choice.balances[key].value]))};
+    keys.forEach(key => {
+      form.elements[`person_${index}_${key}`].value = values[key] ?? '';
+      if (!references.people[index].fields.includes(key)) references.people[index].fields.push(key);
+    });
+    showSources(); form.dispatchEvent(new Event('input', {bubbles: true}));
+  }
+  form.querySelectorAll('[data-profile-index]').forEach(select => select.addEventListener('change', () => {
+    const index = Number(select.dataset.profileIndex);
+    if (select.value && references.people[1 - index].choice === select.value) {
+      select.value = references.people[index].choice;
+      error.textContent = 'Choose a different person for each spouse to avoid counting balances twice.';
+      error.hidden = false; return;
+    }
+    references.people[index] = {choice: select.value, fields: []};
+    error.hidden = true;
+    if (select.value) useDefaults(index, [...profileFields, ...balanceFields]);
+    else { showSources(); form.dispatchEvent(new Event('input', {bubbles: true})); }
+  }));
+  form.querySelectorAll('[data-use-profile]').forEach(button => button.addEventListener('click', () => useDefaults(Number(button.dataset.useProfile), profileFields)));
+  form.querySelectorAll('[data-use-savings]').forEach(button => button.addEventListener('click', () => useDefaults(Number(button.dataset.useSavings), balanceFields)));
+  document.getElementById('use-taxable').addEventListener('click', () => {
+    form.elements.starting_taxable.value = defaults.taxable.value;
+    references.taxable_from_savings = true; showSources(); form.dispatchEvent(new Event('input', {bubbles: true}));
+  });
   const fields = ['withdrawal_rate', 'starting_taxable', 'inflation_rate', 'growth_rate', 'tax_payments_in_spending'];
   const personNumbers = ['annual_income', 'tax_advantaged_rate', 'current_age', 'retirement_age',
     'starting_pretax', 'starting_roth', 'work_state_percent'];
@@ -144,7 +190,12 @@
     }
   }
   monthlyYear.addEventListener('change', renderMonthly);
-  form.addEventListener('input', () => {
+  form.addEventListener('input', event => {
+    const name = event.target.name || '';
+    if (name === 'starting_taxable') references.taxable_from_savings = false;
+    const match = name.match(/^person_([01])_(.+)$/);
+    if (match) references.people[Number(match[1])].fields = references.people[Number(match[1])].fields.filter(field => field !== match[2]);
+    showSources();
     revision++; updateDerived(); pin.disabled = true;
     if (calculated) status.textContent = 'Inputs changed. Calculate again to update these results.';
   });
@@ -162,7 +213,7 @@
     controller?.abort(); calculated = null; plans = null; baseline = null; chart?.destroy();
     document.getElementById('plan-summary').replaceChildren(); document.getElementById('plan-table').replaceChildren();
     document.getElementById('plan-monthly-summary').replaceChildren(); monthlyYear.replaceChildren(); monthlyYear.value = '';
-    form.reset(); results.hidden = true; unpin.hidden = true; error.hidden = true; updateDerived();
+    form.reset(); references = structuredClone(defaults.references); showSources(); results.hidden = true; unpin.hidden = true; error.hidden = true; updateDerived();
   });
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -204,7 +255,7 @@
     try {
       const response = await fetch('/api/plan-settings', {method: 'POST',
         headers: {'Content-Type': 'application/json', 'X-CSRF-Token': form.elements.csrf_token.value},
-        body: JSON.stringify(readPlan())});
+        body: JSON.stringify({plan: readPlan(), references})});
       if (response.status === 401) { window.location.assign('/login'); return; }
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not save. Reload and try again.');
@@ -212,5 +263,5 @@
     } catch (failure) { saveStatus.textContent = failure.message; }
     finally { save.disabled = false; }
   });
-  updateDerived();
+  showSources(); updateDerived();
 })();

@@ -8,7 +8,7 @@
 {% block content %}
 <section class="panel plan-intro">
   <div><h2>Two people. One household plan.</h2><p>Give each spouse their own income and retirement timeline. Estimated taxes and shared spending determine what reaches brokerage investments.</p></div>
-  <span class="pill">Local calculation · No AI</span>
+  <a class="button secondary" href="/people">People profiles</a>
 </section>
 <form id="plan-form" method="post" action="/api/projections" autocomplete="off">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -22,6 +22,7 @@
       {{ number('inflation_rate', 'Annual inflation (%)', household_plan.inflation_rate, max=15, step='0.1', help='Income, spending, and indexed tax thresholds follow this assumption.') }}
       {{ number('growth_rate', 'Annual investment growth (%)', household_plan.growth_rate, min=-30, max=30, step='0.1', help='Nominal return after fees. Brokerage capital-gains and dividend taxes are not modeled.') }}
     </div>
+    <p id="taxable-source" class="plan-note"></p><button type="button" class="button secondary" id="use-taxable">Use latest taxable Savings</button>
     <div id="plan-separate-fields" class="plan-sources" {{ 'hidden' if household_plan.filing_status != 'separate' }}>
       <label class="plan-field"><span>Income allocation on separate returns</span><select name="mfs_allocation"><option value="" {{ 'selected' if not household_plan.mfs_allocation }}>Choose the applicable allocation</option>
         <option value="community_wages" {{ 'selected' if household_plan.mfs_allocation == 'community_wages' }}>Split net wages equally; retirement withdrawals stay with each owner</option>
@@ -36,7 +37,10 @@
     <div class="panel-header"><div><p class="eyebrow">People</p><h2>Income, retirement timing & tax profiles</h2></div></div>
     <p class="plan-note">This preview models two married adults with an age difference up to 25 years. State locations stay fixed throughout the projection. The work state means where work is physically performed, not the employer's headquarters.</p>
     {% for person in household_plan.people %}{% set prefix = 'person_' ~ loop.index0 ~ '_' %}
-    <fieldset class="plan-person" data-person><legend>Spouse {{ loop.index }}</legend><div class="plan-fields">
+    <fieldset class="plan-person" data-person><legend>Spouse {{ loop.index }}</legend>
+    <label class="plan-field"><span>Person / saved profile</span><select data-profile-index="{{ loop.index0 }}"><option value="">Enter details manually</option>{% set person_index = loop.index0 %}{% for choice in person_choices %}<option value="{{ choice.id }}" {{ 'selected' if plan_references.people[person_index].choice == choice.id }}>{{ choice.name }} · {{ 'Saved profile' if choice.saved else 'Account owner' }}</option>{% endfor %}</select></label>
+    <div class="plan-actions"><button type="button" class="button secondary" data-use-profile="{{ loop.index0 }}">Use profile details</button><button type="button" class="button secondary" data-use-savings="{{ loop.index0 }}">Use latest Savings</button></div>
+    <p class="plan-note" data-person-source="{{ loop.index0 }}" role="status"></p><div class="plan-fields">
       <label class="plan-field"><span>Name or label</span><input name="{{ prefix }}name" value="{{ person.name }}" maxlength="60" required></label>
       {{ number(prefix ~ 'annual_income', 'Gross annual income ($)', person.annual_income, step='0.01', help='W-2 pay before taxes and retirement contributions. Enter 0 if not working.') }}
       {{ number(prefix ~ 'tax_advantaged_rate', 'Tax-advantaged saving (%)', person.tax_advantaged_rate, max=100, step='0.1') }}
@@ -53,7 +57,7 @@
     </div></fieldset>
     {% endfor %}
     <details class="plan-sources"><summary>Starting investment sources and split</summary>
-      <p>Latest active Savings balances are shown for reference. Taxable balances seed brokerage; enter each owner’s pre-tax and Roth retirement balances above. Confirm that post-tax accounts are qualified Roth accounts. Linked bank balances, property, and debts are excluded. Remove money reserved for other goals.</p>
+      <p>New plans use the latest active Savings balances when ownership is clear. Shared retirement accounts are not split automatically. Missing balances stay blank. Post-tax Savings balances are assumed to be qualified Roth investments: confirm this or edit the amount. Editing a field makes it a manual assumption; use the buttons above to reconnect it. Saved connected fields refresh when you reopen Plan, while saved manual assumptions stay unchanged. Linked bank balances, property, and debts are excluded. Remove money reserved for other goals.</p>
       <p id="plan-starting-split"></p>
       {% if not all_savings_total %}<p><strong>No recorded investment split is available.</strong> Enter starting investments for each owner and brokerage above.</p>{% endif %}
       {% if savings_accounts %}<ul>{% for account in savings_accounts %}<li>{{ account.name }} · {{ account.classification_label }} · {{ account.amount|money if account.recorded_on else 'Unknown balance' }} · {{ account.recorded_on or 'No recorded date' }}</li>{% endfor %}</ul>{% else %}<p>No manually recorded savings accounts yet.</p>{% endif %}
@@ -118,6 +122,7 @@
     <p><a href="https://www.irs.gov/irb/2025-45_IRB" target="_blank" rel="noopener noreferrer">Federal rules</a> · <a href="https://www.irs.gov/publications/p555" target="_blank" rel="noopener noreferrer">Community income</a> · <a href="https://www.oregon.gov/dor/programs/individuals/pages/pit.aspx" target="_blank" rel="noopener noreferrer">Oregon income tax</a> · <a href="https://dor.wa.gov/taxes-rates/income-tax" target="_blank" rel="noopener noreferrer">Washington income tax</a></p>
   </details>
 </section>
+<script id="plan-defaults" type="application/json">{{ {"choices": person_choices, "references": plan_references, "taxable": taxable_default}|tojson }}</script>
 <script id="plan-data" type="application/json">{{ {'annual_spending': planning_trend.annual_spending / 100 if planning_trend.annual_spending is not none else none, 'date_from': planning_trend.date_from, 'date_to': planning_trend.date_to}|tojson }}</script>
 <script src="{{ url_for('static', filename='plan.js') }}" defer></script>
 {% endblock %}
