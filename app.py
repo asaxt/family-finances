@@ -5,6 +5,9 @@ from werkzeug.datastructures import MultiDict
 import rule_review
 import budgeting
 import planning_profiles
+import planning_workspace
+import privacy_logging
+import feedback
 import io
 import base64
 import hashlib
@@ -157,6 +160,7 @@ class MemoryUploadRequest(Request):
 
 
 app = Flask(__name__)
+privacy_logging.configure(app)
 app.request_class = MemoryUploadRequest
 app.config["MAX_CONTENT_LENGTH"] = statements.MAX_UPLOAD_BYTES + 65536
 # Review forms can contain up to 2,500 editable transaction rows.
@@ -164,6 +168,7 @@ app.config["MAX_FORM_MEMORY_SIZE"] = 4 * 1024 * 1024
 LOGIN_ATTEMPTS = {}
 vault = EncryptedDatabase(VAULT_PATH)
 vault_last_activity = 0.0
+PLANNING_TREND_CACHE = None
 
 
 def load_auth_config():
@@ -253,8 +258,9 @@ def unlock_data(password):
 
 
 def lock_data():
-    global vault_last_activity
+    global vault_last_activity, PLANNING_TREND_CACHE
     vault.lock()
+    PLANNING_TREND_CACHE = None
     vault_last_activity = 0.0
 
 
@@ -311,7 +317,7 @@ def require_login():
         if not expected or not submitted or not secrets.compare_digest(expected, submitted):
             abort(400, "The form expired. Reload the page and try again.")
     if READ_ONLY_MIRROR and request.method == "POST" and request.endpoint not in {
-        "login", "logout", "assistant_answer", "projection_compare", "update_local_ai", "update_overview_lookback",
+        "login", "logout", "assistant_answer", "projection_compare", "workspace_update", "feedback_send", "feedback_delete", "update_local_ai", "update_overview_lookback",
     }:
         return jsonify(error="Development is a read-only production snapshot. Make data and categorization changes in the production app."), 403
     if request.endpoint in {"static", "favicon", "health", "login", "setup"}:
@@ -793,7 +799,7 @@ def stale_savings_accounts():
     ]
 
 
-def savings_data():
+def savings_data(include_history=True):
     with db() as connection:
         account_rows = [
             dict(row)
@@ -813,8 +819,11 @@ def savings_data():
                        a.classification, a.goal_eligible, a.archived
                 FROM savings_snapshots s
                 JOIN manual_accounts a ON a.id = s.manual_account_id
-                ORDER BY s.recorded_on, s.id
-                """
+                """ + ("" if include_history else """
+                WHERE s.id = (SELECT latest.id FROM savings_snapshots latest
+                    WHERE latest.manual_account_id = s.manual_account_id
+                    ORDER BY latest.recorded_on DESC, latest.id DESC LIMIT 1)
+                """) + " ORDER BY s.recorded_on, s.id"
             )
         ]
         goal_row = connection.execute(
@@ -868,7 +877,7 @@ def savings_data():
             }
         )
 
-    for row in rows:
+    for row in rows if include_history else []:
         if row["manual_account_id"] not in active_definitions:
             continue
         if current_date and row["recorded_on"] != current_date:
@@ -1233,7 +1242,7 @@ def overview():
             spending_only=True,
         )[:8]
     context["savings"] = (
-        savings_data()
+        savings_data(include_history=False)
         if not context["account_id"] and not context["connection_id"]
         else None
     )
@@ -1894,17 +1903,101 @@ def save_budget_plan():
         return jsonify(error=str(error)), 400
 
 
+def cached_planning_trend(connection):
+    """One in-memory result per unchanged database/day; discarded when locked."""
+    global PLANNING_TREND_CACHE
+    key = (connection, connection.total_changes, date.today(), planning_spending_trend)
+    if PLANNING_TREND_CACHE is None or PLANNING_TREND_CACHE[0] != key:
+        PLANNING_TREND_CACHE = (key, planning_spending_trend(connection))
+    return deepcopy(PLANNING_TREND_CACHE[1])
+
+
+@contextmanager
+def private_workspace():
+    if READ_ONLY_MIRROR:
+        # Stable across fresh mirror directories. Never write the source snapshot.
+        path = ROOT / '.development-workspace.vault'
+        if app.testing:
+            path = DATA_ROOT / '.development-workspace.vault'
+        with vault.private_document(path) as document:
+            yield document
+    else:
+        with db() as connection:
+            document = planning_profiles.load(connection, 'private_workspace_v1', {})
+            before = deepcopy(document)
+            yield document
+            if document != before:
+                planning_profiles.store(connection, 'private_workspace_v1', document)
+
+
+def projection_source(source_id=None, document=None):
+    if source_id:
+        if not isinstance(source_id, str):
+            raise projections.ProjectionError('Choose a saved data snapshot.')
+        if document is None:
+            with private_workspace() as saved:
+                return projection_source(source_id, saved)
+        return deepcopy(planning_workspace.find(document.get('plans', planning_workspace.empty()), source_id)['source'])
+    with db() as connection:
+        trend = cached_planning_trend(connection)
+    return dict(annual_spending=trend['annual_spending'] / 100 if trend['annual_spending'] is not None else None,
+                date_from=trend['date_from'], date_to=trend['date_to'], start_year=date.today().year,
+                observed_months=trend.get('observed_months'), unclassified=trend.get('unclassified', False))
+
+
+@app.get('/api/plans')
+def workspace_list():
+    try:
+        with private_workspace() as document:
+            return jsonify(document.get('plans', planning_workspace.empty()))
+    except VaultError as error:
+        return jsonify(error=str(error)), 409
+
+
+@app.get('/api/planning-sources')
+def planning_sources():
+    accounts = savings_data(include_history=False)['savings_accounts']
+    with db() as connection:
+        choices = planning_profiles.choices(connection, accounts)
+    return jsonify(source=projection_source(), choices=choices,
+                   taxable=planning_profiles.balance([account for account in accounts if account['classification'] == 'taxable']))
+
+
+@app.post('/api/plans')
+def workspace_update():
+    if request.content_length and request.content_length > 24000:
+        return jsonify(error='The plan is too large.'), 413
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(error='Send a valid plan.'), 400
+    try:
+        references = None
+        if payload.get('action') == 'save':
+            accounts = savings_data(include_history=False)['savings_accounts']
+            with db() as connection:
+                references = planning_profiles.validate_references(payload.get('references'), planning_profiles.choices(connection, accounts))
+        with private_workspace() as document:
+            source = projection_source(payload.get('source_id'), document) if payload.get('action') == 'save' else None
+            if payload.get('action') == 'save':
+                projections.project(payload.get('plan'), source['annual_spending'], start_year=source['start_year'])
+            state = planning_workspace.change(document.get('plans', planning_workspace.empty()), payload, source, references)
+            document['plans'] = state
+        return jsonify(state)
+    except (projections.ProjectionError, VaultError) as error:
+        return jsonify(error=str(error)), 409 if isinstance(error, VaultError) or 'another tab' in str(error) else 400
+
+
 @app.get("/plan")
 def planning_page():
     context = page_context("plan")
-    context.update(savings_data())
+    context.update(savings_data(include_history=False))
     context["plan_starting_assets"] = (
         context["all_savings_total"]
         if any(account["recorded_on"] for account in context["savings_accounts"])
         else None
     )
     with db() as connection:
-        context["planning_trend"] = planning_spending_trend(connection)
+        context["planning_trend"] = cached_planning_trend(connection)
         context['person_choices'] = planning_profiles.choices(connection, context['savings_accounts'])
         references = planning_profiles.load(connection, planning_profiles.REFERENCES, None)
     taxable = planning_profiles.balance([account for account in context['savings_accounts'] if account['classification'] == 'taxable'])
@@ -1934,13 +2027,14 @@ def planning_page():
     context['plan_references'] = planning_profiles.apply_defaults(context['household_plan'], context['person_choices'], taxable,
                                                                  references if not fresh else None, fresh)
     context['taxable_default'] = taxable
+    context['plan_start_year'] = date.today().year
     return render_template("plan.html", **context)
 
 
 @app.get('/people')
 def people_page():
     context = page_context('settings')
-    savings = savings_data()
+    savings = savings_data(include_history=False)
     with db() as connection:
         context['people'] = planning_profiles.load(connection, planning_profiles.SETTING, [])
     context['savings_owners'] = sorted({account['owner_name'] for account in savings['savings_accounts']
@@ -1964,23 +2058,22 @@ def projection_compare():
     if request.content_length and request.content_length > 10000:
         return jsonify(error="The planning request is too large."), 413
     payload = request.get_json(silent=True)
-    if not isinstance(payload, dict) or set(payload) != {"baseline", "comparison"}:
+    if not isinstance(payload, dict) or not {"baseline", "comparison"} <= set(payload) or set(payload) - {"baseline", "comparison", "source_id"}:
         return jsonify(error="Send a baseline and a comparison plan."), 400
     try:
         baseline = projections.validate(payload["baseline"])
         comparison = projections.validate(payload["comparison"])
         if [p["current_age"] for p in baseline["people"]] != [p["current_age"] for p in comparison["people"]]:
             raise projections.ProjectionError("Scenarios must use the same current ages. Clear the comparison to change them.")
-        with db() as connection:
-            trend = planning_spending_trend(connection)
-        spending = trend["annual_spending"]
-        if spending is None:
+        source = projection_source(payload.get('source_id'))
+        spending = source['annual_spending']
+        if spending is None and (baseline.get('annual_lifestyle_spending') is None or comparison.get('annual_lifestyle_spending') is None):
             raise projections.ProjectionError("A usable 12-month spending estimate is needed. Review the data coverage on Plan.")
-        return jsonify(baseline=projections.project(baseline, spending / 100),
-                       comparison=projections.project(comparison, spending / 100),
-                       spending_date_from=trend["date_from"],
-                       spending_date_to=trend["date_to"])
-    except projections.ProjectionError as error:
+        base_result = projections.project(baseline, spending, start_year=source['start_year'])
+        compare_result = base_result if baseline == comparison else projections.project(comparison, spending, start_year=source['start_year'])
+        return jsonify(baseline=base_result, comparison=compare_result, source=source,
+                       spending_date_from=source['date_from'], spending_date_to=source['date_to'])
+    except (projections.ProjectionError, VaultError) as error:
         return jsonify(error=str(error)), 400
 
 
@@ -1992,7 +2085,7 @@ def save_household_plan():
         payload = request.get_json(silent=True)
         linked = isinstance(payload, dict) and set(payload) == {'plan', 'references'}
         plan = projections.validate(payload['plan'] if linked else payload)
-        accounts = savings_data()['savings_accounts']
+        accounts = savings_data(include_history=False)['savings_accounts']
         with db() as connection:
             references = planning_profiles.validate_references(payload['references'], planning_profiles.choices(connection, accounts)) if linked else None
             planning_profiles.store(connection, 'household_plan', plan)
@@ -2034,7 +2127,7 @@ def assistant_answer():
             with db() as connection:
                 evidence["transactions"] = local_chat.transaction_context(connection, plan)
         if plan["scope"] in {"savings", "both"}:
-            evidence["savings"] = local_chat.savings_context(savings_data())
+            evidence["savings"] = local_chat.savings_context(savings_data(include_history=False))
         answer = local_chat.explain(messages, evidence)
         if not vault.unlocked:
             return jsonify(error="The app was locked. Unlock it and ask again."), 401
@@ -3250,9 +3343,9 @@ def evaluate_with_ollama():
                 report_url=url_for("ollama_evaluation_report"),
             )
         return jsonify(ok=True, report_url=url_for("ollama_evaluation_report"))
-    except Exception as error:
+    except Exception:
         app.logger.exception("Local model evaluation failed")
-        return jsonify(error=str(error)), 500
+        return jsonify(error="Local categorization could not finish. Check that Ollama is running, then try again."), 500
     finally:
         OLLAMA_EVALUATION_LOCK.release()
 
@@ -3643,9 +3736,13 @@ def ollama_evaluation_report():
     return render_template("llm_evaluation.html", **context)
 
 
+feedback.install(app, private_workspace, page_context)
+
+
 if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
         port=APP_PORT,
-        debug=os.environ.get("FLASK_DEBUG") == "1",
+        debug=False,
+        use_debugger=False,
     )

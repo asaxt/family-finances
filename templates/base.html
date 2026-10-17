@@ -8,56 +8,58 @@
   {% if active in ["trends", "spending_trends", "categories", "savings", "cash_flow", "plan"] %}<script src="/static/vendor/chart.umd.min.js"></script>{% endif %}
 </head>
 <body>
+  {% macro icon(name) -%}<svg class="icon" aria-hidden="true" focusable="false"><use href="{{ url_for('static', filename='icons.svg') }}#{{ name }}"></use></svg>{%- endmacro %}
+  <a class="skip-link" href="#main-content">Skip to content</a>
   {% set person_query = '&person=' ~ connection_id if connection_id else '' %}
   {% set account_query = '&account=' ~ account_id if account_id else '' %}
   <aside class="sidebar">
     <a class="brand" href="/">
-      <span class="brand-mark">{{ app_name[0]|upper }}</span>
+      <span class="brand-mark">{{ icon('sunrise') }}</span>
       <span>{{ app_name }}{% if development_mode %}<small class="environment-badge">Development</small>{% endif %}</span>
     </a>
-    <nav class="nav">
-      <a class="{{ 'active' if active == 'overview' }}" href="/?month={{ month }}{{ person_query }}{{ account_query }}">
-        <span>⌂</span> Overview
+    <nav class="nav" aria-label="Main navigation">
+      <a class="{{ 'active' if active == 'overview' }}" {% if active == 'overview' %}aria-current="page"{% endif %} href="/?month={{ month }}{{ person_query }}{{ account_query }}">
+        {{ icon('home') }}<span class="nav-label">Overview</span>
       </a>
-      <a class="{{ 'active' if active == 'budget' }}" href="{{ url_for('budget_page',person=connection_id,account=account_id) }}">
-        <span>◫</span> Budget
+      <a class="{{ 'active' if active == 'budget' }}" {% if active == 'budget' %}aria-current="page"{% endif %} href="{{ url_for('budget_page',person=connection_id,account=account_id) }}">
+        {{ icon('budget') }}<span class="nav-label">Budget</span>
       </a>
-      <a class="{{ 'active' if active in ['spending_trends','trends'] }}" href="{{ url_for('trends',person=connection_id,account=account_id) }}"><span>⌁</span> Spending trends</a>
-      <a class="{{ 'active' if active == 'category_rules' }}" href="/category-rules">
-        <span>✓</span> Category Rules
+      <a class="{{ 'active' if active in ['spending_trends','trends'] }}" {% if active in ['spending_trends','trends'] %}aria-current="page"{% endif %} href="{{ url_for('trends',person=connection_id,account=account_id) }}" title="Spending trends">{{ icon('trend') }}<span class="nav-label">Spending</span></a>
+      <a class="{{ 'active' if active == 'category_rules' }}" {% if active == 'category_rules' %}aria-current="page"{% endif %} href="/category-rules" title="Category rules">
+        {{ icon('rules') }}<span class="nav-label">Rules</span>
       </a>
-      <a class="{{ 'active' if active == 'transactions' }}" href="/transactions?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">
-        <span>≡</span> Transactions
+      <a class="{{ 'active' if active == 'transactions' }}" {% if active == 'transactions' %}aria-current="page"{% endif %} href="/transactions?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">
+        {{ icon('transactions') }}<span class="nav-label">Transactions</span>
       </a>
-      <a class="{{ 'active' if active == 'cash_flow' }}" href="/cash-flow?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">
-        <span>↕</span> Cash Flow
+      <a class="{{ 'active' if active == 'cash_flow' }}" {% if active == 'cash_flow' %}aria-current="page"{% endif %} href="/cash-flow?{{ person_query[1:] if person_query else '' }}{% if account_query %}{{ '&' if person_query else '' }}{{ account_query[1:] }}{% endif %}">
+        {{ icon('flow') }}<span class="nav-label">Cash flow</span>
       </a>
-      <a class="{{ 'active' if active == 'savings' }}" href="/savings">
-        <span>◇</span> Savings
+      <a class="{{ 'active' if active == 'savings' }}" {% if active == 'savings' %}aria-current="page"{% endif %} href="/savings">
+        {{ icon('savings') }}<span class="nav-label">Savings</span>
       </a>
-      <a class="{{ 'active' if active == 'plan' }}" href="/plan">
-        <span>↗</span> Plan
+      <a class="{{ 'active' if active == 'plan' }}" {% if active == 'plan' %}aria-current="page"{% endif %} href="/plan">
+        {{ icon('plan') }}<span class="nav-label">Plan</span>
       </a>
-      <a class="{{ 'active' if active == 'assistant' }}" href="/assistant">
-        <span>✧</span> Ask AI
+      <a class="{{ 'active' if active == 'assistant' }}" {% if active == 'assistant' %}aria-current="page"{% endif %} href="/assistant">
+        {{ icon('spark') }}<span class="nav-label">Ask AI</span>
       </a>
-      <a class="{{ 'active' if active == 'settings' }}" href="/settings">
-        <span>⚙</span> Settings
+      <a class="{{ 'active' if active == 'settings' }}" {% if active == 'settings' %}aria-current="page"{% endif %} href="/settings">
+        {{ icon('settings') }}<span class="nav-label">Settings</span>
       </a>
     </nav>
     <div class="sidebar-footer">
       <div class="sidebar-privacy">
         <div class="privacy-dot"></div>
-        <div><strong>Private & local</strong><small>Your financial data stays on this computer.</small></div>
+        <div><strong>Private & local</strong><small>Stored on this computer.</small></div>
       </div>
       <form method="post" action="/logout">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button class="logout-button" type="submit">Lock app</button>
+        <button class="logout-button" type="submit">{{ icon('lock') }}Lock app</button>
       </form>
     </div>
   </aside>
 
-  <main class="shell">
+  <main class="shell" id="main-content" tabindex="-1">
     <header class="topbar">
       <div>
         <p class="eyebrow">{% block eyebrow %}Your money{% endblock %}</p>
@@ -67,8 +69,8 @@
         {% if active == "savings" and not read_only_mirror %}
           <a class="button primary" href="#record-balances">Record balances</a>
         {% elif active != "settings" and not plaid_disabled %}
-          {% if connected %}<button class="button secondary" id="sync-button"><span>↻</span> Sync</button>{% endif %}
-          <button class="button primary" id="connect-button">{{ "Add bank connection" if connected else "Connect a bank" }}</button>
+          {% if connected %}<button class="button secondary" id="sync-button" title="Sync bank connections">{{ icon('refresh') }}Sync</button>{% endif %}
+          <button class="button primary" id="connect-button">{{ icon('plus') }}{{ "Add bank" if connected else "Connect bank" }}</button>
         {% endif %}
       </div>
     </header>
@@ -142,12 +144,11 @@
       </section>
     {% endif %}
 
-    <div id="notice" class="notice" hidden></div>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     {% if read_only_mirror %}
     <section class="panel mirror-notice" role="note">
-      <strong>Read-only production snapshot</strong>
-      <p>Categories, rules, and financial records come from production. Make changes in the production app, then relaunch development to load them here. You can browse, filter, and use Ask AI.</p>
-      <small>Copied <time id="mirror-copy-time" datetime="{{ mirror_copied_at }}">{{ mirror_copied_at }}</time>.</small>
+      <div class="mirror-heading">{{ icon('shield') }}<strong>Read-only production snapshot</strong><small>Copied <time id="mirror-copy-time" datetime="{{ mirror_copied_at }}">{{ mirror_copied_at }}</time></small></div>
+      <details><summary>About this snapshot</summary><p>Edit financial records in the production app; relaunch development to refresh. Browsing, filters, and Ask AI are available here.</p></details>
     </section>
     {% endif %}
     {% block content %}{% endblock %}
@@ -181,13 +182,21 @@
   </dialog>
 
   <script>
+    if (window.Chart) {
+      Chart.defaults.color = '#576e77';
+      Chart.defaults.borderColor = '#dce5e3';
+      Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+      Chart.defaults.animation = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? false : { duration: 250 };
+    }
     const csrfToken = {{ csrf_token()|tojson }};
     const notice = document.querySelector("#notice");
+    let noticeTimer;
     function showNotice(message, kind = "success") {
+      clearTimeout(noticeTimer);
       notice.textContent = message;
       notice.className = `notice ${kind}`;
       notice.hidden = false;
-      setTimeout(() => notice.hidden = true, 6000);
+      noticeTimer = setTimeout(() => notice.hidden = true, 6000);
     }
 
     const syncButton = document.querySelector("#sync-button");
@@ -196,22 +205,33 @@
         const button = event.currentTarget;
         const original = button.innerHTML;
         button.disabled = true;
+        button.setAttribute("aria-busy", "true");
         button.innerHTML = "<span>↻</span> Syncing…";
-        const response = await fetch("/api/sync", {
-          method: "POST",
-          headers: { "X-CSRF-Token": csrfToken }
-        });
-        const result = await response.json();
-        if (response.ok && result.ok) {
-          const loading = ["NOT_READY", "INITIAL_UPDATE_COMPLETE"].includes(result.history_status);
-          showNotice(loading
-            ? `Imported ${result.imported || 0} updates. Plaid is still preparing older history.`
-            : `Sync complete${result.imported ? ` · ${result.imported} updates` : ""}.`);
-          setTimeout(() => location.reload(), 700);
-        } else {
-          showNotice(result.error || result.errors?.[0]?.error || "Sync could not be completed.", "error");
-          button.disabled = false;
-          button.innerHTML = original;
+        let willReload = false;
+        try {
+          const response = await fetch("/api/sync", {
+            method: "POST",
+            headers: { "X-CSRF-Token": csrfToken }
+          });
+          const result = await response.json();
+          if (response.ok && result.ok) {
+            const loading = ["NOT_READY", "INITIAL_UPDATE_COMPLETE"].includes(result.history_status);
+            showNotice(loading
+              ? `Imported ${result.imported || 0} updates. Plaid is still preparing older history.`
+              : `Sync complete${result.imported ? ` · ${result.imported} updates` : ""}.`);
+            willReload = true;
+            setTimeout(() => location.reload(), 700);
+          } else {
+            showNotice(result.error || result.errors?.[0]?.error || "Sync could not be completed.", "error");
+          }
+        } catch {
+          showNotice("Sync was interrupted. Check that the app is available, then try again.", "error");
+        } finally {
+          button.removeAttribute("aria-busy");
+          if (!willReload) {
+            button.disabled = false;
+            button.innerHTML = original;
+          }
         }
       });
     }
@@ -314,5 +334,7 @@
   </script>
   {% block scripts %}{% endblock %}
   {% if read_only_mirror %}<script src="{{ url_for('static', filename='production-mirror.js') }}" defer></script>{% endif %}
+{% include 'feedback_widget.html' %}
+<script src="{{ url_for('static', filename='feedback.js') }}" defer></script>
 </body>
 </html>

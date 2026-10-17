@@ -4,6 +4,7 @@ import unittest
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+from local_chat import ChatError, NoRedirect
 from llm_evaluation import (
     existing_category_examples,
     prepare_evaluation,
@@ -83,9 +84,14 @@ class LocalModelEvaluationTests(unittest.TestCase):
             'message': {'content': json.dumps({'results': []})}
         }).encode()
         examples = {'Dining': [{'merchant': 'Example Cafe', 'description': 'Lunch', 'direction': 'money_out'}]}
-        with patch('llm_evaluation.urllib.request.urlopen', return_value=response) as request:
+        with patch('llm_evaluation.urllib.request.build_opener') as factory:
+            factory.return_value.open.return_value = response
             classify_batch('example-model', ['Dining'], [], category_examples=examples)
-        sent = request.call_args.args[0]
+        sent = factory.return_value.open.call_args.args[0]
+        self.assertEqual(factory.call_args.args[0].proxies, {})
+        self.assertIsInstance(factory.call_args.args[1], NoRedirect)
+        with self.assertRaises(ChatError):
+            factory.call_args.args[1].redirect_request(None, None, 307, '', {}, 'https://example.invalid')
         self.assertEqual(sent.full_url, 'http://127.0.0.1:11434/api/chat')
         payload = json.loads(sent.data)
         self.assertEqual(json.loads(payload['messages'][1]['content'])['category_examples'], examples)
@@ -453,13 +459,13 @@ class LocalModelEvaluationTests(unittest.TestCase):
             0,
         )
 
-    @patch("llm_evaluation.urllib.request.urlopen")
-    def test_model_request_has_a_hard_output_limit(self, urlopen):
+    @patch("llm_evaluation.urllib.request.build_opener")
+    def test_model_request_has_a_hard_output_limit(self, factory):
         response = MagicMock()
         response.__enter__.return_value = response
         response.__exit__.return_value = False
         response.read.return_value = b'{"message":{"content":"{\\"results\\":[]}"}}'
-        urlopen.return_value = response
+        factory.return_value.open.return_value = response
 
         with self.assertRaisesRegex(ValueError, "exactly one result"):
             from llm_evaluation import classify_batch
@@ -480,7 +486,7 @@ class LocalModelEvaluationTests(unittest.TestCase):
                 }
             ])
 
-        payload = json.loads(urlopen.call_args.args[0].data)
+        payload = json.loads(factory.return_value.open.call_args.args[0].data)
         self.assertEqual(payload["options"]["num_predict"], 2048)
 
 

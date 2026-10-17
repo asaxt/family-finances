@@ -28,6 +28,7 @@ FIELDS = {
     'growth_rate': (-30, 30, 'Annual investment growth'),
     'tax_payments_in_spending': (-100_000_000, 100_000_000, 'Tax payments already in spending'),
 }
+SCENARIO_FIELDS = {'annual_lifestyle_spending', 'life_events'}
 
 
 def validate_numbers(values, fields):
@@ -41,7 +42,8 @@ def validate_numbers(values, fields):
 
 
 def validate(values):
-    if not isinstance(values, dict) or set(values) != set(FIELDS) | {'people', 'filing_status', 'mfs_allocation', 'withdrawal_start'}:
+    required = set(FIELDS) | {'people', 'filing_status', 'mfs_allocation', 'withdrawal_start'}
+    if not isinstance(values, dict) or not required <= set(values) or set(values) - required - SCENARIO_FIELDS:
         raise ProjectionError('Complete the household planning inputs before calculating.')
     validate_numbers(values, FIELDS)
     if values['withdrawal_start'] not in ('first_retirement', 'both_retired'):
@@ -69,7 +71,25 @@ def validate(values):
         raise ProjectionError('This preview supports an age difference up to 25 years.')
     if values['filing_status'] == 'separate' and values['mfs_allocation'] != 'individual' and people[0]['residence_state'] != people[1]['residence_state']:
         raise ProjectionError('Community allocation requires the same residence state for both spouses in this preview.')
-    return deepcopy(values)
+    plan = deepcopy(values)
+    plan.setdefault('annual_lifestyle_spending', None)
+    plan.setdefault('life_events', [])
+    if plan['annual_lifestyle_spending'] is not None:
+        validate_numbers(plan, {'annual_lifestyle_spending': (0, 100_000_000, 'Annual lifestyle spending')})
+    if not isinstance(plan['life_events'], list) or len(plan['life_events']) > 20:
+        raise ProjectionError('Use up to 20 life events in a plan.')
+    for event in plan['life_events']:
+        if not isinstance(event, dict) or set(event) != {'name', 'start_year', 'years', 'annual_amount'}:
+            raise ProjectionError('Each life event needs a name, start year, duration, and annual amount.')
+        if (not isinstance(event['name'], str) or not event['name'].strip() or len(event['name']) > 80
+                or any(ord(c) < 32 for c in event['name'])):
+            raise ProjectionError('Each life event needs a name of 1–80 characters.')
+        validate_numbers(event, {'start_year': (TAX_YEAR, 2200, 'Life event start year'),
+                                'years': (1, 50, 'Life event duration'),
+                                'annual_amount': (0, 100_000_000, 'Life event annual amount')})
+        if event['start_year'] != int(event['start_year']) or event['years'] != int(event['years']):
+            raise ProjectionError('Life event start year and duration must be whole numbers.')
+    return plan
 
 
 def restore_saved_plan(values):
@@ -107,30 +127,46 @@ def split_withdrawal(target, retirement_available, taxable_available):
 
 def project(values, annual_spending, start_year=None):
     plan = validate(values)
-    if (not isinstance(annual_spending, (int, float)) or isinstance(annual_spending, bool)
-            or not math.isfinite(annual_spending) or annual_spending < 0):
-        raise ProjectionError('A usable 12-month spending estimate is needed before calculating.')
-    if plan['tax_payments_in_spending'] > annual_spending:
-        raise ProjectionError('Tax payments already in spending cannot exceed the spending estimate.')
-    start_year = start_year or date.today().year
-    if start_year < TAX_YEAR:
-        raise ProjectionError('Tax estimates begin in 2026.')
+    if annual_spending is None:
+        if plan['annual_lifestyle_spending'] is None:
+            raise ProjectionError('A usable 12-month spending estimate or an explicit lifestyle assumption is needed before calculating.')
+        if plan['tax_payments_in_spending'] != 0:
+            raise ProjectionError('Use zero for tax payments already in spending when there is no spending history.')
+        historical_spending = None
+    else:
+        if (not isinstance(annual_spending, (int, float)) or isinstance(annual_spending, bool)
+                or not math.isfinite(annual_spending) or annual_spending < 0):
+            raise ProjectionError('A usable 12-month spending estimate is needed before calculating.')
+        if plan['tax_payments_in_spending'] > annual_spending:
+            raise ProjectionError('Tax payments already in spending cannot exceed the spending estimate.')
+        historical_spending = annual_spending - plan['tax_payments_in_spending']
+    start_year = date.today().year if start_year is None else start_year
+    if (isinstance(start_year, bool) or not isinstance(start_year, int)
+            or not TAX_YEAR <= start_year <= 2200):
+        raise ProjectionError('Projection start year must be a whole year from 2026 to 2200.')
     people = plan['people']
     growth, inflation = plan['growth_rate'] / 100, plan['inflation_rate'] / 100
     balances = [[p['starting_pretax'], p['starting_roth']] for p in people]
     taxable = plan['starting_taxable']
-    spending_base = annual_spending - plan['tax_payments_in_spending']
+    spending_base = historical_spending if plan['annual_lifestyle_spending'] is None else plan['annual_lifestyle_spending']
     horizon = END_AGE - int(min(p['current_age'] for p in people))
+    for event in plan['life_events']:
+        if event['start_year'] < start_year or event['start_year'] + event['years'] > start_year + horizon:
+            raise ProjectionError(f'Life events must fit within the projection years {start_year}–{start_year + horizon - 1}.')
     tax_keys = ('federal_income_tax', 'federal_payroll_tax', 'oregon_tax', 'washington_tax', 'interstate_credit', 'taxes')
     rows = [dict(year=start_year, elapsed=0, ages=[p['current_age'] for p in people], factor=1,
+                 cash_flow_year=None, cash_flow_factor=1,
                  retirement_assets=sum(map(sum, balances)), taxable_assets=taxable,
                  assets=sum(map(sum, balances)) + taxable, income=0, tax_advantaged_savings=0,
                  requested_savings=0, withdrawal=0, retirement_withdrawal=0, taxable_withdrawal=0,
-                 spending=0, taxable_cash_flow=0, shortfall=0,
+                 spending=0, taxable_cash_flow=0, shortfall=0, event_spending=0,
+                 event_funded=0, event_shortfall=0, total_shortfall=0,
                  **dict.fromkeys(tax_keys, 0))]
     retirement_offsets = [p['retirement_age'] - p['current_age'] for p in people]
     withdrawal_offset = min(retirement_offsets) if plan['withdrawal_start'] == 'first_retirement' else max(retirement_offsets)
     first_shortfall_year, total_real_shortfall = None, 0
+    first_event_shortfall_year = None
+    event_total_real_spending = total_real_event_shortfall = 0
     for elapsed in range(horizon):
         year = start_year + elapsed
         factor = (1 + inflation) ** elapsed
@@ -167,19 +203,33 @@ def project(values, annual_spending, start_year=None):
         # The elected withdrawal is the spending budget; never silently take extra.
         shortfall = max(0, -cash_flow)
         closing = taxable_available - taxable_withdrawal + max(0, cash_flow)
+        # Events are explicit additional spending, funded at year end from brokerage.
+        # Recurring lifestyle gaps still never trigger an extra withdrawal.
+        event_spending = sum(event['annual_amount'] for event in plan['life_events']
+                             if event['start_year'] <= year < event['start_year'] + event['years']) * factor
+        event_funded = min(event_spending, max(0, closing))
+        event_shortfall = event_spending - event_funded
+        closing -= event_funded
         if shortfall > 0 and first_shortfall_year is None:
             first_shortfall_year = year
-        total_real_shortfall += shortfall / (factor * (1 + inflation))
+        if event_shortfall > 0 and first_event_shortfall_year is None:
+            first_event_shortfall_year = year
+        # Annual flows use that year's prices, not the following balance boundary.
+        total_real_shortfall += shortfall / factor
+        event_total_real_spending += event_spending / factor
+        total_real_event_shortfall += event_shortfall / factor
         taxable = max(0, closing)
         retirement = sum(map(sum, balances))
         rows.append(dict(year=year + 1, elapsed=elapsed + 1,
             ages=[p['current_age'] + elapsed + 1 for p in people], factor=factor * (1 + inflation),
+            cash_flow_year=year, cash_flow_factor=factor,
             **{key: round(value, 2) for key, value in dict(retirement_assets=retirement,
                 taxable_assets=taxable, assets=retirement + taxable, income=income,
                 tax_advantaged_savings=contribution, requested_savings=requested,
                 withdrawal=withdrawal, retirement_withdrawal=retirement_withdrawal, taxable_withdrawal=taxable_withdrawal,
                 spending=spending, taxable_cash_flow=cash_flow,
-                shortfall=shortfall, **taxes).items()}))
+                shortfall=shortfall, event_spending=event_spending, event_funded=event_funded,
+                event_shortfall=event_shortfall, total_shortfall=shortfall + event_shortfall, **taxes).items()}))
     both_retired = int(max(p['retirement_age'] - p['current_age'] for p in people))
     monthly = []
     for opening, closing in zip(rows, rows[1:]):
@@ -189,11 +239,23 @@ def project(values, annual_spending, start_year=None):
             **{key: value / 12 for key, value in dict(spending=closing['spending'],
                 available=available, difference=available - closing['spending'],
                 withdrawal=closing['withdrawal'], shortfall=closing['shortfall'],
+                event_spending=closing['event_spending'], event_funded=closing['event_funded'],
+                event_shortfall=closing['event_shortfall'], total_shortfall=closing['total_shortfall'],
                 taxes=closing['taxes']).items()}))
+    gap_years = [year for year in (first_shortfall_year, first_event_shortfall_year) if year is not None]
     return dict(rows=rows, retirement=rows[both_retired], final=rows[-1],
                 monthly=monthly, first_retirement_monthly=monthly[both_retired],
-                annual_spending=annual_spending, adjusted_annual_spending=spending_base,
+                annual_spending=annual_spending, historical_lifestyle_spending=historical_spending,
+                adjusted_annual_spending=spending_base,
                 annual_tax_advantaged_savings=rows[1]['tax_advantaged_savings'],
                 annual_taxable_savings=max(0, rows[1]['taxable_cash_flow']),
+                annual_event_funding=rows[1]['event_funded'],
+                annual_net_taxable_savings=round(max(0, rows[1]['taxable_cash_flow']) - rows[1]['taxable_withdrawal'] - rows[1]['event_funded'], 2),
                 annual_taxes=rows[1]['taxes'], first_shortfall_year=first_shortfall_year,
-                total_real_shortfall=round(total_real_shortfall, 2))
+                total_real_shortfall=round(total_real_shortfall, 2),
+                event_total_real_spending=round(event_total_real_spending, 2),
+                total_real_event_shortfall=round(total_real_event_shortfall, 2),
+                first_event_shortfall_year=first_event_shortfall_year,
+                first_funding_gap_year=min(gap_years) if gap_years else None,
+                total_real_funding_gap=round(total_real_shortfall + total_real_event_shortfall, 2),
+                event_funding_note='Life events use brokerage after yearly growth and cash flow. Retirement funds are not drawn automatically; capital-gains taxes and borrowing are not modeled.')

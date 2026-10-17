@@ -269,12 +269,9 @@ category. Return only the structured result and exactly one result for every id.
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
-    open_request = urllib.request.urlopen
-    if review_existing:
-        open_request = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), NoRedirect()
-        ).open
-    with open_request(request, timeout=timeout) as response:
+    # Every classification mode stays local, regardless of environment proxies.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(request, timeout=timeout) as response:
         result = json.load(response)
     predictions = json.loads(result["message"]["content"]).get("results", [])
     expected_ids = {row["evaluation_id"] for row in rows}

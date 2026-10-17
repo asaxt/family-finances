@@ -76,15 +76,29 @@ def save_person(connection, form, today=None):
     return person
 
 
-def balance(accounts):
+def balance(accounts, today=None):
+    """Return a complete recorded pool, with provenance instead of silent estimates."""
+    today = today or date.today()
     if not accounts:
         return {'value': '', 'note': 'No matching Savings accounts. Enter an amount.'}
     if any(not account['recorded_on'] for account in accounts):
         return {'value': '', 'note': 'Some matching accounts have no balance. Enter a total or update Savings.'}
-    if any(account['amount'] < 0 for account in accounts):
-        return {'value': '', 'note': 'A matching balance is negative. Review Savings or enter a total.'}
-    return {'value': sum(account['amount'] for account in accounts) / 100,
-            'note': 'Savings: ' + '; '.join(f"{account['name']} ({account['recorded_on']})" for account in accounts)}
+    try:
+        recorded = [date.fromisoformat(account['recorded_on']) for account in accounts]
+    except (TypeError, ValueError):
+        return {'value': '', 'note': 'A matching balance has an invalid date. Review Savings or enter a total.'}
+    if any(recorded_on > today for recorded_on in recorded):
+        return {'value': '', 'note': 'A matching balance is future-dated. Review Savings or enter a total.'}
+    if any(type(account['amount']) is not int or account['amount'] < 0 for account in accounts):
+        return {'value': '', 'note': 'A matching balance is invalid or negative. Review Savings or enter a total.'}
+    notes = ['Savings: ' + '; '.join(f"{account['name']} ({account['recorded_on']})" for account in accounts)]
+    if len(set(recorded)) > 1:
+        notes.append('Balances have different dates')
+    stale = sum((today - recorded_on).days > 31 for recorded_on in recorded)
+    if stale:
+        notes.append(f'Starting amount left blank: {stale} balance{"s" if stale != 1 else ""} over 31 days old; update Savings or enter a manual amount')
+        return {'value': '', 'note': '. '.join(notes) + '.'}
+    return {'value': sum(account['amount'] for account in accounts) / 100, 'note': '. '.join(notes) + '.'}
 
 
 def choices(connection, accounts, today=None):
@@ -111,7 +125,7 @@ def choices(connection, accounts, today=None):
         result.append({'id': 'owner:' + key, 'name': name, 'saved': False, 'owner': name, 'values': {'name': name}})
     for item in result:
         owned = [account for account in accounts if named_owner(item['owner']) and normalized(account['owner_name']) == normalized(item['owner'])]
-        item['balances'] = {field: balance([account for account in owned if account['classification'] == classification])
+        item['balances'] = {field: balance([account for account in owned if account['classification'] == classification], today)
                             for field, classification in [('starting_pretax', 'pre_tax'), ('starting_roth', 'post_tax')]}
     return result
 

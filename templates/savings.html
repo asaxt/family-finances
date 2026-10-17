@@ -4,29 +4,37 @@
 {% block heading %}Savings & investments{% endblock %}
 
 {% block content %}
-<p><a class="text-link" href="/people">Manage people and Savings ownership for Plan →</a></p>
+{% set recorded_accounts = savings_accounts|selectattr('recorded_on')|list %}
+{% set goal_accounts = savings_accounts|selectattr('goal_eligible')|list %}
+{% set recorded_goal_accounts = goal_accounts|selectattr('recorded_on')|list %}
+{% set missing_balances = savings_accounts|length - recorded_accounts|length %}
+{% set taxable_accounts = recorded_accounts|selectattr('classification', 'equalto', 'taxable')|list %}
+{% set pretax_accounts = recorded_accounts|selectattr('classification', 'equalto', 'pre_tax')|list %}
+{% set posttax_accounts = recorded_accounts|selectattr('classification', 'equalto', 'post_tax')|list %}
+<p><a class="text-link" href="/people">People & ownership ↗</a> · <a class="text-link" href="/plan">Open Plan ↗</a></p>
 <section class="metric-grid savings-metrics">
   <article class="metric-card hero">
     <span class="metric-label">Goal-eligible savings</span>
-    <div class="metric-value">{{ goal_eligible_total|money }}</div>
-    <span class="metric-note">From the accounts you chose</span>
+    <div class="metric-value">{{ goal_eligible_total|money if recorded_goal_accounts else '—' }}</div>
+    <span class="metric-note">{{ recorded_goal_accounts|length }} of {{ goal_accounts|length }} selected balances recorded</span>
   </article>
   <article class="metric-card">
     <span class="metric-label">Remaining to goal</span>
-    <div class="metric-value">{{ savings_goal_remaining|money }}</div>
-    <span class="metric-note">{{ "%.1f"|format(savings_goal_percent) }}% of {{ savings_goal|money }}</span>
+    <div class="metric-value">{{ savings_goal_remaining|money if recorded_goal_accounts else '—' }}</div>
+    <span class="metric-note">{% if recorded_goal_accounts %}{{ "%.1f"|format(savings_goal_percent) }}% of {{ savings_goal|money }}{% else %}Goal {{ savings_goal|money }}{% endif %}</span>
   </article>
   <article class="metric-card">
     <span class="metric-label">All tracked savings</span>
-    <div class="metric-value">{{ all_savings_total|money }}</div>
-    <span class="metric-note">Latest balance from {{ savings_accounts|length }} active account{{ "" if savings_accounts|length == 1 else "s" }}</span>
+    <div class="metric-value">{{ all_savings_total|money if recorded_accounts else '—' }}</div>
+    <span class="metric-note">{{ recorded_accounts|length }} of {{ savings_accounts|length }} active balances recorded</span>
   </article>
   <article class="metric-card">
     <span class="metric-label">Taxable</span>
-    <div class="metric-value">{{ classification_totals.taxable|money }}</div>
-    <span class="metric-note">Pre-tax {{ classification_totals.pre_tax|money }} · Post-tax {{ classification_totals.post_tax|money }}</span>
+    <div class="metric-value">{{ classification_totals.taxable|money if taxable_accounts else '—' }}</div>
+    <span class="metric-note">Pre-tax {{ classification_totals.pre_tax|money if pretax_accounts else '—' }} · Post-tax {{ classification_totals.post_tax|money if posttax_accounts else '—' }}</span>
   </article>
 </section>
+{% if missing_balances %}<p class="goal-note" role="status">{{ missing_balances }} account{{ '' if missing_balances == 1 else 's' }} need{{ 's' if missing_balances == 1 else '' }} a balance. Totals and goal progress include recorded amounts only; missing balances are unknown.</p>{% endif %}
 
 {% if savings_error %}
   <p class="form-message error savings-page-message">
@@ -43,18 +51,19 @@
   <div class="goal-heading">
     <div>
       <p class="eyebrow">Your savings goal</p>
-      <h2>{{ goal_eligible_total|money }} of {{ savings_goal|money }}</h2>
+      <h2>{% if recorded_goal_accounts %}{{ goal_eligible_total|money }} of {% else %}Goal: {% endif %}{{ savings_goal|money }}</h2>
     </div>
-    <strong>{{ "%.1f"|format(savings_goal_percent) }}%</strong>
+    <strong>{{ ("%.1f"|format(savings_goal_percent)) ~ '%' if recorded_goal_accounts else '—' }}</strong>
   </div>
   <div class="progress savings-goal-progress">
     <span style="width: {{ [savings_goal_percent, 100]|min }}%"></span>
   </div>
   <div class="goal-footer">
     <p class="goal-note">
-      {% if savings_goal_remaining %}{{ savings_goal_remaining|money }} remains.
+      {% if not goal_accounts %}Choose “Count toward goal” on an account below.
+      {% elif not recorded_goal_accounts %}Record a balance to see progress.
+      {% elif savings_goal_remaining %}{{ savings_goal_remaining|money }} remains from recorded balances.
       {% else %}Goal reached.{% endif %}
-      Only accounts marked goal-eligible are included.
     </p>
     <form class="goal-form" method="post" action="/api/savings-goal">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -62,6 +71,7 @@
       <button class="button secondary" type="submit">Update goal</button>
     </form>
   </div>
+  <p class="goal-note">“Count toward goal” tracks progress; it does not reserve money. Plan uses these same balances by owner and tax type. Adjust Plan's starting investments for money set aside for other goals.</p>
 </section>
 
 <section class="content-grid savings-entry-grid">
@@ -78,7 +88,7 @@
             <label>
               <span>{{ account.institution }} · {{ account.owner_name }}</span>
               <strong>{{ account.name }}</strong>
-              <span class="currency-input"><span>$</span><input type="number" name="account_{{ account.id }}" min="0" max="9999999999" step="0.01" inputmode="decimal" placeholder="{{ '%.2f'|format(account.amount / 100) if account.recorded_on else '0.00' }}"></span>
+              <span class="currency-input"><span>$</span><input type="number" name="account_{{ account.id }}" min="0" max="9999999999" step="0.01" inputmode="decimal" placeholder="{{ '%.2f'|format(account.amount / 100) if account.recorded_on else 'Amount' }}"></span>
               <small>{% if account.recorded_on %}Latest: {{ account.amount|money }} on {{ account.recorded_on }}{% else %}No balance recorded yet{% endif %}</small>
             </label>
           {% endfor %}
@@ -161,20 +171,22 @@
   {% elif saved_count %}showNotice("Saved {{ saved_count }} balance {{ 'entry' if saved_count == '1' else 'entries' }}.");{% endif %}
   const savingsTimeline = {{ savings_timeline|tojson }};
   if (savingsTimeline.length) {
+    const savingsTheme = getComputedStyle(document.documentElement);
+    const savingsColor = name => savingsTheme.getPropertyValue(name).trim();
     new Chart(document.querySelector("#savings-chart"), {
       type: "line",
       data: {
         labels: savingsTimeline.map(point => point.date),
         datasets: [
-          { label: "Total saved", data: savingsTimeline.map(point => point.total / 100), borderColor: "#163f32", backgroundColor: "rgba(22, 63, 50, .08)", borderWidth: 3, pointRadius: 3, tension: .22, fill: true },
-          { label: "Taxable", data: savingsTimeline.map(point => point.taxable / 100), borderColor: "#e7a944", borderWidth: 2, pointRadius: 2, tension: .22 },
-          { label: "Pre-tax", data: savingsTimeline.map(point => point.pre_tax / 100), borderColor: "#6686c4", borderWidth: 2, pointRadius: 2, tension: .22 },
-          { label: "Post-tax", data: savingsTimeline.map(point => point.post_tax / 100), borderColor: "#b76a79", borderWidth: 2, pointRadius: 2, tension: .22 }
+          { label: "Total saved", data: savingsTimeline.map(point => point.total / 100), borderColor: savingsColor('--ocean'), backgroundColor: "rgba(19, 59, 80, .06)", borderWidth: 3, pointRadius: 3, tension: .22, fill: true },
+          { label: "Taxable", data: savingsTimeline.map(point => point.taxable / 100), borderColor: savingsColor('--coral'), borderWidth: 2, pointRadius: 2, tension: .22 },
+          { label: "Pre-tax", data: savingsTimeline.map(point => point.pre_tax / 100), borderColor: savingsColor('--teal'), borderWidth: 2, pointRadius: 2, tension: .22 },
+          { label: "Post-tax", data: savingsTimeline.map(point => point.post_tax / 100), borderColor: savingsColor('--rose'), borderWidth: 2, pointRadius: 2, tension: .22 }
         ]
       },
       options: {
         responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
-        scales: { y: { beginAtZero: true, ticks: { callback: value => `$${Number(value).toLocaleString()}` }, grid: { color: "#edf0ed" } }, x: { grid: { display: false } } },
+        scales: { y: { beginAtZero: true, ticks: { callback: value => `$${Number(value).toLocaleString()}` }, grid: { color: savingsColor('--line') } }, x: { grid: { display: false } } },
         plugins: { legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 8 } }, tooltip: { callbacks: { label: item => `${item.dataset.label}: $${item.raw.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}` } } }
       }
     });
