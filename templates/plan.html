@@ -1,128 +1,128 @@
 {% extends "base.html" %}
 {% block title %}Plan · {{ app_name }}{% endblock %}
-{% block heading %}Plan your next chapter{% endblock %}
-{% block eyebrow %}Lifetime projections · Preview{% endblock %}
+{% block heading %}Plan{% endblock %}
+{% block eyebrow %}Explore · Compare · Keep{% endblock %}
 {% macro number(name, label, value='', min=0, max=100000000, step=1, help='') %}
 <label class="plan-field"><span>{{ label }}</span><input type="number" name="{{ name }}" value="{{ value }}" min="{{ min }}" max="{{ max }}" step="{{ step }}" required>{% if help %}<small>{{ help }}</small>{% endif %}</label>
 {% endmacro %}
+{% macro icon(name) %}<svg class="ui-icon" aria-hidden="true"><use href="/static/icons.svg#{{ name }}"></use></svg>{% endmacro %}
 {% block content %}
-<section class="panel plan-intro">
-  <div><h2>Two people. One household plan.</h2><p>Give each spouse their own income and retirement timeline. Estimated taxes and shared spending determine what reaches brokerage investments.</p></div>
-  <a class="button secondary" href="/people">People profiles</a>
+<section class="panel plan-workspace" aria-label="Saved plans">
+  <div class="panel-header"><h2>Saved plans</h2><a class="text-link" href="/people">People →</a></div>
+  <div class="plan-library-controls">
+    <label class="plan-field"><span>Saved plans</span><select id="plan-library"><option value="">New plan</option></select></label>
+    <label class="plan-field"><span>Plan name</span><input id="plan-name" maxlength="60" placeholder="Give this plan a name" autocomplete="off"></label>
+    <button type="button" class="button primary" id="workspace-save" title="Save this plan">{{ icon('save') }} Save</button>
+    <button type="button" class="button secondary" id="workspace-copy" title="Save this variation as a new plan">{{ icon('copy') }} Save a copy</button>
+    <button type="button" class="button secondary" id="workspace-discard" title="Restore the last saved inputs">↶ Discard edits</button>
+    <button type="button" class="icon-button" id="workspace-delete" aria-label="Delete selected saved plan" title="Delete saved plan">×</button>
+  </div>
+  <p id="plan-save-status" class="plan-workspace-status" role="status">Loading saved plans…</p>
+  <p class="plan-note">{% if read_only_mirror %}Development plans are encrypted separately. Your financial snapshot stays read-only.{% else %}Plans stay in your encrypted vault.{% endif %} Saving keeps the inputs and spending snapshot; changes remain a draft until you save.</p>
 </section>
-<form id="plan-form" method="post" action="/api/projections" autocomplete="off">
+<div class="plan-layout">
+<form id="plan-form" class="plan-controls" method="post" action="/api/projections" autocomplete="off">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <section class="panel plan-section">
-    <div class="panel-header"><div><p class="eyebrow">Combined household</p><h2>Shared planning inputs</h2></div></div>
-    <div class="plan-fields">
-      <label class="plan-field"><span>Married filing status</span><select name="filing_status"><option value="joint" {{ 'selected' if household_plan.filing_status == 'joint' }}>Married filing jointly</option><option value="separate" {{ 'selected' if household_plan.filing_status == 'separate' }}>Married filing separately</option></select></label>
-      {{ number('withdrawal_rate', 'Household annual withdrawal (%)', household_plan.withdrawal_rate, max=100, step='0.1', help='One percentage of the combined opening retirement and brokerage balance. Withdraw half the dollar amount from each; if one side is insufficient, use the other for the remainder.') }}
-      <label class="plan-field"><span>Start household withdrawals</span><select name="withdrawal_start"><option value="first_retirement" {{ 'selected' if household_plan.withdrawal_start == 'first_retirement' }}>When the first spouse retires</option><option value="both_retired" {{ 'selected' if household_plan.withdrawal_start == 'both_retired' }}>When both spouses are retired</option></select></label>
-      {{ number('starting_taxable', 'Starting taxable brokerage investments ($)', household_plan.starting_taxable, max=1000000000, step='0.01') }}
-      {{ number('inflation_rate', 'Annual inflation (%)', household_plan.inflation_rate, max=15, step='0.1', help='Income, spending, and indexed tax thresholds follow this assumption.') }}
-      {{ number('growth_rate', 'Annual investment growth (%)', household_plan.growth_rate, min=-30, max=30, step='0.1', help='Nominal return after fees. Brokerage capital-gains and dividend taxes are not modeled.') }}
-    </div>
-    <p id="taxable-source" class="plan-note"></p><button type="button" class="button secondary" id="use-taxable">Use latest taxable Savings</button>
-    <div id="plan-separate-fields" class="plan-sources" {{ 'hidden' if household_plan.filing_status != 'separate' }}>
-      <label class="plan-field"><span>Income allocation on separate returns</span><select name="mfs_allocation"><option value="" {{ 'selected' if not household_plan.mfs_allocation }}>Choose the applicable allocation</option>
-        <option value="community_wages" {{ 'selected' if household_plan.mfs_allocation == 'community_wages' }}>Split net wages equally; retirement withdrawals stay with each owner</option>
-        <option value="community_all" {{ 'selected' if household_plan.mfs_allocation == 'community_all' }}>Split net wages and taxable retirement withdrawals equally</option>
-        <option value="individual" {{ 'selected' if household_plan.mfs_allocation == 'individual' }}>Each person reports their own income</option>
-      </select><small>Washington community earnings generally split equally. IRA withdrawals stay with their owner; employer retirement benefits can include community income. For Oregon separate returns, each person's own income is generally appropriate. Choose the assumption that matches your property and account treatment; mixed ownership is not modeled. Payroll taxes always follow the worker.</small></label>
-    </div>
-    {{ number('tax_payments_in_spending', 'Income-tax payments already included in recorded spending ($ / year)', household_plan.tax_payments_in_spending, min=-100000000, step='0.01', help='Remove only income-tax payments already counted above, net of refunds; use a negative amount if refunds exceed payments. Do not include payroll withholding absent from transactions, property tax, or sales tax. The model adds its own estimated income taxes.') }}
-    {% if plan_withdrawal_updated %}<p class="plan-note" role="status">Your saved profiles have been retained. Withdrawals now use one household rate and an equal-dollar split across retirement and brokerage. Review the shared rate and start setting; differing old rates require a new selection. Saving explicitly updates the stored plan.</p>{% endif %}
-  </section>
-  <section class="panel plan-section">
-    <div class="panel-header"><div><p class="eyebrow">People</p><h2>Income, retirement timing & tax profiles</h2></div></div>
-    <p class="plan-note">This preview models two married adults with an age difference up to 25 years. State locations stay fixed throughout the projection. The work state means where work is physically performed, not the employer's headquarters.</p>
-    {% for person in household_plan.people %}{% set prefix = 'person_' ~ loop.index0 ~ '_' %}
-    <fieldset class="plan-person" data-person><legend>Spouse {{ loop.index }}</legend>
-    <label class="plan-field"><span>Person / saved profile</span><select data-profile-index="{{ loop.index0 }}"><option value="">Enter details manually</option>{% set person_index = loop.index0 %}{% for choice in person_choices %}<option value="{{ choice.id }}" {{ 'selected' if plan_references.people[person_index].choice == choice.id }}>{{ choice.name }} · {{ 'Saved profile' if choice.saved else 'Account owner' }}</option>{% endfor %}</select></label>
-    <div class="plan-actions"><button type="button" class="button secondary" data-use-profile="{{ loop.index0 }}">Use profile details</button><button type="button" class="button secondary" data-use-savings="{{ loop.index0 }}">Use latest Savings</button></div>
-    <p class="plan-note" data-person-source="{{ loop.index0 }}" role="status"></p><div class="plan-fields">
-      <label class="plan-field"><span>Name or label</span><input name="{{ prefix }}name" value="{{ person.name }}" maxlength="60" required></label>
-      {{ number(prefix ~ 'annual_income', 'Gross annual income ($)', person.annual_income, step='0.01', help='W-2 pay before taxes and retirement contributions. Enter 0 if not working.') }}
-      {{ number(prefix ~ 'tax_advantaged_rate', 'Tax-advantaged saving (%)', person.tax_advantaged_rate, max=100, step='0.1') }}
-      <label class="plan-field"><span>New retirement contributions</span><select name="{{ prefix }}contribution_type"><option value="pre_tax" {{ 'selected' if person.contribution_type == 'pre_tax' }}>Pre-tax</option><option value="roth" {{ 'selected' if person.contribution_type == 'roth' }}>Roth</option></select><small>Uses the 2026 $24,500 employee-plan base limit, indexed with inflation. Catch-up contributions, IRA contributions, and employer matches are excluded. Amounts above the limit remain available for brokerage.</small></label>
-      {{ number(prefix ~ 'current_age', 'Current age', person.current_age, min=18, max=plan_end_age-1) }}
-      {{ number(prefix ~ 'retirement_age', 'Retirement age', person.retirement_age, min=18, max=plan_end_age-1, help='Use current age if already retired.') }}
-      {{ number(prefix ~ 'starting_pretax', 'Starting pre-tax retirement investments ($)', person.starting_pretax, max=1000000000, step='0.01', help='Allocate the recorded retirement balances to their owners. Enter 0 if none.') }}
-      {{ number(prefix ~ 'starting_roth', 'Starting Roth retirement investments ($)', person.starting_roth, max=1000000000, step='0.01', help='Assumes all withdrawals are qualified and tax-free. Enter 0 if none.') }}
-
-      {% for field, label in [('residence_state', 'State of residence'), ('employment_state', 'State of employment / physical work')] %}
-      <label class="plan-field"><span>{{ label }}</span><select name="{{ prefix }}{{ field }}" required><option value="">Choose a state</option>{% for code, label in [('WA', 'Washington'), ('OR', 'Oregon')] %}<option value="{{ code }}" {{ 'selected' if person[field] == code }}>{{ label }}</option>{% endfor %}</select></label>
+    <div class="panel-header"><h2>Your next move</h2><label class="plan-note"><input type="checkbox" id="plan-auto" checked> Live updates</label></div>
+    <div class="plan-quick-fields">
+      {% for person in household_plan.people %}
+      {{ number('person_' ~ loop.index0 ~ '_retirement_age', person.name ~ ' · retire at', person.retirement_age, min=18, max=plan_end_age-1) }}
       {% endfor %}
-      {{ number(prefix ~ 'work_state_percent', 'Work physically performed in work state (%)', person.work_state_percent, max=100, step='0.1', help='The remainder is performed in the residence state. Use 100 if all work is in the selected work state.') }}
-    </div></fieldset>
-    {% endfor %}
-    <details class="plan-sources"><summary>Starting investment sources and split</summary>
-      <p>New plans use the latest active Savings balances when ownership is clear. Shared retirement accounts are not split automatically. Missing balances stay blank. Post-tax Savings balances are assumed to be qualified Roth investments: confirm this or edit the amount. Editing a field makes it a manual assumption; use the buttons above to reconnect it. Saved connected fields refresh when you reopen Plan, while saved manual assumptions stay unchanged. Linked bank balances, property, and debts are excluded. Remove money reserved for other goals.</p>
-      <p id="plan-starting-split"></p>
-      {% if not all_savings_total %}<p><strong>No recorded investment split is available.</strong> Enter starting investments for each owner and brokerage above.</p>{% endif %}
-      {% if savings_accounts %}<ul>{% for account in savings_accounts %}<li>{{ account.name }} · {{ account.classification_label }} · {{ account.amount|money if account.recorded_on else 'Unknown balance' }} · {{ account.recorded_on or 'No recorded date' }}</li>{% endfor %}</ul>{% else %}<p>No manually recorded savings accounts yet.</p>{% endif %}
-      {% if stale_savings_accounts %}<p><strong>Some balances are missing or more than one month old.</strong> Missing balances are not evidence of zero investments.</p>{% endif %}
-      <a class="text-link" href="/savings">Review Savings →</a>
-    </details>
-  </section>
-  <section class="panel plan-section">
-    <div class="panel-header"><div><p class="eyebrow">Calculated for you</p><h2>Your yearly spending and savings</h2></div></div>
-    <div class="plan-summary">
-      <article><h3>Recorded yearly spending</h3><p class="metric-value">{{ planning_trend.annual_spending|money if planning_trend.annual_spending is not none else 'Not available' }}</p><p class="plan-note">12-month monthly average × 12, using {{ planning_trend.date_from }} through {{ planning_trend.date_to }}.</p></article>
-      <article><h3>Current monthly spending average</h3><p class="metric-value">{{ (planning_trend.annual_spending / 12)|money if planning_trend.annual_spending is not none else 'Not available' }}</p><p class="plan-note">Average across the last 12 completed months, not this month's spending to date. Individual recorded months are listed below.</p></article>
-      <article><h3>Savings / money out → taxable brokerage</h3><p id="plan-taxable-savings" class="metric-value">—</p><p class="plan-note">Positive cash remaining after income, combined investment withdrawals, retirement contributions, modeled taxes, and spending. Any shortfall is shown as a funding gap.</p><p id="plan-tax-advantaged" class="plan-note"></p></article>
+      <label class="plan-field"><span>Monthly lifestyle spending ($)</span><input type="number" name="monthly_lifestyle_spending" min="0" max="8333333" step="0.01" placeholder="Use recorded spending" value="{{ (household_plan.annual_lifestyle_spending / 12)|round(2) if household_plan.get('annual_lifestyle_spending') is not none else '' }}"><small>Today’s dollars, before modeled income taxes. Leave blank to use history.</small></label>
     </div>
-
-    <p id="plan-cash-flow-note" class="plan-note"></p>
-    <p class="plan-note" id="plan-tax-summary">Calculate to see federal income, federal payroll, Oregon, and Washington tax estimates.</p>
-    <details class="plan-sources"><summary>Review the 12-month spending estimate</summary>
-      <p>Uses the same category treatment as Spending Trends across all spending-enabled accounts. Transfers, pending transactions, and excluded records are omitted. Refunds reduce spending. The current partial month is omitted; missing months are not treated as zero.</p>
-      <p>{{ planning_trend.observed_months }} of 12 months contain included records. This does not prove every account or transaction is present. Review your imports and categories before relying on this estimate.</p>
-      {% if planning_trend.unclassified %}<p><strong>Uncategorized records remain in this period.</strong> Their spending treatment is unknown, so the estimate may understate spending.</p>{% endif %}
-      {% if planning_trend.other_currency %}<p><strong>Non-USD records are present.</strong> Currency conversion is not supported; a combined spending estimate is unavailable.</p>{% endif %}
-      <div class="table-wrap"><table><thead><tr><th>Completed month</th><th>Net spending recorded (USD)</th></tr></thead><tbody>{% for month in planning_trend.months %}<tr><td>{{ month.month }}</td><td>{{ month.spending|money if month.spending is not none else 'No included records' }}</td></tr>{% endfor %}</tbody></table></div>
-      <a class="text-link" href="/trends">Review Spending Trends →</a>
+    <p id="plan-source-status" class="plan-note"></p>
+    <button type="button" id="plan-refresh-source" class="text-link">↻ Use latest Savings, people & spending</button>
+    <details class="plan-sources"><summary>Where the spending estimate comes from</summary>
+      <p id="plan-spending-source" class="plan-note"></p>
+      <p class="plan-note">Twelve completed months. Transfers, pending and excluded records are omitted; refunds reduce spending. Missing months and mixed currencies are not treated as zero.</p>
+      <p id="plan-source-coverage" class="plan-note"></p>
+      <p id="plan-source-warning" class="plan-shortfall" hidden>Uncategorized records may understate spending.</p>
+      <a href="/trends" class="text-link">Review spending →</a>
     </details>
-    {% if planning_trend.annual_spending is none %}<p class="plan-shortfall">A usable 12-month estimate is required. Import missing history and review currency and spending treatment in the production app, then refresh development.</p>{% endif %}
-    <div class="plan-actions"><button class="button primary" id="plan-calculate" type="submit" {{ 'disabled' if planning_trend.annual_spending is none }}>Calculate plan</button><span class="plan-note">Projects until the younger spouse reaches {{ plan_end_age }}. Calculating does not save inputs.</span></div>
-    <div class="plan-actions">{% if read_only_mirror %}<span class="plan-note">Development is read-only. Household profiles and assumptions are temporary here.</span>{% else %}<button class="button secondary" id="plan-save" type="button">Save household & assumptions</button><span class="plan-note">Saved only in your local encrypted vault. Comparisons remain temporary.</span>{% endif %}</div>
-    <p id="plan-save-status" class="plan-note" role="status"></p>
+    <div class="plan-actions"><button class="button primary" id="plan-calculate" type="submit">↻ Update</button><span class="plan-note" id="plan-live-status" role="status">Complete your inputs to begin.</span></div>
     <p id="plan-error" role="alert" hidden></p>
   </section>
-</form>
-<section class="panel plan-section" id="plan-results" hidden aria-label="Projection results">
-  <div class="panel-header"><div><p class="eyebrow">Your projected path</p><h2>Retirement & taxable investments</h2></div>
-    <label class="plan-field"><span>Show amounts in</span><select id="plan-dollar-mode"><option value="real">Today's dollars</option><option value="nominal">Future dollars</option></select></label>
-  </div>
-  <p id="plan-result-status" class="plan-note" role="status"></p>
-  <div class="plan-actions"><button class="button secondary" id="plan-pin" type="button">Keep as baseline</button><button class="button secondary" id="plan-unpin" type="button" hidden>Clear comparison</button><span class="plan-note">Keep a baseline, edit any input, then calculate again to compare.</span></div>
-  <section class="plan-monthly" aria-labelledby="plan-monthly-heading">
-    <div class="panel-header"><div><p class="eyebrow">Your monthly lifestyle</p><h2 id="plan-monthly-heading">Spending now and in retirement</h2></div>
-      <label class="plan-field"><span>Projection year</span><select id="plan-monthly-year"></select></label>
+  <details class="panel plan-section" open>
+    <summary><strong>Planned expenses</strong><span class="plan-note">One-time or multi-year</span></summary>
+    <p class="plan-note">Amounts are in today’s dollars. Funded at year end from available taxable investments, including that year’s surplus. Retirement funds stay untouched by these extra expenses.</p>
+    <div id="plan-events-list" class="plan-events-list"></div>
+    <button type="button" class="button secondary" id="plan-add-event">＋ Add expense</button>
+  </details>
+  <details class="panel plan-section" id="plan-people-section">
+    <summary><strong>People & income</strong><span class="plan-note">Earnings, investments, location</span></summary>
+    {% for person in household_plan.people %}{% set prefix = 'person_' ~ loop.index0 ~ '_' %}{% set person_index = loop.index0 %}
+    <fieldset class="plan-person" data-person><legend>Person {{ loop.index }}</legend>
+      <label class="plan-field"><span>Saved person</span><select data-profile-index="{{ loop.index0 }}"><option value="">Manual details</option>{% for choice in person_choices %}<option value="{{ choice.id }}" {{ 'selected' if plan_references.people[person_index].choice == choice.id }}>{{ choice.name }}</option>{% endfor %}</select></label>
+      <div class="plan-actions"><button type="button" class="button secondary" data-use-profile="{{ loop.index0 }}">↻ Profile</button><button type="button" class="button secondary" data-use-savings="{{ loop.index0 }}">↻ Savings</button></div>
+      <p class="plan-note" data-person-source="{{ loop.index0 }}"></p>
+      <div class="plan-fields">
+        <label class="plan-field"><span>Name</span><input name="{{ prefix }}name" value="{{ person.name }}" maxlength="60" required></label>
+        {{ number(prefix ~ 'current_age', 'Age now', person.current_age, min=18, max=plan_end_age-1) }}
+        {{ number(prefix ~ 'annual_income', 'Gross annual pay ($)', person.annual_income, step='0.01') }}
+        {{ number(prefix ~ 'tax_advantaged_rate', 'Retirement saving (%)', person.tax_advantaged_rate, max=100, step='0.1') }}
+        <label class="plan-field"><span>Contribution type</span><select name="{{ prefix }}contribution_type"><option value="pre_tax" {{ 'selected' if person.contribution_type == 'pre_tax' }}>Pre-tax</option><option value="roth" {{ 'selected' if person.contribution_type == 'roth' }}>Roth</option></select></label>
+        {{ number(prefix ~ 'starting_pretax', 'Pre-tax investments ($)', person.starting_pretax, max=1000000000, step='0.01') }}
+        {{ number(prefix ~ 'starting_roth', 'Roth investments ($)', person.starting_roth, max=1000000000, step='0.01') }}
+        {% for field, label in [('residence_state', 'Home state'), ('employment_state', 'Physical work state')] %}
+        <label class="plan-field"><span>{{ label }}</span><select name="{{ prefix }}{{ field }}" required><option value="">Choose</option>{% for code in ['WA', 'OR'] %}<option value="{{ code }}" {{ 'selected' if person[field] == code }}>{{ 'Washington' if code == 'WA' else 'Oregon' }}</option>{% endfor %}</select></label>
+        {% endfor %}
+        {{ number(prefix ~ 'work_state_percent', 'Work in work state (%)', person.work_state_percent, max=100, step='0.1') }}
+      </div>
+    </fieldset>{% endfor %}
+    <p class="plan-note">Two married adults; WA/OR tax estimates. Enter 0 for known zero balances. Unknown amounts stay blank. Editing connected fields makes them manual assumptions.</p>
+  </details>
+  <details class="panel plan-section">
+    <summary><strong>Shared planning inputs</strong><span class="plan-note">Growth, withdrawals & taxes</span></summary>
+    <div class="plan-fields">
+      {{ number('starting_taxable', 'Taxable investments available to this plan ($)', household_plan.starting_taxable, max=1000000000, step='0.01') }}
+      {{ number('withdrawal_rate', 'Annual household withdrawal (%)', household_plan.withdrawal_rate, max=100, step='0.1') }}
+      {{ number('inflation_rate', 'Inflation (%)', household_plan.inflation_rate, max=15, step='0.1') }}
+      {{ number('growth_rate', 'Investment growth (%)', household_plan.growth_rate, min=-30, max=30, step='0.1') }}
+      <label class="plan-field"><span>Withdrawals begin</span><select name="withdrawal_start"><option value="first_retirement" {{ 'selected' if household_plan.withdrawal_start == 'first_retirement' }}>First retirement</option><option value="both_retired" {{ 'selected' if household_plan.withdrawal_start == 'both_retired' }}>Both retired</option></select></label>
+      <label class="plan-field"><span>Married tax filing</span><select name="filing_status"><option value="joint" {{ 'selected' if household_plan.filing_status == 'joint' }}>Jointly</option><option value="separate" {{ 'selected' if household_plan.filing_status == 'separate' }}>Separately</option></select></label>
     </div>
-    <p class="plan-note">Starts with the first year both spouses are retired. Choose any year to see the transition or later retirement. Figures are monthly averages of the annual model, not a month-by-month forecast.</p>
-    <div id="plan-monthly-summary" class="plan-summary" aria-live="polite"></div>
-    <p class="plan-note">Available spending is income plus the combined household withdrawal, minus retirement saving and modeled taxes. The withdrawal already includes both retirement and brokerage accounts; no extra brokerage top-up is added. These figures do not establish a sustainable maximum spending budget. Social Security benefits and other excluded income are not included.</p>
+    <p id="taxable-source" class="plan-note"></p><button type="button" class="text-link" id="use-taxable">↻ Use latest taxable Savings</button>
+    <p class="plan-note">Savings goal progress does not reserve money. Exclude money you intend to keep outside this plan from the starting balance. A planned expense above already reduces investments when it occurs; do not subtract it twice.</p>
+    <div id="plan-separate-fields" {{ 'hidden' if household_plan.filing_status != 'separate' }}>
+      <label class="plan-field"><span>Separate-return allocation</span><select name="mfs_allocation"><option value="">Choose</option>{% for key, label in [('community_wages', 'Split net wages; withdrawals follow owner'), ('community_all', 'Split net wages and taxable withdrawals'), ('individual', 'Each person’s own income')] %}<option value="{{ key }}" {{ 'selected' if household_plan.mfs_allocation == key }}>{{ label }}</option>{% endfor %}</select><small>Choose the treatment that matches your community/separate property. Payroll taxes follow each worker.</small></label>
+    </div>
+    {{ number('tax_payments_in_spending', 'Income taxes already in recorded spending ($ / year)', household_plan.tax_payments_in_spending, min=-100000000, step='0.01', help='Net of refunds; excludes payroll withholding absent from transactions. A direct lifestyle assumption is already tax-adjusted. This historical correction must still be valid; use 0 when history is unavailable.') }}
+    {% if plan_withdrawal_updated %}<p class="plan-note">Your saved profiles have been retained. Review the shared withdrawal rate before saving.</p>{% endif %}
+    <details class="plan-sources"><summary>Balance sources</summary><p id="plan-starting-split" class="plan-note"></p>
+      <p class="plan-note">Each investment is counted once. Shared retirement accounts need manual allocation. Post-tax Savings is assumed to be qualified Roth; confirm that treatment. Linked bank balances, property and debts are excluded.</p>
+      {% if savings_accounts %}<ul>{% for account in savings_accounts %}<li>{{ account.name }} · {{ account.classification_label }} · {{ account.recorded_on or 'Unknown balance' }}</li>{% endfor %}</ul>{% else %}<p>No manually recorded savings accounts yet.</p>{% endif %}
+      <a href="/savings" class="text-link">Review Savings →</a>
+    </details>
+  </details>
+</form>
+<div class="plan-canvas">
+  <section class="panel plan-empty-state" id="plan-empty-state"><span aria-hidden="true">↗</span><h2>See your possibilities</h2><p>Add your people, starting investments and spending. Your projected path will appear here as you edit.</p><button type="button" id="plan-open-inputs" class="button secondary">Complete inputs</button></section>
+  <section class="panel plan-section" id="plan-results" hidden aria-label="Projection results">
+    <div class="panel-header"><h2>Projection</h2><label class="plan-field"><span>Dollar view</span><select id="plan-dollar-mode"><option value="real">Today’s dollars</option><option value="nominal">Future dollars</option></select></label></div>
+    <p id="plan-result-status" class="plan-note" role="status"></p>
+    <div class="plan-actions"><button class="button secondary" id="plan-pin" type="button">◇ Compare from here</button><button class="button secondary" id="plan-unpin" type="button" hidden>× Clear comparison</button></div>
+    <label class="plan-field"><span>Or compare with a saved plan</span><select id="plan-compare-library"><option value="">Choose a plan</option></select></label>
+    <div id="plan-delta" class="plan-delta" hidden></div>
+    <div class="plan-chart"><canvas id="plan-chart" role="img" aria-label="Projected investments. Equivalent figures are in the year-by-year table."></canvas></div>
+    <div id="plan-summary" class="plan-kpis"></div>
+    <section class="plan-monthly" aria-labelledby="plan-monthly-heading">
+      <div class="panel-header"><h2 id="plan-monthly-heading">Monthly lifestyle</h2><label class="plan-field"><span>Year</span><select id="plan-monthly-year"></select></label></div>
+      <div id="plan-monthly-summary" class="plan-summary"></div>
+      <p class="plan-note">Recurring monthly averages, after modeled taxes. Planned expenses appear separately and do not inflate your recurring income. A funding gap is not automatically covered by extra withdrawals.</p>
+    </section>
+    <details class="plan-sources" id="plan-table-details"><summary>Year-by-year numbers</summary><p class="plan-note">Balances are at year end; income and spending belong to the year shown. All amounts follow the selected dollar view.</p><div class="table-wrap"><table><thead><tr><th>Year</th><th>Scenario</th><th>Retirement</th><th>Taxable</th><th>Income</th><th>Taxes</th><th>Lifestyle</th><th>Planned expenses</th><th>Expense gap</th><th>Lifestyle gap</th></tr></thead><tbody id="plan-table"></tbody></table></div></details>
   </section>
-  <div class="plan-chart"><canvas id="plan-chart" role="img" aria-label="Projected retirement and taxable investment balances, also shown in the year-by-year table."></canvas></div>
-  <div id="plan-summary" class="plan-summary"></div>
-  <details class="plan-sources"><summary>Year-by-year numbers</summary>
-    <p class="plan-note">Rows show the start of each calendar year and both ages. Cash flows apply to the preceding calendar year; the first row is the starting balance. Negative cash flow is an unfunded spending gap under the chosen withdrawal rate; no extra withdrawal is made. Dollar amounts follow the display above.</p>
-    <div class="table-wrap"><table><thead><tr><th>Year / ages</th><th>Scenario</th><th>Retirement investments</th><th>Taxable investments</th><th>Income</th><th>Tax-advantaged saving</th><th>Combined investment withdrawal</th><th>Federal income tax</th><th>Federal payroll tax</th><th>Oregon tax</th><th>Washington tax</th><th>Interstate credit included</th><th>Adjusted spending</th><th>Surplus / funding gap</th><th>Unfunded spending</th></tr></thead><tbody id="plan-table"></tbody></table></div>
+  <details class="panel plan-section"><summary><strong>Assumptions & limits</strong></summary>
+    <p class="plan-note">Fixed-rate illustrations, not predictions or a probability of success. Both adults are assumed alive through the younger person’s age {{ plan_end_age }}. Income and contributions stop at retirement. Rates and locations stay fixed. No Social Security benefits, pensions, debt, loan payments, required minimum distributions, early-withdrawal penalties or variable market returns are modeled.</p>
+    <p class="plan-note">Household withdrawals use the selected percentage of combined opening investments, split equally between retirement and taxable pools, with fallback if one pool is insufficient. Pre-tax withdrawals are taxable; Roth is assumed qualified. Extra expenses use remaining brokerage at year end, never additional retirement withdrawals. Unfunded expenses are reported without carrying debt forward. Brokerage gains/dividend taxes and a purchase’s resale value are not modeled.</p>
+    <p class="plan-note">Growth applies to opening balances; cash flows occur at year end. Recurring spending and expense amounts increase with inflation. The first projection period is a full year. Saved plans retain their original starting year and spending snapshot until explicitly refreshed; formulas use the current app version.</p>
+    <p class="plan-note">Uses the existing 2026 federal/WA/OR tax estimates and indexed assumptions, including employee contribution limits. Excludes catch-up contributions, employer matches, many deductions/credits and local taxes. This is a scenario-planning tool, not a tax return or a complete financial-advice system.</p>
+    <a href="/savings" class="text-link">Savings</a> · <a href="/people" class="text-link">People</a> · <a href="/trends" class="text-link">Spending</a>
   </details>
-</section>
-<section class="panel plan-section">
-  <h2>How the projection works</h2>
-  <p class="plan-note">Each person's income and retirement saving stop at their retirement age. At the selected household start point, the shared withdrawal percentage applies to the combined opening investment balance. Half of the dollar withdrawal comes from retirement and half from brokerage; if one side cannot supply its half, the other covers the remainder, capped at total funds after growth. Retirement withdrawals are allocated proportionally across all owners' pre-tax and Roth balances, including a spouse still working. Pre-tax distributions enter taxable income; qualified Roth distributions do not. Account access restrictions and early-withdrawal penalties are not modeled. Unspent cash is reinvested in brokerage. A spending deficit is a funding gap, even if investments remain; the model never takes an extra withdrawal or carries debt forward.</p>
-  <p class="plan-note">Growth applies to opening balances and cash flows occur at year end. Each projection period is a full year; the first year is not reduced for the current month. Both spouses are assumed alive throughout. These are illustrations with fixed rates, not predictions or a probability of success.</p>
-  <details class="plan-sources"><summary>Tax coverage and assumptions</summary>
-    <p>Uses 2026 federal ordinary-income brackets, standard and age deductions, Social Security, Medicare, and Additional Medicare. Oregon uses resident income and nonresident work income, standard deductions, a federal-tax subtraction, and personal exemption credits. Cross-state credits use a proportional planning estimate of tax on income taxed by both states.</p>
-    <p>Washington’s enacted 9.9% ordinary-income tax begins in 2028 above the shared married deduction of $1 million. Separate returns allocate that deduction equally. Future indexed amounts use the inflation assumption; Washington deduction indexing is modeled every two years beginning with 2029 income. Tax law can change.</p>
-    <p>Does not model investment capital gains/dividends, itemized deductions, dependents, most credits, AMT, self-employment, Social Security benefits, minimum distributions, withdrawal penalties, state paid-leave premiums, WA Cares, Oregon transit tax, or city/county taxes. Mixed community/separate ownership and part-year moves are not modeled. Use the projection as a planning estimate, not a tax return.</p>
-    <p><a href="https://www.irs.gov/irb/2025-45_IRB" target="_blank" rel="noopener noreferrer">Federal rules</a> · <a href="https://www.irs.gov/publications/p555" target="_blank" rel="noopener noreferrer">Community income</a> · <a href="https://www.oregon.gov/dor/programs/individuals/pages/pit.aspx" target="_blank" rel="noopener noreferrer">Oregon income tax</a> · <a href="https://dor.wa.gov/taxes-rates/income-tax" target="_blank" rel="noopener noreferrer">Washington income tax</a></p>
-  </details>
-</section>
-<script id="plan-defaults" type="application/json">{{ {"choices": person_choices, "references": plan_references, "taxable": taxable_default}|tojson }}</script>
-<script id="plan-data" type="application/json">{{ {'annual_spending': planning_trend.annual_spending / 100 if planning_trend.annual_spending is not none else none, 'date_from': planning_trend.date_from, 'date_to': planning_trend.date_to}|tojson }}</script>
+</div>
+</div>
+<script id="plan-defaults" type="application/json">{{ {"choices": person_choices, "references": plan_references, "taxable": taxable_default, "plan": household_plan}|tojson }}</script>
+<script id="plan-data" type="application/json">{{ {'annual_spending': planning_trend.annual_spending / 100 if planning_trend.annual_spending is not none else none, 'date_from': planning_trend.date_from, 'date_to': planning_trend.date_to, 'start_year': plan_start_year, 'observed_months': planning_trend.observed_months, 'unclassified': planning_trend.unclassified}|tojson }}</script>
 <script src="{{ url_for('static', filename='plan.js') }}" defer></script>
 {% endblock %}

@@ -46,6 +46,8 @@ Plaid or any financial institution.
 - An editable savings goal, initially `$10,000`, with per-account eligibility
 - A user-editable app name
 - A read-only local Ollama assistant with calculated summaries and visible supporting data
+- Named financial plans, saved assumptions, and live scenario comparisons
+- An encrypted feedback inbox for this installation
 
 ## Categorization and rule review
 
@@ -191,57 +193,73 @@ The read-only development mirror does not permit scans or data edits.
 
 ## Lifetime planning (development preview)
 
-**Plan** models two spouses with independent income, saving rates, pre-tax/Roth
-balances, retirement ages, and Washington/Oregon residence
-and physical work locations. Choose married filing jointly or separately.
-Separate returns require an explicit income-allocation assumption for community
-property. The household shares brokerage investments, inflation, growth, one withdrawal
-percentage, and a withdrawal start choice (first spouse retired or both retired).
+**Plan** offers live calculations, a monthly lifestyle view, investment charts,
+and annual details. Name a plan and use **Save**, **Save a copy**, or **Discard
+edits** to keep or reject changes. Drafts and pinned comparisons stay in the
+page until explicitly saved; calculation never changes financial records.
 
-Yearly spending uses the last 12 complete calendar months and Spending Trends
-classification. Refunds reduce spending; transfers, pending and excluded records
-are omitted. Missing months and mixed currencies prevent calculation. Review
-coverage and subtract only income-tax payments already counted in spending.
+Saved plans retain their inputs, starting year, and recorded spending snapshot.
+**Use latest Savings, people & spending** explicitly refreshes connected sources
+while preserving fields edited as manual assumptions. Comparisons use the active
+plan's spending snapshot and starting year; current ages must match. Saved
+assumptions are retained, but calculations use the current app version.
 
-Each person's wages and new retirement contributions stop at their retirement
-age. Contributions use the indexed 2026 employee-plan base limit; catch-ups,
-IRA contributions, and employer matches are not included. The shared withdrawal rate applies to the combined opening investment balance.
-Half the dollar amount comes from retirement and half from brokerage; when one
-pool cannot supply its half, the other covers the remainder, capped after growth.
-Retirement withdrawals are allocated proportionally across all owners and tax
-types, including a spouse still working.
-Pre-tax withdrawals are taxable; Roth withdrawals are assumed qualified.
-After modeled taxes and spending, surplus is reinvested in brokerage. Deficits
-are funding gaps under the elected rate, even with assets remaining. There are
-no automatic extra withdrawals. Both balances grow at
-the selected rate, with cash flows at year end.
+Recorded spending uses the last 12 complete calendar months and Spending Trends
+treatment. Refunds reduce spending; transfers, pending and excluded records are
+omitted. Missing history and mixed currencies remain unknown. Enter an explicit
+monthly lifestyle assumption to calculate without usable history, and set the
+tax-payment adjustment to zero in that case. With history, remove only income
+taxes already counted in spending. A direct lifestyle assumption replaces the
+adjusted spending figure without subtracting taxes again.
 
-Federal income/payroll taxes and Oregon/Washington income-tax estimates are
-shown separately. The model includes Oregon work sourcing and proportional
-interstate credits, and Washington's enacted ordinary-income tax from 2028.
-See [tax coverage and official sources](docs/planning-taxes.md) for assumptions,
-indexing, community-property choices, and exclusions. This is a planning
-illustration, not a tax return or a probability of success.
+Add named expenses for one year or several years, in today's dollars. They must
+fit within the projection horizon. Expenses use available taxable investments
+after that year's growth and regular cash flow, including any surplus; they do
+not trigger extra retirement withdrawals. Unfunded expenses and recurring
+lifestyle gaps are reported separately. Savings goal progress does not reserve
+money: exclude amounts held outside the plan, and avoid subtracting a planned
+expense from starting investments a second time.
 
-Charts and annual tables run until the younger spouse reaches 95 (both remain
-alive in the model; supported age gap is at most 25 years). Comparisons are
-page-only. Explicitly saving household profiles and assumptions writes to the
-existing encrypted vault. Calculation never writes records. In the read-only
-development mirror, saving is disabled and all edits remain temporary.
+The model covers two married adults with independent income, saving rates,
+pre-tax/Roth balances, retirement ages, and Washington/Oregon residence and work
+locations. Wages and contributions stop at each retirement age. One household
+withdrawal rate applies to combined opening investments, beginning at the first
+or both retirements. Withdrawals split equally between retirement and brokerage,
+with fallback when a pool is insufficient, capped after growth. Pre-tax
+withdrawals are taxable; Roth withdrawals are assumed qualified. Regular spending
+gaps never trigger additional withdrawals, even when assets remain.
 
-The monthly spending view compares the recorded 12-month average with the
-inflation-adjusted cost of the same lifestyle and after-tax income/withdrawals
-in any projection year. It defaults to the first year both spouses are retired.
-Combined withdrawals already include brokerage. Monthly surplus and unfunded
-gaps are shown without extra top-ups; the view does not claim a sustainable
-maximum spending level. Monthly amounts are annual averages,
-converted to today's purchasing power using the cash-flow year's inflation
-factor. The current comparable average removes tax payments already in spending.
+Balances grow at a fixed rate; cash flows occur at year end. Spending and expenses
+increase with inflation. The monthly view uses annual averages and defaults to
+the first year both adults are retired. Today's-dollar cash flows use their own
+year's inflation factor. The horizon ends when the younger adult reaches 95;
+both remain alive in the model, with an age difference of at most 25 years.
+Social Security, pensions, debt funding, brokerage gains taxes, and variable
+market returns are excluded. See [tax coverage and official sources](docs/planning-taxes.md)
+for federal/WA/OR estimates, separate-return allocation, contribution limits, and
+other exclusions. These are illustrations, not a sustainable spending guarantee,
+tax return, or probability of success.
 
-Saved plans from the earlier per-person-withdrawal preview are translated in
-memory without rewriting the vault. Matching old rates become the shared rate;
-differing rates require a new selection. The page asks the user to review the
-changed withdrawal behavior before explicitly saving.
+Plans are encrypted in the application vault. In the read-only development
+mirror, plans and feedback use a separate encrypted companion file that survives
+mirror refreshes without changing the financial snapshot. It uses the current
+unlock key: rotating the source vault key can require recovery with the earlier
+key. An unreadable companion file is preserved. Earlier per-person withdrawal
+plans are translated in memory; differing old rates require a shared rate before
+saving.
+
+## Feedback and operational records
+
+**Send feedback** saves the submitted text and time to this installation's
+encrypted inbox. Messages can be viewed and deleted in **Feedback**. Nothing is
+attached automatically, and message contents are excluded from operational logs.
+
+The app sends no usage telemetry. Its local request records contain only time,
+HTTP method, a known endpoint identifier, status, and duration. Application errors
+use generic event labels; request bodies, URL queries, exception details, and
+financial content are omitted. The ordinary Werkzeug access log is disabled.
+This describes the app's logging; a future host or proxy needs its own logging
+configuration.
 
 ## Developer setup
 

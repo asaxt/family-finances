@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Feedback · {{ app_name }}{% endblock %}
+{% block eyebrow %}Messages from this installation{% endblock %}
+{% block heading %}Feedback inbox{% endblock %}
+{% block content %}
+<p class="plan-note">Only messages someone chooses to send appear here. Stored in this installation’s encrypted workspace.</p>
+<p class="feedback-status" id="feedback-inbox-status" role="status" aria-live="polite"></p>
+<section class="feedback-list" aria-label="Feedback messages">
+  {% for message in feedback_messages %}
+  <article class="panel feedback-entry">
+    <div class="feedback-header">
+      <time datetime="{{ message.created_at }}" data-feedback-time>{{ message.created_at }}</time>
+      <form action="{{ url_for('feedback_delete') }}" method="post" data-feedback-delete>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="id" value="{{ message.id }}">
+        <button class="text-button" type="submit" aria-label="Delete this feedback message">Delete</button>
+      </form>
+    </div>
+    <p class="feedback-message">{{ message.text }}</p>
+  </article>
+  {% endfor %}
+</section>
+<div class="panel empty" id="feedback-empty" {{ 'hidden' if feedback_messages }}>No feedback yet. Use the Feedback button to send a message.</div>
+{% endblock %}

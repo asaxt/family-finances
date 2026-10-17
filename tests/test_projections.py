@@ -27,6 +27,10 @@ def sample_plan(**changes):
                 filing_status='joint', mfs_allocation='community_wages') | {key: value for key, value in changes.items() if key not in person_fields}
 
 
+def sample_event(**changes):
+    return dict(name='EXAMPLE EVENT', start_year=2054, years=1, annual_amount=137) | changes
+
+
 def seed_trend(connection):
     connection.execute("INSERT INTO connections (id, owner_name, institution, access_token) VALUES (1, 'EXAMPLE PERSON', 'EXAMPLE BANK', '')")
     connection.execute("INSERT INTO accounts (id, connection_id, institution, name, type, spending_enabled, cash_flow_role) VALUES ('sample', 1, 'EXAMPLE BANK', 'SAMPLE ACCOUNT', 'depository', 1, 'cash_flow')")
@@ -201,6 +205,175 @@ class ProjectionMathTests(unittest.TestCase):
         self.assertEqual(result['rows'][1]['retirement_assets'], 1000)
         self.assertEqual(result['rows'][1]['shortfall'], 100)
 
+    def test_lifestyle_override_preserves_historical_spending_and_avoids_second_tax_adjustment(self):
+        plan = sample_plan(tax_payments_in_spending=73, annual_lifestyle_spending=311)
+        result = project(plan, 600, start_year=2054)
+        self.assertEqual(result['annual_spending'], 600)
+        self.assertEqual(result['historical_lifestyle_spending'], 527)
+        self.assertEqual(result['adjusted_annual_spending'], 311)
+        self.assertEqual(result['rows'][1]['spending'], 311)
+        self.assertEqual(result['monthly'][0]['spending'], 311 / 12)
+        self.assertNotIn('life_events', plan)
+        self.assertEqual(project(sample_plan(annual_lifestyle_spending=0), 600, start_year=2054)['rows'][1]['spending'], 0)
+        with self.assertRaises(ProjectionError):
+            project(sample_plan(annual_lifestyle_spending=311, tax_payments_in_spending=601), 600, start_year=2054)
+
+    def test_missing_history_needs_explicit_lifestyle_and_stays_unknown(self):
+        result = project(sample_plan(annual_lifestyle_spending=311), None, start_year=2054)
+        self.assertIsNone(result['annual_spending'])
+        self.assertIsNone(result['historical_lifestyle_spending'])
+        self.assertEqual(result['adjusted_annual_spending'], 311)
+        self.assertEqual(result['rows'][1]['spending'], 311)
+        self.assertEqual(project(sample_plan(annual_lifestyle_spending=0), None, start_year=2054)['rows'][1]['spending'], 0)
+        for adjustment in (-1, 1):
+            with self.subTest(adjustment=adjustment), self.assertRaises(ProjectionError):
+                project(sample_plan(annual_lifestyle_spending=311, tax_payments_in_spending=adjustment), None, start_year=2054)
+        with self.assertRaises(ProjectionError):
+            project(sample_plan(), None, start_year=2054)
+        observed_zero = project(sample_plan(), 0, start_year=2054)
+        self.assertEqual(observed_zero['annual_spending'], 0)
+        self.assertEqual(observed_zero['historical_lifestyle_spending'], 0)
+
+    def test_optional_scenario_fields_keep_existing_plan_behavior(self):
+        old = sample_plan()
+        normalized = validate(old)
+        self.assertIsNone(normalized['annual_lifestyle_spending'])
+        self.assertEqual(normalized['life_events'], [])
+        self.assertNotIn('annual_lifestyle_spending', old)
+        self.assertEqual(project(old, 600, start_year=2054), project(normalized, 600, start_year=2054))
+
+    def test_life_event_uses_year_end_brokerage_including_growth(self):
+        plan = sample_plan(annual_income=0, starting_taxable=310, growth_rate=11,
+                           life_events=[sample_event()])
+        before = project(plan | {'life_events': []}, 0, start_year=2054)
+        result = project(plan, 0, start_year=2054)
+        row = result['rows'][1]
+        self.assertEqual(row['event_spending'], 137)
+        self.assertEqual(row['event_funded'], 137)
+        self.assertEqual(row['event_shortfall'], 0)
+        self.assertEqual(row['taxable_assets'], 207.1)
+        self.assertEqual(row['retirement_assets'], before['rows'][1]['retirement_assets'])
+        self.assertAlmostEqual(row['assets'], before['rows'][1]['assets'] - 137)
+        self.assertEqual(result['rows'][2]['event_spending'], 0)
+        self.assertEqual(result['event_total_real_spending'], 137)
+        self.assertEqual(result['annual_net_taxable_savings'], -137)
+
+    def test_life_event_uses_surplus_once_without_changing_recurring_available_income(self):
+        plan = sample_plan(life_events=[sample_event()])
+        before = project(plan | {'life_events': []}, 600, start_year=2054)
+        result = project(plan, 600, start_year=2054)
+        row = result['rows'][1]
+        self.assertEqual(row['taxable_cash_flow'], 223.5)
+        self.assertEqual(row['taxable_assets'], 86.5)
+        self.assertEqual(row['event_funded'], 137)
+        self.assertEqual(row['withdrawal'], 0)
+        self.assertEqual(result['annual_taxable_savings'], 223.5)
+        self.assertEqual(result['annual_net_taxable_savings'], 86.5)
+        self.assertEqual(result['monthly'][0]['available'], before['monthly'][0]['available'])
+        self.assertEqual(result['monthly'][0]['difference'], before['monthly'][0]['difference'])
+        self.assertEqual(result['monthly'][0]['event_funded'], 137 / 12)
+        self.assertAlmostEqual(row['assets'], before['rows'][1]['assets'] - 137)
+
+    def test_life_event_gaps_do_not_take_retirement_funds_or_hide_lifestyle_gaps(self):
+        plan = sample_plan(retirement_age=40, starting_pretax=211, starting_taxable=13,
+                           withdrawal_rate=0, life_events=[sample_event(annual_amount=37)])
+        result = project(plan, 19, start_year=2054)
+        row = result['rows'][1]
+        self.assertEqual(row['retirement_assets'], 211)
+        self.assertEqual(row['taxable_assets'], 0)
+        self.assertEqual(row['withdrawal'], 0)
+        self.assertEqual(row['shortfall'], 19)
+        self.assertEqual(row['event_funded'], 13)
+        self.assertEqual(row['event_shortfall'], 24)
+        self.assertEqual(row['total_shortfall'], 43)
+        self.assertEqual(result['first_shortfall_year'], 2054)
+        self.assertEqual(result['first_event_shortfall_year'], 2054)
+        self.assertEqual(result['first_funding_gap_year'], 2054)
+        self.assertEqual(result['total_real_event_shortfall'], 24)
+        self.assertEqual(result['total_real_funding_gap'], result['total_real_shortfall'] + 24)
+        self.assertEqual(result['monthly'][0]['total_shortfall'], 43 / 12)
+
+    def test_event_cost_does_not_change_the_elected_withdrawal_or_count_twice(self):
+        plan = sample_plan(retirement_age=40, starting_pretax=1000, starting_taxable=1000,
+                           life_events=[sample_event()])
+        result = project(plan, 200, start_year=2054)
+        row = result['rows'][1]
+        self.assertEqual(row['withdrawal'], 200)
+        self.assertEqual(row['retirement_withdrawal'], 100)
+        self.assertEqual(row['taxable_withdrawal'], 100)
+        self.assertEqual(row['event_funded'], 137)
+        self.assertEqual(row['taxable_assets'], 763)
+        self.assertEqual(row['retirement_assets'], 900)
+        self.assertEqual(row['assets'], 2000 - row['spending'] - row['taxes'] - row['event_funded'])
+        self.assertEqual(result['annual_net_taxable_savings'], row['taxable_assets'] - 1000)
+
+    def test_multi_year_events_use_inclusive_start_and_exclusive_end_at_year_prices(self):
+        plan = sample_plan(annual_income=0, starting_pretax=0, starting_taxable=1000,
+                           withdrawal_rate=0, inflation_rate=10,
+                           life_events=[sample_event(start_year=2055, years=2)])
+        result = project(plan, 0, start_year=2054)
+        self.assertEqual([row['event_spending'] for row in result['rows'][1:5]], [0, 150.7, 165.77, 0])
+        self.assertEqual(result['rows'][3]['taxable_assets'], 683.53)
+        self.assertEqual(result['event_total_real_spending'], 274)
+        self.assertEqual(result['total_real_event_shortfall'], 0)
+        self.assertIsNone(result['first_funding_gap_year'])
+        # A life event's yearly amount is a one-time cost in its year, even though
+        # the monthly view shows an annual average alongside the lifestyle budget.
+        self.assertAlmostEqual(result['monthly'][1]['event_spending'] / result['monthly'][1]['factor'], 137 / 12)
+
+    def test_overlapping_events_add_costs_and_keep_unmet_costs_separate(self):
+        plan = sample_plan(annual_income=0, starting_taxable=151, withdrawal_rate=0,
+                           life_events=[sample_event(), sample_event(name='EXAMPLE SECOND EVENT', annual_amount=31)])
+        result = project(plan, 0, start_year=2054)
+        self.assertEqual(result['rows'][1]['event_spending'], 168)
+        self.assertEqual(result['rows'][1]['event_funded'], 151)
+        self.assertEqual(result['rows'][1]['event_shortfall'], 17)
+        self.assertEqual(result['total_real_shortfall'], 0)
+        self.assertEqual(result['total_real_funding_gap'], 17)
+        self.assertEqual(result['first_funding_gap_year'], 2054)
+        self.assertIsNone(result['first_shortfall_year'])
+
+    def test_flow_years_and_real_gaps_use_the_year_spent_not_next_balance_boundary(self):
+        plan = sample_plan(annual_income=0, retirement_age=40, withdrawal_rate=0, inflation_rate=10,
+                           life_events=[sample_event(start_year=2055, years=2)])
+        result = project(plan, 137, start_year=2054)
+        self.assertIsNone(result['rows'][0]['cash_flow_year'])
+        for offset, row in enumerate(result['rows'][1:]):
+            self.assertEqual(row['cash_flow_year'], 2054 + offset)
+            self.assertEqual(row['year'], 2055 + offset)
+            self.assertAlmostEqual(row['factor'], row['cash_flow_factor'] * 1.1)
+            self.assertAlmostEqual(row['spending'] / row['cash_flow_factor'], 137, places=2)
+        self.assertEqual(result['total_real_shortfall'], 137 * (END_AGE - 40))
+        self.assertEqual(result['total_real_event_shortfall'], 274)
+
+    def test_life_event_and_override_validation_rejects_unsupported_or_ambiguous_values(self):
+        for override in (-1, True, math.nan, math.inf, '137', 100_000_001):
+            with self.subTest(override=override), self.assertRaises(ProjectionError):
+                validate(sample_plan(annual_lifestyle_spending=override))
+        for event in (None, {}, sample_event(name=''), sample_event(name='A' * 81),
+                      sample_event(name='EXAMPLE\nEVENT'), sample_event(start_year=2054.5),
+                      sample_event(start_year=2025), sample_event(start_year=2201),
+                      sample_event(start_year=True), sample_event(years=0), sample_event(years=51),
+                      sample_event(years=2.5), sample_event(annual_amount=-1),
+                      sample_event(annual_amount=math.inf), sample_event(annual_amount=True),
+                      sample_event(extra='ignored')):
+            with self.subTest(event=event), self.assertRaises(ProjectionError):
+                validate(sample_plan(life_events=[event]))
+        for events in (None, {}, [sample_event()] * 21):
+            with self.subTest(events=events), self.assertRaises(ProjectionError):
+                validate(sample_plan(life_events=events))
+        for event in (sample_event(start_year=2053), sample_event(start_year=2109),
+                      sample_event(start_year=2108, years=2)):
+            with self.subTest(event=event), self.assertRaisesRegex(ProjectionError, 'projection years'):
+                project(sample_plan(life_events=[event]), 600, start_year=2054)
+        # The last modeled year is included, but no spending silently disappears
+        # beyond the final asset snapshot.
+        result = project(sample_plan(life_events=[sample_event(start_year=2108)]), 600, start_year=2054)
+        self.assertEqual(result['rows'][-1]['event_spending'], 137)
+        for year in (0, True, 2025, 2201, 2054.5, '2054'):
+            with self.subTest(year=year), self.assertRaises(ProjectionError):
+                project(sample_plan(), 600, start_year=year)
+
     def test_withdrawals_cannot_exceed_funds_after_loss(self):
         result = project(sample_plan(retirement_age=40, withdrawal_rate=100, growth_rate=-30), 0, start_year=2026)
         self.assertEqual(result['rows'][1]['withdrawal'], 700)
@@ -296,7 +469,9 @@ class ProjectionRouteTests(unittest.TestCase):
             connection.executemany('INSERT INTO savings_snapshots (manual_account_id, amount, recorded_on) VALUES (?, ?, ?)',
                                    [(1, 11111, '2040-01-01'), (1, 20000, '2040-02-01'), (2, 10000, '2040-02-01'), (3, 99999, '2040-02-01')])
             seed_trend(connection)
-        page = self.client.get('/plan')
+        with patch('planning_profiles.date', wraps=date) as clock:
+            clock.today.return_value = date(2040, 2, 15)
+            page = self.client.get('/plan')
         self.assertIn(b'name="starting_taxable" value="100.0"', page.data)
         self.assertNotIn(b'SAMPLE ARCHIVED', page.data)
         self.assertEqual(page.data.count(b'name="withdrawal_rate"'), 1)

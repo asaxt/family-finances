@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import shutil
 import sqlite3
@@ -216,6 +217,43 @@ class EncryptedDatabase:
             if not self.unlocked:
                 raise VaultError("The vault is locked.")
             self._write_encrypted(self._key, self._connection.serialize())
+
+    @contextmanager
+    def private_document(self, path):
+        """Encrypted development workspace, separate from the read-only mirror.
+
+        Shares the unlocked vault key, never a browser cookie or plaintext file.
+        An unreadable document is preserved rather than silently replaced.
+        """
+        path = Path(path)
+        aad = b"family-finances-private-workspace-v1"
+        with self._lock:
+            if not self.unlocked:
+                raise VaultError("Unlock the app before opening the workspace.")
+            try:
+                payload = path.read_bytes() if path.exists() else None
+                document = json.loads(AESGCM(self._key).decrypt(payload[:12], payload[12:], aad)) if payload is not None else {}
+                if not isinstance(document, dict):
+                    raise ValueError()
+            except (InvalidTag, ValueError, OSError):
+                raise VaultError("The development workspace could not be opened. Its encrypted file was preserved; a changed production vault key may require the earlier key to recover it.") from None
+            original = json.dumps(document, sort_keys=True)
+            yield document
+            if json.dumps(document, sort_keys=True) == original:
+                return
+            nonce = os.urandom(12)
+            encrypted = nonce + AESGCM(self._key).encrypt(nonce, json.dumps(document).encode(), aad)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            try:
+                descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(encrypted)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def rotate_key(self, new_key):
         with self._lock:
