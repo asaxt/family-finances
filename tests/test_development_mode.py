@@ -1382,6 +1382,9 @@ class DevelopmentModeTests(unittest.TestCase):
         self.enable_local_ai()
         with self.application.vault.connection() as connection:
             connection.execute(
+                "INSERT INTO category_rules (name, flow_type) VALUES ('EXAMPLE DINING', 'spending')"
+            )
+            connection.execute(
                 """
                 INSERT INTO connections (id, owner_name, institution, access_token)
                 VALUES (1, 'Household', 'Example Bank', 'test-token')
@@ -1445,7 +1448,7 @@ class DevelopmentModeTests(unittest.TestCase):
                     "description": row["description"],
                     "transaction_ids": row["transaction_ids"],
                     "status": "categorized",
-                    "category": "Food And Drink",
+                    "category": "EXAMPLE DINING",
                     "confidence": 2,
                     "reason": "Purchase.",
                 }
@@ -1458,7 +1461,7 @@ class DevelopmentModeTests(unittest.TestCase):
         ):
             response = self.client.post(
                 "/api/local-ai/evaluation",
-                json={"categories": ["Food And Drink"]},
+                json={"categories": ["EXAMPLE DINING"]},
                 headers={"X-CSRF-Token": token},
             )
 
@@ -1495,7 +1498,7 @@ class DevelopmentModeTests(unittest.TestCase):
         )
         self.assertEqual(persisted_result["status"], "interrupted")
         self.assertEqual(
-            sum(row["effective_category"] == "Food And Drink" for row in effective),
+            sum(row["effective_category"] == "EXAMPLE DINING" for row in effective),
             5,
         )
 

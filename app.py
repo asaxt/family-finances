@@ -74,7 +74,8 @@ import category_review
 from llm_evaluation import (
     AI_REVIEW_SETTING,
     classify_evaluation_rows,
-    save_categorization_batch,
+    classify_and_save_batch,
+    StaleCategorizationError,
     evaluation_batches,
     evaluation_result,
     load_ai_reviews,
@@ -3237,6 +3238,7 @@ def evaluate_with_ollama():
         return jsonify(error="Local AI assistance is turned off."), 403
     payload = request.get_json(silent=True) or {}
     categories = payload.get("categories") or []
+    categories_from_database = not categories
     model = str(payload.get("model") or "qwen3.8:27b").strip()
     transaction_ids = payload.get("transaction_ids") or []
     if not isinstance(transaction_ids, list) or any(
@@ -3282,6 +3284,7 @@ def evaluate_with_ollama():
                     model,
                     transaction_ids=transaction_ids,
                 )
+                prepared['categories_from_database'] = categories_from_database
         except ValueError as error:
             return jsonify(error=str(error)), 400
 
@@ -3296,16 +3299,17 @@ def evaluate_with_ollama():
 
         try:
             for rows in evaluation_batches(prepared):
-                batch_details = classify_evaluation_rows(prepared, rows)
-                next_details = [*details, *batch_details]
-                with db() as connection:
-                    batch_applied = save_categorization_batch(connection, prepared, details, batch_details)
+                def save_progress(connection, batch_details, batch_applied):
                     progress = evaluation_result(
-                        prepared, next_details, time.monotonic() - started,
+                        prepared, [*details, *batch_details], time.monotonic() - started,
                         status="running", applied_transaction_count=applied + batch_applied,
                     )
                     save_ollama_result(connection, progress)
-                details = next_details
+                batch_details, batch_applied = classify_and_save_batch(
+                    db, prepared, details, rows, classify=classify_evaluation_rows,
+                    on_saved=save_progress,
+                )
+                details.extend(batch_details)
                 applied += batch_applied
 
             result = evaluation_result(
@@ -3321,9 +3325,13 @@ def evaluate_with_ollama():
                     status="completed", applied_transaction_count=applied,
                 )
                 save_ollama_result(connection, result)
-        except Exception:
+        except Exception as error:
             app.logger.exception("Local model categorization stopped early")
             message = (
+                "Transactions or category rules kept changing during categorization. "
+                "Two automatic retries were attempted; completed groups were saved safely. "
+                "Run categorization again once changes have settled."
+            ) if isinstance(error, StaleCategorizationError) else (
                 "The local model stopped before finishing. Completed groups "
                 "were saved; run local categorization again to continue."
             )
@@ -3577,18 +3585,15 @@ def classify_statement_import(import_key):
             if prepared:
                 # Import classification must never recategorize user choices or saved rules.
                 prepared['targeted'] = False
-                for group in prepared['groups']:
-                    # Verified pairs were handled above. Unmatched amounts are not enough to infer a transfer.
-                    group['all_have_transfer_match'] = False
+                prepared['categories_from_database'] = True
+                # Verified pairs were handled above. Preserve this policy on retries.
+                prepared['disable_transfer_inference'] = True
                 completed_details = []
                 for rows in evaluation_batches(prepared):
-                    details = classify_evaluation_rows(prepared, rows)
-                    with db() as connection:
-                        still_eligible = set(eligible_import_ids(connection, transaction_ids))
-                        for item in details:
-                            item['allow_recategorization'] = False
-                            item['transaction_ids'] = [value for value in item['transaction_ids'] if value in still_eligible]
-                        save_categorization_batch(connection, prepared, completed_details, details)
+                    details, _ = classify_and_save_batch(
+                        db, prepared, completed_details, rows,
+                        classify=classify_evaluation_rows, eligible_ids=eligible_import_ids,
+                    )
                     completed_details.extend(details)
         except Exception:
             status = 'interrupted'

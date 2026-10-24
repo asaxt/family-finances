@@ -9,7 +9,7 @@ from analytics import CATEGORY_RULE_JOIN, EFFECTIVE_CATEGORY_SQL
 from category_matching import conflict_sql
 from llm_evaluation import (
     classify_batch, existing_category_examples,
-    normalized_description, transfer_matches, validate_prediction, create_recurring_category_rules,
+    normalized_description, transfer_matches, validated_predictions, create_recurring_category_rules,
 )
 
 SETTING = 'local_category_review_v1'
@@ -105,11 +105,11 @@ def review_batch(result, groups, examples):
         result['model'], result['categories'], groups,
         category_examples=examples, review_existing=True,
     )
-    by_id = {item['id']: item for item in predictions}
+    by_id = validated_predictions(predictions, groups, result['categories'])
     suggestions = []
     unchanged = uncertain = processed = 0
     for group in groups:
-        prediction = validate_prediction(by_id[group['evaluation_id']], group, result['categories'])
+        prediction = by_id[group['evaluation_id']]
         count = len(group['members'])
         processed += count
         if not prediction['category']:

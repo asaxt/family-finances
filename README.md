@@ -57,6 +57,22 @@ remain lower priority than user rules and individual choices. Conflicting guesse
 unresolved groups, and transaction-specific transfer evidence are not generalized
 into new rules. An interrupted run keeps rules from its completed groups.
 
+Each model batch is validated before any result is saved. Unexpected fields,
+missing or duplicate results, invalid categories, and malformed responses stop
+the batch without applying its predictions. Transaction identifiers and account
+scope come from the app, not the model.
+
+Before saving, the app also checks whether transactions, category labels, or rules
+changed during model processing. A changed batch is rebuilt from current inputs
+and retried automatically up to twice. Manual choices and user rules remain
+protected; records that become pending, excluded, deleted, or otherwise ineligible
+are skipped. If changes continue, the run stops and preserves completed batches.
+The results page shows automatic retries and skipped records. Statement-import
+categorization uses the same checks and remains limited to the imported records.
+
+New installations include **Other** with Money out treatment. Upgrades preserve
+existing category labels and treatments, including a previously deleted Other.
+
 Existing-category review saves supported AI rules automatically as each description
 finishes processing; there is no acceptance step. Its results show saved rules and
 skipped groups. User rules and individual choices retain their priority. Rule previews
@@ -262,6 +278,8 @@ This describes the app's logging; a future host or proxy needs its own logging
 configuration.
 
 ## Developer setup
+
+Use Python 3.11 or newer.
 
 Development never clears categories or rules on unlock. A configured production
 mirror uses a fresh, separately encrypted snapshot on every server launch;
