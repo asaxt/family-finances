@@ -279,6 +279,8 @@ configuration.
 
 ## Developer setup
 
+Use Python 3.11 or newer.
+
 Development never clears categories or rules on unlock. A configured production
 mirror uses a fresh, separately encrypted snapshot on every server launch;
 production is read only as a source of encrypted files. Schema migrations apply
