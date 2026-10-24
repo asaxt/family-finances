@@ -842,6 +842,7 @@ def create_schema(connection):
                 ('Income', 'earned_income'),
                 ('Loan Disbursements', 'earned_income'),
                 ('Reimbursed Work Travel', 'earned_income'),
+                ('Other', 'spending'),
                 ('Transfer', 'transfer');
             PRAGMA user_version = 15;
 

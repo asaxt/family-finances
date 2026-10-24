@@ -29,9 +29,46 @@ class SchemaTests(unittest.TestCase):
                 "SELECT value FROM settings WHERE key = 'savings_goal_cents'"
             ).fetchone()[0]
             self.assertEqual(goal, "1000000")
+            self.assertEqual(connection.execute(
+                "SELECT flow_type FROM category_rules WHERE name = 'Other'"
+            ).fetchone()[0], "spending")
             with self.assertRaisesRegex(schema.SchemaError, "empty database"):
                 schema.create_schema(connection)
             self.remove_version_sixteen(connection)
+        finally:
+            connection.close()
+
+    def test_existing_households_do_not_regain_a_deleted_other_category(self):
+        for version in (16, 17):
+            with self.subTest(version=version):
+                connection = sqlite3.connect(":memory:")
+                try:
+                    schema.create_schema(connection)
+                    connection.execute("DELETE FROM category_rules WHERE name = 'Other'")
+                    if version == 16:
+                        connection.execute("ALTER TABLE transactions DROP COLUMN custom_description")
+                        connection.execute("PRAGMA user_version = 16")
+                    connection.commit()
+                    self.assertEqual(schema.migrate_schema(connection), version == 16)
+                    schema.validate_schema(connection)
+                    self.assertIsNone(connection.execute(
+                        "SELECT name FROM category_rules WHERE name = 'Other'"
+                    ).fetchone())
+                finally:
+                    connection.close()
+
+    def test_existing_other_category_treatment_is_preserved_during_migration(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            schema.create_schema(connection)
+            connection.execute("UPDATE category_rules SET flow_type = 'earned_income' WHERE name = 'Other'")
+            connection.execute("ALTER TABLE transactions DROP COLUMN custom_description")
+            connection.execute("PRAGMA user_version = 16")
+            connection.commit()
+            self.assertTrue(schema.migrate_schema(connection))
+            self.assertEqual(connection.execute(
+                "SELECT flow_type FROM category_rules WHERE name = 'Other'"
+            ).fetchone()[0], "earned_income")
         finally:
             connection.close()
 

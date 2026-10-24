@@ -29,6 +29,7 @@
     {% endfor %}
   </div>
   <p>{{ result.coverage.not_processed }} eligible transactions {% if result.status == "running" %}still waiting to be processed{% else %}not processed{% endif %}.</p>
+  {% if result.freshness_retry_count %}<p>Retried {{ result.freshness_retry_count }} time{{ "" if result.freshness_retry_count == 1 else "s" }} automatically because transaction data or category rules changed.</p>{% endif %}
   <p class="transaction-sub">Best guesses are already applied. Uncategorized means the model could not choose a valid category. Recurring rule matches outside this run's eligible transactions are not added to these totals.</p>
   {% if result.coverage.skipped_reasons %}<h3>Why transactions were skipped</h3><ul>
     {% for reason, count in result.coverage.skipped_reasons.items() %}<li>{{ reason }}: {{ count }}</li>{% endfor %}
@@ -54,6 +55,7 @@
           <td>{{ item.occurrence_count }}<div class="transaction-sub">{{ item.first_date }}–{{ item.last_date }}</div></td>
           <td>
             {% if item.status == "categorized" %}<span class="pill">{{ item.category }}</span>{% if item.confidence is defined %} <span class="pill">{{ "Best guess" if item.confidence == 1 else "Confident" }}</span>{% endif %}<div class="transaction-sub">{{ item.reason }}</div>{% if item.applied_transaction_count %}<div class="transaction-sub">Applied to {{ item.applied_transaction_count }} transaction{{ "" if item.applied_transaction_count == 1 else "s" }}</div>{% else %}<div class="transaction-sub">No changes saved for this group</div>{% endif %}{% if item.rule_match_count %}<div class="transaction-sub">Exact-description rule covers {{ item.rule_match_count }} matching record{{ "" if item.rule_match_count == 1 else "s" }}; individual user overrides remain exceptions.</div>{% endif %}
+            {% elif item.status == "skipped" %}<span class="pill">Skipped</span><div class="transaction-sub">{{ item.reason }}</div>
             {% elif item.rule_applied_transaction_count %}<span class="pill">{{ item.rule_category }}</span><div class="transaction-sub">Assigned to {{ item.rule_applied_transaction_count }} transactions by the matching-description rule.</div>
             {% else %}<span class="pill pending">Uncategorized</span>{% if item.confidence is defined %} <span class="pill">Confidence {{ item.confidence }}</span>{% endif %}<div class="transaction-sub">{{ item.reason }}</div>{% endif %}
           </td>

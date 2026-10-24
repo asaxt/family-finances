@@ -1,7 +1,9 @@
+import hashlib
 import json
 import time
 import urllib.request
 from collections import Counter, defaultdict
+from copy import deepcopy
 from datetime import date, datetime
 
 from analytics import CATEGORY_RULE_JOIN, RAW_CATEGORY_SQL
@@ -12,6 +14,38 @@ from category_matching import match_sql, conflict_sql
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 TRANSFER_CATEGORY = "Transfer"
 EVALUATION_BATCH_SIZE = 5
+MAX_FRESHNESS_RETRIES = 2
+MAX_MODEL_RESPONSE_BYTES = 131072
+MAX_PREDICTION_REASON_LENGTH = 400
+PREDICTION_FIELDS = {"id", "category", "confidence", "reason"}
+
+
+class StaleCategorizationError(RuntimeError):
+    """Inputs changed before an AI batch could be saved safely."""
+
+
+def categorization_fingerprint(connection):
+    """In-memory version of model inputs, rule targets, and human authority.
+
+    Include the whole transaction set: examples, transfer evidence, and future
+    description-rule matches can live outside the selected batch. Never include
+    credentials, balances, or progress settings, and never persist the snapshot.
+    """
+    digest = hashlib.sha256()
+    queries = (
+        "SELECT * FROM transactions ORDER BY id",
+        "SELECT id, connection_id, type, subtype, cash_flow_role, spending_enabled "
+        "FROM accounts ORDER BY id",
+        "SELECT name, flow_type FROM category_rules ORDER BY name",
+        "SELECT * FROM merchant_rules ORDER BY id",
+        "SELECT preferred_id, fallback_id FROM rule_fallbacks ORDER BY preferred_id, fallback_id",
+    )
+    for query in queries:
+        digest.update(query.encode())
+        for row in connection.execute(query):
+            digest.update(json.dumps(tuple(row), ensure_ascii=True, separators=(",", ":")).encode())
+            digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def normalized_description(value):
@@ -19,37 +53,24 @@ def normalized_description(value):
 
 
 def transfer_matches(rows, maximum_days=5):
-    matches = {}
-    available = {row["id"] for row in rows if row["amount"]}
-    ordered = sorted(rows, key=lambda row: (row["transacted_at"], row["id"]))
-    for row in ordered:
-        if row["id"] not in available:
-            continue
-        row_date = datetime.strptime(row["transacted_at"], "%Y-%m-%d").date()
-        candidates = []
-        for candidate in ordered:
-            if candidate["id"] == row["id"] or candidate["id"] not in available:
-                continue
-            if candidate["account_id"] == row["account_id"]:
-                continue
-            if candidate["amount"] != -row["amount"]:
-                continue
-            candidate_date = datetime.strptime(
-                candidate["transacted_at"], "%Y-%m-%d"
-            ).date()
-            distance = abs((candidate_date - row_date).days)
-            if distance <= maximum_days:
-                candidates.append(
-                    (distance, candidate["transacted_at"], candidate["id"], candidate)
-                )
-        if not candidates:
-            continue
-        match = min(candidates)[-1]
-        matches[row["id"]] = match["id"]
-        matches[match["id"]] = row["id"]
-        available.remove(row["id"])
-        available.remove(match["id"])
-    return matches
+    """Require each side to have exactly one eligible opposite transaction."""
+    posted = [row for row in rows if row["amount"]]
+    dates = {row["id"]: datetime.strptime(row["transacted_at"], "%Y-%m-%d").date()
+             for row in posted}
+    by_amount = defaultdict(list)
+    for row in posted:
+        by_amount[(row.get("currency"), row["amount"])].append(row)
+    unique = {}
+    for row in posted:
+        candidates = [candidate["id"]
+                      for candidate in by_amount[(row.get("currency"), -row["amount"])]
+                      if candidate["id"] != row["id"]
+                      and candidate["account_id"] != row["account_id"]
+                      and abs((dates[candidate["id"]] - dates[row["id"]]).days) <= maximum_days]
+        if len(candidates) == 1:
+            unique[row["id"]] = candidates[0]
+    return {identifier: counterpart for identifier, counterpart in unique.items()
+            if unique.get(counterpart) == identifier}
 
 
 def representative_transactions(connection, today=None, transaction_ids=None):
@@ -66,9 +87,11 @@ def representative_transactions(connection, today=None, transaction_ids=None):
         dict(row)
         for row in connection.execute(
             f"""
-            SELECT t.id, t.transacted_at, t.amount, t.description, t.merchant,
-                   t.category, t.category_override,
+            SELECT t.id, t.transacted_at, t.amount, t.currency, t.description, t.merchant,
+                   t.pending, t.excluded, t.category, t.category_override, t.category_override_source,
                    EXISTS (SELECT 1 FROM merchant_rules candidate WHERE {match_sql()}) AS has_description_rule,
+                   EXISTS (SELECT 1 FROM merchant_rules candidate WHERE candidate.source = 'user'
+                           AND {match_sql()}) AS has_user_rule,
                    {conflict_sql()} AS rule_conflict,
                    a.id AS account_id, a.type AS account_type,
                    a.subtype AS account_subtype
@@ -128,7 +151,7 @@ def ollama_schema(categories):
                         "id": {"type": "string"},
                         "category": {"type": "string", "enum": ["", *categories]},
                         "confidence": {"type": "integer", "enum": [0, 1, 2]},
-                        "reason": {"type": "string"},
+                        "reason": {"type": "string", "maxLength": MAX_PREDICTION_REASON_LENGTH},
                     },
                     "required": [
                         "id",
@@ -272,13 +295,35 @@ category. Return only the structured result and exactly one result for every id.
     # Every classification mode stays local, regardless of environment proxies.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(request, timeout=timeout) as response:
-        result = json.load(response)
-    predictions = json.loads(result["message"]["content"]).get("results", [])
-    expected_ids = {row["evaluation_id"] for row in rows}
-    returned_ids = {item.get("id") for item in predictions}
-    if returned_ids != expected_ids or len(predictions) != len(rows):
-        raise ValueError("The model did not return exactly one result per group.")
+        raw = response.read(MAX_MODEL_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_MODEL_RESPONSE_BYTES:
+        raise ValueError("The model returned too much response data.")
+    try:
+        result = json.loads(raw, object_pairs_hook=unique_json_object)
+        if (not isinstance(result, dict) or result.get("done") is False
+                or result.get("done_reason") == "length"):
+            raise ValueError()
+        message = result.get("message")
+        if (not isinstance(message, dict) or message.get("tool_calls")
+                or not isinstance(message.get("content"), str)):
+            raise ValueError()
+        content = json.loads(message["content"], object_pairs_hook=unique_json_object)
+        if not isinstance(content, dict) or set(content) != {"results"}:
+            raise ValueError()
+    except (ValueError, TypeError, RecursionError):
+        raise ValueError("The model did not return a complete categorization response.") from None
+    predictions = content["results"]
+    validated_predictions(predictions, rows, categories)
     return predictions
+
+
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON field.")
+        result[key] = value
+    return result
 
 
 def normalized_categories(categories):
@@ -295,9 +340,18 @@ def normalized_categories(categories):
 
 
 def validate_prediction(prediction, row, categories):
-    item = dict(prediction)
-    category = item.get("category", "")
-    confidence = item.get("confidence")
+    if not isinstance(prediction, dict) or set(prediction) != PREDICTION_FIELDS:
+        raise ValueError("The model returned an invalid categorization result.")
+    identifier = prediction["id"]
+    category = prediction["category"]
+    confidence = prediction["confidence"]
+    reason = prediction["reason"]
+    if (not isinstance(identifier, str) or identifier != row["evaluation_id"]
+            or not isinstance(category, str) or (category != "" and category not in categories)
+            or type(confidence) is not int or confidence not in {0, 1, 2}
+            or not isinstance(reason, str) or len(reason) > MAX_PREDICTION_REASON_LENGTH):
+        raise ValueError("The model returned an invalid categorization result.")
+    item = {"id": identifier, "category": category, "confidence": confidence, "reason": reason}
     if confidence == 0 or category == "":
         return {
             **item,
@@ -317,7 +371,25 @@ def validate_prediction(prediction, row, categories):
                 "reason": "Transfer requires matching line items in two household accounts.",
             }
         return {**item, "status": "categorized"}
-    raise ValueError(f"The model returned an invalid result for {row['evaluation_id']}.")
+    raise ValueError("The model returned an invalid categorization result.")
+
+
+def validated_predictions(predictions, rows, categories):
+    """Check the complete untrusted batch before any caller maps or saves it."""
+    if not isinstance(predictions, list) or len(predictions) != len(rows):
+        raise ValueError("The model did not return exactly one result per group.")
+    expected = {row["evaluation_id"]: row for row in rows}
+    validated = {}
+    for prediction in predictions:
+        if not isinstance(prediction, dict) or not isinstance(prediction.get("id"), str):
+            raise ValueError("The model returned an invalid categorization result.")
+        identifier = prediction["id"]
+        if identifier not in expected or identifier in validated:
+            raise ValueError("The model did not return exactly one result per group.")
+        validated[identifier] = validate_prediction(prediction, expected[identifier], categories)
+    if len(validated) != len(expected) or len(expected) != len(rows):
+        raise ValueError("The model did not return exactly one result per group.")
+    return validated
 
 
 def existing_category_examples(connection, categories, limit=5):
@@ -450,6 +522,7 @@ def prepare_evaluation(
         "start": start,
         "end": end,
         "targeted": bool(transaction_ids),
+        "source_fingerprint": categorization_fingerprint(connection),
     }
 
 
@@ -464,24 +537,118 @@ def classify_evaluation_rows(prepared, rows):
         prepared["model"], prepared["categories"], rows,
         category_examples=prepared.get("category_examples", {}),
     )
-    prediction_by_id = {item["id"]: item for item in predictions}
+    prediction_by_id = validated_predictions(predictions, rows, prepared["categories"])
     details = []
     for row in rows:
-        prediction = validate_prediction(
-            prediction_by_id[row["evaluation_id"]],
-            row,
-            prepared["categories"],
-        )
+        prediction = prediction_by_id[row["evaluation_id"]]
         details.append(
             {
                 **model_transactions([row])[0],
-                "account_id": row["account_id"],
-                "transaction_ids": row["transaction_ids"],
-                "allow_recategorization": prepared["targeted"],
                 **prediction,
+                "account_id": row["account_id"],
+                "transaction_ids": list(row["transaction_ids"]),
+                "allow_recategorization": prepared["targeted"],
             }
         )
     return details
+
+
+def classify_and_save_batch(connection_factory, prepared, previous_details, rows, *,
+                            classify=None, eligible_ids=None, on_saved=None):
+    """Refresh, infer without the vault lock, and atomically check/save a batch.
+
+    Retry only this batch, at most twice. The original IDs remain the authority
+    boundary even when edits split or merge their description groups.
+    """
+    classify = classify or classify_evaluation_rows
+    requested_ids = list(dict.fromkeys(value for row in rows for value in row['transaction_ids']))
+    for attempt in range(MAX_FRESHNESS_RETRIES + 1):
+        with connection_factory() as connection:
+            current_version = categorization_fingerprint(connection)
+            if current_version != prepared['source_fingerprint']:
+                # A prediction saved in an earlier batch must not later become
+                # a recurring rule after an intervening edit or sync.
+                blocked = prepared.setdefault('_blocked_rule_keys', set())
+                blocked.update((item['account_id'], normalized_description(item['description']))
+                               for item in previous_details)
+            palette = {row[0].casefold(): row[0] for row in connection.execute(
+                'SELECT name FROM category_rules ORDER BY name COLLATE NOCASE')}
+            categories = (list(palette.values()) if prepared.get('categories_from_database') else
+                          [palette[name.casefold()] for name in prepared['categories']
+                           if name.casefold() in palette])
+            categories = normalized_categories(categories)
+            if not categories:
+                raise ValueError('Add category labels before running categorization.')
+            prepared['categories'] = categories
+            allowed_ids = set(requested_ids)
+            if eligible_ids:
+                allowed_ids.intersection_update(eligible_ids(connection, requested_ids))
+            # Empty transaction_ids means the whole vault to prepare_evaluation;
+            # handle an empty authorized scope without calling it.
+            scope_rows = representative_transactions(connection, transaction_ids=requested_ids)[0] if requested_ids else []
+            fresh = {'groups': [], 'categories': categories, 'category_examples': {}, 'model': prepared['model']}
+            groups = []
+            # Reload individual rows before regrouping: a single manual edit
+            # must not remove or authorize other members of the old group.
+            eligible = [row['id'] for row in scope_rows
+                        if row['id'] in allowed_ids and not row['excluded']
+                        and not row['rule_conflict'] and not row['has_user_rule']
+                        and not (row['category_override'] is not None
+                                 and row['category_override_source'] != 'model')
+                        and (prepared['targeted'] or
+                             ((row['category_override'] or row['category']).casefold() == 'uncategorized'
+                              and not row['has_description_rule']))]
+            if eligible:
+                fresh = prepare_evaluation(connection, categories, prepared['model'], transaction_ids=eligible)
+                groups = fresh['groups']
+                matches = {}
+                if not prepared.get('disable_transfer_inference'):
+                    context_rows = [dict(row) for row in connection.execute(
+                        'SELECT id, account_id, transacted_at, amount, currency FROM transactions '
+                        'WHERE pending = 0 AND excluded = 0 ORDER BY transacted_at, id')]
+                    # Categories and rules change as our own batches save. Only
+                    # rebuild transfer pairs if the evidence for pairing changed.
+                    if context_rows != prepared.get('_transfer_rows'):
+                        prepared['_transfer_rows'] = context_rows
+                        prepared['_transfer_matches'] = transfer_matches(context_rows)
+                    matches = prepared['_transfer_matches']
+                for group in groups:
+                    group['all_have_transfer_match'] = (not prepared.get('disable_transfer_inference')
+                        and all(value in matches for value in group['transaction_ids']))
+            fresh.update(targeted=prepared['targeted'], groups=prepared['groups'],
+                         _blocked_rule_keys=prepared.get('_blocked_rule_keys', set()))
+            fresh['source_fingerprint'] = current_version
+        # The database context has ended; model latency never holds the lock.
+        batch_details = classify(fresh, groups) if groups else []
+        returned_ids = {value for item in batch_details for value in item['transaction_ids']}
+        for row in rows:
+            skipped_ids = [value for value in row['transaction_ids'] if value not in returned_ids]
+            if skipped_ids:
+                batch_details.append({
+                    **model_transactions([row])[0], 'account_id': row['account_id'],
+                    'transaction_ids': skipped_ids, 'allow_recategorization': False,
+                    'occurrence_count': len(skipped_ids),
+                    'status': 'skipped', 'category': '', 'confidence': 0,
+                    'reason': 'Changed transactions are no longer eligible for automatic categorization.',
+                    'applied_transaction_count': 0,
+                })
+        previous_state = deepcopy(previous_details)
+        try:
+            with connection_factory() as connection:
+                applied = save_categorization_batch(connection, fresh, previous_details, batch_details)
+                if on_saved:
+                    on_saved(connection, batch_details, applied)
+                saved_version = fresh['source_fingerprint']
+            prepared['source_fingerprint'] = saved_version
+            return batch_details, applied
+        except Exception as error:
+            # SQL rollback must also roll back report metadata attached to an
+            # earlier committed batch while creating a recurring rule.
+            previous_details[:] = previous_state
+            if not isinstance(error, StaleCategorizationError) or attempt == MAX_FRESHNESS_RETRIES:
+                raise
+            prepared['freshness_retry_count'] = prepared.get('freshness_retry_count', 0) + 1
+    raise AssertionError('Unreachable categorization retry state.')
 
 
 def evaluation_result(
@@ -494,6 +661,9 @@ def evaluation_result(
 ):
     categorized = [item for item in details if item["status"] == "categorized"]
     total_groups = len(prepared["groups"])
+    processed_ids = {value for item in details for value in item['transaction_ids']}
+    processed_groups = sum(set(group['transaction_ids']).issubset(processed_ids)
+                           for group in prepared['groups'])
     result = {
         "model": prepared["model"],
         "date_from": prepared["start"].isoformat(),
@@ -503,14 +673,14 @@ def evaluation_result(
         ),
         "source_transaction_count": len(prepared["source_rows"]),
         "sample_transaction_count": total_groups,
-        "processed_group_count": len(details),
-        "remaining_group_count": total_groups - len(details),
+        "processed_group_count": processed_groups,
+        "remaining_group_count": total_groups - processed_groups,
         "category_count": len(prepared["categories"]),
         "categories": prepared["categories"],
         "elapsed_seconds": round(elapsed_seconds, 1),
         "category_counts": dict(Counter(item["category"] for item in categorized)),
         "review_count": sum(
-            item["status"] != "categorized"
+            item["status"] not in {"categorized", "skipped"}
             and item.get("rule_applied_transaction_count", 0) < len(item["transaction_ids"])
             for item in details
         ),
@@ -518,6 +688,7 @@ def evaluation_result(
         "status": status,
         "targeted": prepared["targeted"],
         "details": details,
+        "freshness_retry_count": prepared.get('freshness_retry_count', 0),
     }
     if "eligible_count" in prepared:
         confident = tentative = uncategorized = changed = processed = 0
@@ -537,6 +708,8 @@ def evaluation_result(
                     confident += assigned
                 else:
                     tentative += assigned
+            elif item['status'] == 'skipped':
+                changed += count
             else:
                 uncategorized += count - rule_assigned
         skipped = dict(prepared["skipped_counts"])
@@ -687,11 +860,17 @@ def create_recurring_category_rules(connection, result):
 
 def save_categorization_batch(connection, prepared, previous_details, batch_details):
     """Persist completed AI groups as rules even if a later batch is interrupted."""
+    # app.db() holds the vault lock throughout this check and every write below.
+    # Reject before touching transactions, recurring rules, or review settings.
+    if prepared.get('source_fingerprint') != categorization_fingerprint(connection):
+        raise StaleCategorizationError('Categorization inputs changed before the batch could be saved.')
     applied = apply_categorized_suggestions(connection, {'details': batch_details})
     details = [*previous_details, *batch_details]
     def key(item):
         return item['account_id'], normalized_description(item['description'])
-    remaining = {key(group) for group in prepared['groups'][len(details):]}
+    processed_ids = {value for item in details for value in item['transaction_ids']}
+    remaining = {key(group) for group in prepared['groups']
+                 if not set(group['transaction_ids']).issubset(processed_ids)}
     completed = {key(item) for item in batch_details} - remaining
     applied_keys = {key(item) for item in details if item.get('applied_transaction_ids')}
     rule_details = [item for item in details if key(item) in completed & applied_keys]
@@ -702,6 +881,8 @@ def save_categorization_batch(connection, prepared, previous_details, batch_deta
     transfers.add('transfer')
     blocked = {key(item) for item in rule_details
                if item['status'] != 'categorized' or item.get('category', '').casefold() in transfers}
+    blocked.update(prepared.get('_blocked_rule_keys', ()))
     rule_details = [item for item in rule_details if key(item) not in blocked]
     create_recurring_category_rules(connection, {'details': rule_details})
+    prepared['source_fingerprint'] = categorization_fingerprint(connection)
     return applied + sum(item.get('rule_applied_transaction_count', 0) for item in rule_details)

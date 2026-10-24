@@ -108,7 +108,7 @@ class CategoryReviewTests(unittest.TestCase):
         review.apply_rules(self.connection, result, groups[1:])
         self.assertEqual(result['rules_saved'], 0)
         with patch('category_review.classify_batch', return_value=[{
-            'id': groups[1]['evaluation_id'], 'category': 'EXAMPLE BROAD', 'confidence': 2,
+            'id': groups[1]['evaluation_id'], 'category': 'EXAMPLE BROAD', 'confidence': 2, 'reason': '',
         }]):
             review.review_batch(result, groups[1:], examples)
         review.apply_rules(self.connection, result, [])
@@ -130,7 +130,7 @@ class CategoryReviewTests(unittest.TestCase):
     def test_unknown_model_category_cannot_be_saved(self):
         result, groups, examples = review.prepare(self.connection)
         with patch('category_review.classify_batch', return_value=[{
-            'id': groups[0]['evaluation_id'], 'category': 'INVENTED LABEL', 'confidence': 2
+            'id': groups[0]['evaluation_id'], 'category': 'INVENTED LABEL', 'confidence': 2, 'reason': ''
         }]):
             with self.assertRaises(ValueError):
                 review.review_batch(result, groups, examples)
