@@ -21,6 +21,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+from types import SimpleNamespace
 
 from flask import g, Flask, Request, Response, abort, has_request_context, jsonify, redirect, render_template, request, session, url_for
 from plaid.api import plaid_api
@@ -70,6 +71,7 @@ from analytics import (
 )
 from category_matching import complete_text, winning_rule_sql, conflict_sql, match_sql
 import category_review
+from hybrid_categorization import HybridCategorizer, HybridConfigurationError
 
 from llm_evaluation import (
     AI_REVIEW_SETTING,
@@ -86,6 +88,29 @@ from llm_evaluation import (
 
 
 ROOT = Path(__file__).parent
+
+
+def selected_categorization_engine():
+    engine = os.environ.get('FAMILY_FINANCES_CATEGORIZATION_ENGINE', 'qwen').strip().lower()
+    if engine not in {'qwen', 'hybrid'}:
+        raise ValueError('Choose a supported local categorization engine.')
+    return engine
+
+
+@contextmanager
+def categorization_session(engine):
+    if engine == 'qwen':
+        yield SimpleNamespace(classify=classify_evaluation_rows)
+    else:
+        with HybridCategorizer() as categorizer:
+            yield categorizer
+
+
+def categorization_policy(prepared, engine):
+    prepared['categorization_engine'] = engine
+    if engine == 'hybrid':
+        prepared['suppress_ai_reviews'] = True
+        prepared['non_recurring_categories'] = ['Other']
 
 
 def environment_flag(name):
@@ -355,6 +380,7 @@ def health():
         mode="development" if DEVELOPMENT_MODE else "stable",
         plaid_enabled=not PLAID_DISABLED,
         read_only_mirror=READ_ONLY_MIRROR,
+        categorization_engine=selected_categorization_engine(),
     )
 
 
@@ -2163,6 +2189,7 @@ def settings_page():
         category_count=category_count,
         category_setup_complete=category_setup_complete,
         local_ai_enabled=local_ai,
+        mixed_categorization=os.environ.get('FAMILY_FINANCES_CATEGORIZATION_ENGINE', '').strip().lower() == 'hybrid',
     )
     return render_template("settings.html", **context)
 
@@ -3236,6 +3263,10 @@ def category_review_report():
 def evaluate_with_ollama():
     if not local_ai_enabled():
         return jsonify(error="Local AI assistance is turned off."), 403
+    try:
+        engine = selected_categorization_engine()
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
     payload = request.get_json(silent=True) or {}
     categories = payload.get("categories") or []
     categories_from_database = not categories
@@ -3283,8 +3314,10 @@ def evaluate_with_ollama():
                     categories,
                     model,
                     transaction_ids=transaction_ids,
+                    preserve_category_names=engine == 'hybrid',
                 )
                 prepared['categories_from_database'] = categories_from_database
+                categorization_policy(prepared, engine)
         except ValueError as error:
             return jsonify(error=str(error)), 400
 
@@ -3298,19 +3331,21 @@ def evaluate_with_ollama():
             save_ollama_result(connection, result)
 
         try:
-            for rows in evaluation_batches(prepared):
-                def save_progress(connection, batch_details, batch_applied):
-                    progress = evaluation_result(
-                        prepared, [*details, *batch_details], time.monotonic() - started,
-                        status="running", applied_transaction_count=applied + batch_applied,
+            with categorization_session(engine) as categorizer:
+                batches = evaluation_batches(prepared, batch_size=32) if engine == 'hybrid' else evaluation_batches(prepared)
+                for rows in batches:
+                    def save_progress(connection, batch_details, batch_applied):
+                        progress = evaluation_result(
+                            prepared, [*details, *batch_details], time.monotonic() - started,
+                            status="running", applied_transaction_count=applied + batch_applied,
+                        )
+                        save_ollama_result(connection, progress)
+                    batch_details, batch_applied = classify_and_save_batch(
+                        db, prepared, details, rows, classify=categorizer.classify,
+                        on_saved=save_progress,
                     )
-                    save_ollama_result(connection, progress)
-                batch_details, batch_applied = classify_and_save_batch(
-                    db, prepared, details, rows, classify=classify_evaluation_rows,
-                    on_saved=save_progress,
-                )
-                details.extend(batch_details)
-                applied += batch_applied
+                    details.extend(batch_details)
+                    applied += batch_applied
 
             result = evaluation_result(
                 prepared,
@@ -3328,6 +3363,9 @@ def evaluate_with_ollama():
         except Exception as error:
             app.logger.exception("Local model categorization stopped early")
             message = (
+                'Mixed categorization could not start. Check that Other has a valid category '
+                'treatment and that the local classifier is installed, then try again.'
+            ) if isinstance(error, HybridConfigurationError) else (
                 "Transactions or category rules kept changing during categorization. "
                 "Two automatic retries were attempted; completed groups were saved safely. "
                 "Run categorization again once changes have settled."
@@ -3349,7 +3387,7 @@ def evaluate_with_ollama():
                 ok=False,
                 error=message,
                 report_url=url_for("ollama_evaluation_report"),
-            )
+            ), 503 if isinstance(error, HybridConfigurationError) else 200
         return jsonify(ok=True, report_url=url_for("ollama_evaluation_report"))
     except Exception:
         app.logger.exception("Local model evaluation failed")
@@ -3579,22 +3617,27 @@ def classify_statement_import(import_key):
         status = 'busy'
     else:
         try:
+            engine = selected_categorization_engine()
             with db() as connection:
                 eligible = eligible_import_ids(connection, transaction_ids)
-                prepared = prepare_evaluation(connection, categories, statements.MODEL, transaction_ids=eligible) if eligible else None
+                prepared = prepare_evaluation(connection, categories, statements.MODEL, transaction_ids=eligible,
+                    preserve_category_names=engine == 'hybrid') if eligible else None
             if prepared:
+                categorization_policy(prepared, engine)
                 # Import classification must never recategorize user choices or saved rules.
                 prepared['targeted'] = False
                 prepared['categories_from_database'] = True
                 # Verified pairs were handled above. Preserve this policy on retries.
                 prepared['disable_transfer_inference'] = True
                 completed_details = []
-                for rows in evaluation_batches(prepared):
-                    details, _ = classify_and_save_batch(
-                        db, prepared, completed_details, rows,
-                        classify=classify_evaluation_rows, eligible_ids=eligible_import_ids,
-                    )
-                    completed_details.extend(details)
+                with categorization_session(engine) as categorizer:
+                    batches = evaluation_batches(prepared, batch_size=32) if engine == 'hybrid' else evaluation_batches(prepared)
+                    for rows in batches:
+                        details, _ = classify_and_save_batch(
+                            db, prepared, completed_details, rows,
+                            classify=categorizer.classify, eligible_ids=eligible_import_ids,
+                        )
+                        completed_details.extend(details)
         except Exception:
             status = 'interrupted'
         finally:

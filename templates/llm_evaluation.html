@@ -1,18 +1,21 @@
 {% extends "base.html" %}
-{% block title %}Categorization results{% endblock %}
+{% set hybrid = result.categorization_engine|default("") == "hybrid" %}
+{% block title %}{{ "Fast classifier + Qwen" if hybrid else "Categorization results" }}{% endblock %}
 {% block eyebrow %}Local AI{% endblock %}
 {% block heading %}Categorization results{% endblock %}
 {% block content %}
 <section class="panel">
   <div class="panel-header">
     <div>
-      <h2>{{ result.model }}</h2>
+      <h2>{{ "Fast classifier + Qwen" if hybrid else result.model }}</h2>
       <p>{% if result.targeted %}Selected transactions{% else %}{{ result.date_from }}–{{ result.date_to }}{% endif %} · {{ result.sample_transaction_count }} exact-description groups covering {{ result.coverage.eligible if result.coverage is defined else result.source_transaction_count }} eligible transactions · {{ result.elapsed_seconds }} seconds</p>
+      {% if hybrid and result.source_counts is defined %}<p>Saved groups: {{ result.source_counts.classifier|default(0) }} Classifier · {{ result.source_counts.qwen|default(0) }} Qwen.</p>{% endif %}
     </div>
     <div><a class="button secondary" href="{{ url_for('transactions') }}">View transactions</a>
-      <a class="button secondary" href="{{ url_for('transactions', ai_review='1', purpose='all') }}">Review AI guesses</a>
+      {% if not hybrid %}<a class="button secondary" href="{{ url_for('transactions', ai_review='1', purpose='all') }}">Review AI guesses</a>{% endif %}
       {% if result.status == "running" %}<span class="pill pending">{{ result.processed_group_count }} of {{ result.sample_transaction_count }} groups complete</span>
       {% elif result.status == "interrupted" %}<span class="pill pending">Run paused</span>
+      {% elif hybrid %}<span class="pill">Categorization complete</span>
       {% else %}<span class="pill">{{ result.review_count }} uncategorized group{{ "" if result.review_count == 1 else "s" }}</span>{% endif %}
     </div>
   </div>
@@ -30,7 +33,7 @@
   </div>
   <p>{{ result.coverage.not_processed }} eligible transactions {% if result.status == "running" %}still waiting to be processed{% else %}not processed{% endif %}.</p>
   {% if result.freshness_retry_count %}<p>Retried {{ result.freshness_retry_count }} time{{ "" if result.freshness_retry_count == 1 else "s" }} automatically because transaction data or category rules changed.</p>{% endif %}
-  <p class="transaction-sub">Best guesses are already applied. Uncategorized means the model could not choose a valid category. Recurring rule matches outside this run's eligible transactions are not added to these totals.</p>
+  <p class="transaction-sub">{% if hybrid %}Categories are applied automatically. Other is used when no specific category is supported.{% else %}Best guesses are already applied. Uncategorized means the model could not choose a valid category.{% endif %} Recurring rule matches outside this run's eligible transactions are not added to these totals.</p>
   {% if result.coverage.skipped_reasons %}<h3>Why transactions were skipped</h3><ul>
     {% for reason, count in result.coverage.skipped_reasons.items() %}<li>{{ reason }}: {{ count }}</li>{% endfor %}
   </ul>{% endif %}
@@ -41,6 +44,7 @@
   <div class="panel-header"><div><h2>Results</h2>
     {% if result.status == "running" %}<p>The model is still working. Each completed batch is already saved, and you can safely leave this page.</p>
     {% elif result.status == "interrupted" %}<p>{{ result.error }} {{ result.applied_transaction_count }} transaction{{ "" if result.applied_transaction_count == 1 else "s" }} remain categorized.</p>
+    {% elif hybrid %}<p>{{ result.applied_transaction_count }} transaction{{ "" if result.applied_transaction_count == 1 else "s" }} categorized automatically.</p>
     {% else %}<p>{{ result.applied_transaction_count }} transaction{{ "" if result.applied_transaction_count == 1 else "s" }} categorized. Best guesses are applied immediately; reviewing them is optional.</p>{% endif %}
   </div></div>
   <div class="table-wrap">
@@ -54,6 +58,7 @@
           <td>{{ item.account_subtype or item.account_type }}</td>
           <td>{{ item.occurrence_count }}<div class="transaction-sub">{{ item.first_date }}–{{ item.last_date }}</div></td>
           <td>
+            {% if hybrid and item.categorization_source|default("") in ["classifier", "qwen"] %}<div class="transaction-sub">{{ "Classifier" if item.categorization_source == "classifier" else "Qwen" }}</div>{% endif %}
             {% if item.status == "categorized" %}<span class="pill">{{ item.category }}</span>{% if item.confidence is defined %} <span class="pill">{{ "Best guess" if item.confidence == 1 else "Confident" }}</span>{% endif %}<div class="transaction-sub">{{ item.reason }}</div>{% if item.applied_transaction_count %}<div class="transaction-sub">Applied to {{ item.applied_transaction_count }} transaction{{ "" if item.applied_transaction_count == 1 else "s" }}</div>{% else %}<div class="transaction-sub">No changes saved for this group</div>{% endif %}{% if item.rule_match_count %}<div class="transaction-sub">Exact-description rule covers {{ item.rule_match_count }} matching record{{ "" if item.rule_match_count == 1 else "s" }}; individual user overrides remain exceptions.</div>{% endif %}
             {% elif item.status == "skipped" %}<span class="pill">Skipped</span><div class="transaction-sub">{{ item.reason }}</div>
             {% elif item.rule_applied_transaction_count %}<span class="pill">{{ item.rule_category }}</span><div class="transaction-sub">Assigned to {{ item.rule_applied_transaction_count }} transactions by the matching-description rule.</div>

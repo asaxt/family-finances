@@ -192,7 +192,19 @@ def model_transactions(rows):
     ]
 
 
-def classify_batch(model, categories, rows, timeout=300, category_examples=None, review_existing=False):
+def classify_batch(model, categories, rows, timeout=300, category_examples=None, review_existing=False,
+                   require_evidence=False, fallback_category=None):
+    if review_existing and require_evidence:
+        raise ValueError("Choose either category review or evidence-based classification.")
+    if fallback_category is not None:
+        if (review_existing or require_evidence or not isinstance(fallback_category, str)
+                or fallback_category.casefold() != "other"):
+            raise ValueError("Choose one valid categorization policy with an existing Other category.")
+        matches = [category for category in categories
+                   if isinstance(category, str) and category.casefold() == "other"]
+        if len(matches) != 1:
+            raise ValueError("The fallback policy requires one existing Other category.")
+        fallback_category = matches[0]
     system_prompt = """
 You assign transactions to existing categories in a US household finance application.
 
@@ -246,6 +258,52 @@ household line item is not a transfer.
 Account type and subtype are reliable context. Venmo is a payment rail, not a
 category. Return only the structured result and exactly one result for every id.
 """.strip()
+    if require_evidence:
+        system_prompt = """
+You propose transaction categories for a human-reviewed household finance preview.
+
+For each exact-description group, use only the supplied transaction evidence to
+choose an existing category. Missing purchase purpose, conflicting evidence,
+unknown recipients, and mixed purchases without an item split can remain
+uncategorized. A payment service name alone does not identify purchase purpose.
+Do not invent missing facts, create a category, or assign cash-flow treatment.
+
+Return confidence as one of these exact integers:
+- 0: insufficient or conflicting evidence; category must be empty.
+- 1: tentative proposal that requires human review.
+- 2: proposal strongly supported by the supplied transaction evidence.
+
+An empty category with confidence 0 is a valid outcome when no supplied category
+is supported. Confidence is a self-assessment, not a guarantee of correctness.
+Return only proposals; this preview does not save transactions or category rules.
+
+""".lstrip() + system_prompt[system_prompt.index("Use category_examples"):]
+    if fallback_category is not None:
+        label = json.dumps(fallback_category)
+        system_prompt = f"""
+You assign every transaction an existing category in a household finance preview.
+
+For each exact-description group, choose the best-supported supplied category.
+When purchase purpose is missing, evidence conflicts, or no specific category
+is supported, choose {label}. An unknown recipient, a payment service name alone,
+or a mixed purchase without an item split can justify {label}. Do not invent
+missing facts, create a category, or assign cash-flow treatment.
+
+Return a nonempty supplied category and confidence as one of these exact integers:
+- 1: {label} because the evidence is insufficient or conflicting.
+- 2: a category strongly supported by the supplied transaction evidence.
+
+Every transaction receives a category; uncertainty goes to {label}. Confidence
+is a self-assessment, not a guarantee of correctness. Return only proposals;
+this preview does not save transactions or category rules.
+
+""".lstrip() + system_prompt[system_prompt.index("Use category_examples"):]
+        system_prompt = system_prompt.replace(
+            "or leave the transaction uncategorized.", f"or use {label} with confidence 1."
+        ).replace(
+            "use confidence 0 unless the description",
+            f"use {label} with confidence 1 unless the description",
+        )
     if review_existing:
         system_prompt = system_prompt.replace(
             "Make a best guess when evidence is incomplete: broad coverage is more useful\n"
@@ -261,11 +319,16 @@ category. Return only the structured result and exactly one result for every id.
             "Use confidence 1 for uncertainty instead of abstaining. Reserve confidence 0",
             "Keep the current label when evidence for a change is weak. Reserve confidence 0",
         )
+    response_schema = ollama_schema(categories)
+    if fallback_category is not None:
+        fields = response_schema["properties"]["results"]["items"]["properties"]
+        fields["category"]["enum"] = list(categories)
+        fields["confidence"]["enum"] = [1, 2]
     payload = {
         "model": model,
         "stream": False,
         "think": False,
-        "format": ollama_schema(categories),
+        "format": response_schema,
         "messages": [
             {"role": "system", "content": system_prompt},
             {
@@ -326,13 +389,13 @@ def unique_json_object(pairs):
     return result
 
 
-def normalized_categories(categories):
+def normalized_categories(categories, preserve_names=False):
     values = set()
     for category in categories:
         category = category.strip()
         if category.casefold() in {"venmo", "uncategorized"}:
             continue
-        if category.casefold() in {"transfer in", "transfer out"}:
+        if not preserve_names and category.casefold() in {"transfer in", "transfer out"}:
             category = TRANSFER_CATEGORY
         if category:
             values.add(category)
@@ -458,12 +521,13 @@ def dismissed_ai_categories(connection):
     return json.loads(row[0]) if row else {}
 
 
-def update_ai_reviews(connection, items):
+def update_ai_reviews(connection, items, *, suppress_ai_reviews=False):
     reviews = load_ai_reviews(connection)
     dismissed = dismissed_ai_categories(connection)
     for item in items:
         for transaction_id in item.get("applied_transaction_ids", []):
-            if item.get("confidence") == 1 and dismissed.get(transaction_id) != item["category"]:
+            if (not suppress_ai_reviews and item.get("confidence") == 1
+                    and dismissed.get(transaction_id) != item["category"]):
                 reviews[transaction_id] = {
                     "category": item["category"], "reason": item.get("reason", "")[:400]
                 }
@@ -485,9 +549,10 @@ def dismiss_ai_reviews(connection, transaction_ids):
 
 
 def prepare_evaluation(
-    connection, categories, model="qwen3.8:27b", today=None, transaction_ids=None
+    connection, categories, model="qwen3.8:27b", today=None, transaction_ids=None,
+    *, preserve_category_names=False,
 ):
-    categories = normalized_categories(categories)
+    categories = normalized_categories(categories, preserve_names=preserve_category_names)
     if not categories:
         raise ValueError("At least one existing category is required.")
 
@@ -516,6 +581,9 @@ def prepare_evaluation(
         "skipped_counts": skipped_counts,
         "model": model,
         "categories": categories,
+        "preserve_category_names": preserve_category_names,
+        "category_treatments": {row[0]: row[1] for row in connection.execute(
+            'SELECT name, flow_type FROM category_rules') if row[0] in categories},
         "category_examples": existing_category_examples(connection, categories),
         "source_rows": source_rows,
         "groups": groups,
@@ -576,7 +644,8 @@ def classify_and_save_batch(connection_factory, prepared, previous_details, rows
             categories = (list(palette.values()) if prepared.get('categories_from_database') else
                           [palette[name.casefold()] for name in prepared['categories']
                            if name.casefold() in palette])
-            categories = normalized_categories(categories)
+            preserve_names = prepared.get('preserve_category_names', False)
+            categories = normalized_categories(categories, preserve_names=preserve_names)
             if not categories:
                 raise ValueError('Add category labels before running categorization.')
             prepared['categories'] = categories
@@ -599,7 +668,8 @@ def classify_and_save_batch(connection_factory, prepared, previous_details, rows
                              ((row['category_override'] or row['category']).casefold() == 'uncategorized'
                               and not row['has_description_rule']))]
             if eligible:
-                fresh = prepare_evaluation(connection, categories, prepared['model'], transaction_ids=eligible)
+                fresh = prepare_evaluation(connection, categories, prepared['model'], transaction_ids=eligible,
+                                           preserve_category_names=preserve_names)
                 groups = fresh['groups']
                 matches = {}
                 if not prepared.get('disable_transfer_inference'):
@@ -616,6 +686,9 @@ def classify_and_save_batch(connection_factory, prepared, previous_details, rows
                     group['all_have_transfer_match'] = (not prepared.get('disable_transfer_inference')
                         and all(value in matches for value in group['transaction_ids']))
             fresh.update(targeted=prepared['targeted'], groups=prepared['groups'],
+                         disable_transfer_inference=prepared.get('disable_transfer_inference', False),
+                         suppress_ai_reviews=prepared.get('suppress_ai_reviews') is True,
+                         non_recurring_categories=list(prepared.get('non_recurring_categories', ())),
                          _blocked_rule_keys=prepared.get('_blocked_rule_keys', set()))
             fresh['source_fingerprint'] = current_version
         # The database context has ended; model latency never holds the lock.
@@ -690,6 +763,10 @@ def evaluation_result(
         "details": details,
         "freshness_retry_count": prepared.get('freshness_retry_count', 0),
     }
+    if prepared.get('categorization_engine') == 'hybrid':
+        result['categorization_engine'] = 'hybrid'
+        result['source_counts'] = dict(Counter(item.get('categorization_source') for item in categorized
+                                              if item.get('categorization_source')))
     if "eligible_count" in prepared:
         confident = tentative = uncategorized = changed = processed = 0
         for item in details:
@@ -780,7 +857,8 @@ def apply_categorized_suggestions(connection, result):
             item["applied_transaction_ids"].extend(applied_ids)
             item["applied_transaction_count"] += len(applied_ids)
 
-    update_ai_reviews(connection, result["details"])
+    update_ai_reviews(connection, result["details"],
+                      suppress_ai_reviews=result.get('suppress_ai_reviews') is True)
     result["applied_transaction_count"] = applied
     return applied
 
@@ -852,7 +930,8 @@ def create_recurring_category_rules(connection, result):
             )
             item["rule_confidence"] = review_item.get("confidence", 2)
             item["rule_category"] = category
-        update_ai_reviews(connection, [{**review_item, "applied_transaction_ids": review_ids}])
+        update_ai_reviews(connection, [{**review_item, "applied_transaction_ids": review_ids}],
+                          suppress_ai_reviews=result.get('suppress_ai_reviews') is True)
         for item in categorized_items:
             item["rule_match_count"] = match_count
     return created
@@ -864,7 +943,8 @@ def save_categorization_batch(connection, prepared, previous_details, batch_deta
     # Reject before touching transactions, recurring rules, or review settings.
     if prepared.get('source_fingerprint') != categorization_fingerprint(connection):
         raise StaleCategorizationError('Categorization inputs changed before the batch could be saved.')
-    applied = apply_categorized_suggestions(connection, {'details': batch_details})
+    save_policy = {'suppress_ai_reviews': prepared.get('suppress_ai_reviews') is True}
+    applied = apply_categorized_suggestions(connection, {'details': batch_details, **save_policy})
     details = [*previous_details, *batch_details]
     def key(item):
         return item['account_id'], normalized_description(item['description'])
@@ -879,10 +959,12 @@ def save_categorization_batch(connection, prepared, previous_details, batch_deta
     transfers = {row[0].casefold() for row in connection.execute(
         "SELECT name FROM category_rules WHERE flow_type = 'transfer'")}
     transfers.add('transfer')
+    non_recurring = {name.casefold() for name in prepared.get('non_recurring_categories', ())}
     blocked = {key(item) for item in rule_details
-               if item['status'] != 'categorized' or item.get('category', '').casefold() in transfers}
+               if item['status'] != 'categorized'
+               or item.get('category', '').casefold() in transfers | non_recurring}
     blocked.update(prepared.get('_blocked_rule_keys', ()))
     rule_details = [item for item in rule_details if key(item) not in blocked]
-    create_recurring_category_rules(connection, {'details': rule_details})
+    create_recurring_category_rules(connection, {'details': rule_details, **save_policy})
     prepared['source_fingerprint'] = categorization_fingerprint(connection)
     return applied + sum(item.get('rule_applied_transaction_count', 0) for item in rule_details)

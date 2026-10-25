@@ -1,0 +1,4 @@
+# Optional isolated classifier runtime; use Python 3.12, separate from the app.
+gliclass==0.1.21
+torch==2.14.1
+transformers==5.20.2

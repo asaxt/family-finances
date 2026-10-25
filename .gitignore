@@ -21,6 +21,10 @@ backups/
 
 # Python and editor files
 .venv
+.classifier-venv/
+.classifier-python/
+.classifier-cache/
+.classifier-results/
 __pycache__/
 *.py[cod]
 .DS_Store
