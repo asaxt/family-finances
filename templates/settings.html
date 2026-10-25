@@ -45,6 +45,7 @@
       </div>
       <span class="pill {{ 'configured' if local_ai_enabled else 'pending' }}">{{ "On" if local_ai_enabled else "Off" }}</span>
     </div>
+    {% if mixed_categorization %}<p class="security-note">Categorization preview: a fast local classifier handles clear cases; Qwen handles the rest and can choose Other. Your assistant and existing-category reviews continue to use Qwen.{% if read_only_mirror %} This preview cannot save changes to the production snapshot.{% endif %}</p>{% endif %}
     <form class="settings-form" method="post" action="/api/local-ai">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <label class="check-label"><input id="local-ai-enabled" type="checkbox" name="enabled" {{ "checked" if local_ai_enabled }}> Enable local AI assistance</label>

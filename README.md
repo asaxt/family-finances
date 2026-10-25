@@ -51,6 +51,50 @@ Plaid or any financial institution.
 
 ## Categorization and rule review
 
+Optional **Fast classifier + Qwen** categorization uses a local GLiClass v4 model
+for clear cases, then local Qwen for uncertain cases. The classifier uses the
+installation's existing category labels, treatments, and bounded examples. It
+accepts scores of at least 0.60 with a lead of at least 0.25; these scores are
+ranking signals, not calibrated probabilities of correctness. Qwen chooses an
+existing category, using **Other** when no specific label is supported. Other
+must already exist with a non-transfer treatment. Mixed-mode assignments do not
+enter the AI review queue, and Other never creates recurring rules. Assistant
+chat and existing-category review continue to use Qwen.
+
+The default remains Qwen-only, so installations without the optional classifier
+runtime continue to work. To enable the mixed flow, install Python 3.12 separately
+from the app environment, then run these commands in the checkout:
+
+```sh
+python3.12 -m venv .classifier-venv
+.classifier-venv/bin/python -m pip install -r requirements-classifier.txt
+.classifier-venv/bin/python setup_classifier.py
+```
+
+Setup downloads pinned public model files from Hugging Face. Restart the app with
+`FAMILY_FINANCES_CATEGORIZATION_ENGINE=hybrid` in its environment; when using the
+provided launcher, add `export FAMILY_FINANCES_CATEGORIZATION_ENGINE=hybrid` to
+the ignored `.local.env`. Set it to `qwen` to return to Qwen-only categorization.
+Settings identifies when the mixed flow is selected. Local AI must still be
+enabled, and the existing Qwen model must be installed in Ollama.
+
+The optional worker currently supports macOS and Linux. It uses the Apple GPU
+on Apple Silicon and CPU on other supported systems. An explicit
+`FAMILY_FINANCES_CLASSIFIER_DEVICE=cpu` selects CPU on a Mac. The optional model
+and runtime occupy roughly 2 GB; actual memory use and latency depend on hardware,
+labels, and transaction text. They are excluded from Git.
+
+Inference loads cached safetensors offline with remote model code disabled.
+A bounded private subprocess pipe adds no network listener and sends no account
+identifiers or database handles to the classifier. It runs as the same operating
+system user, so this process separation is not a filesystem security sandbox.
+The integration disables model telemetry and discards worker diagnostics; it does
+not write request/response caches. Local Ollama settings remain a separate boundary.
+Known classifier context limits hand off to Qwen; runtime errors or invalid
+responses stop the batch. There is no automatic model download or hosted fallback
+during categorization. Category accuracy still requires checking with each
+installation's labels and transaction descriptions.
+
 Local AI categorization and statement imports save reusable, exact-description
 rules for the same account as each completed group is processed. AI-created rules
 remain lower priority than user rules and individual choices. Conflicting guesses,
